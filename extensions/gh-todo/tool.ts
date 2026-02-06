@@ -3,8 +3,11 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager, truncateHead, truncateTail, formatSize, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
+import { mkdtempSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { PI_TODO_LABEL, GhTodoParams, type GhTodoDetails } from "./types.js";
 import {
 	extractUserContent,
@@ -47,6 +50,37 @@ import {
 	fillPrTemplate,
 	createPr,
 } from "./pr.js";
+
+/**
+ * Apply truncation to text output, following Pi docs pattern:
+ * - Truncate using truncateHead or truncateTail with standard limits
+ * - If truncated, write full output to temp file
+ * - Append truncation notice with file path
+ */
+function applyTruncation(text: string, strategy: "head" | "tail"): string {
+	const truncationFn = strategy === "head" ? truncateHead : truncateTail;
+	const truncation = truncationFn(text, {
+		maxLines: DEFAULT_MAX_LINES,
+		maxBytes: DEFAULT_MAX_BYTES,
+	});
+
+	if (!truncation.truncated) {
+		return text;
+	}
+
+	// Write full output to temp file
+	const tempDir = mkdtempSync(join(tmpdir(), "pi-gh-todo-"));
+	const tempFile = join(tempDir, "output.txt");
+	writeFileSync(tempFile, text);
+
+	// Build result with truncation notice
+	let result = truncation.content;
+	result += `\n\n[Output truncated: ${truncation.outputLines} of ${truncation.totalLines} lines`;
+	result += ` (${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}).`;
+	result += ` Full output saved to: ${tempFile}]`;
+
+	return result;
+}
 
 export function registerTool(pi: ExtensionAPI, cachedIssues: { value: any[] }) {
 	pi.registerTool({
@@ -102,6 +136,9 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							}
 						}
 
+						// Apply truncation (beginning of list matters most)
+						text = applyTruncation(text, "head");
+
 						return {
 							content: [{ type: "text", text }],
 							details: { action: "list", issues } as GhTodoDetails,
@@ -146,6 +183,9 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						text += `\n\n--- Pi Agent Notes ---\n`;
 						text += agentNotes || "(no agent notes yet)";
 						
+						// Apply truncation (beginning of content matters most)
+						text = applyTruncation(text, "head");
+						
 						return {
 							content: [{ type: "text", text }],
 							details: { action: "view", issue, userContent, agentNotes } as GhTodoDetails,
@@ -181,6 +221,9 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						text += `\n\nDo not implement changes until the user explicitly says to proceed.`;
+						
+						// Apply truncation (beginning of content matters most)
+						text = applyTruncation(text, "head");
 						
 						return {
 							content: [{ type: "text", text }],
@@ -552,6 +595,9 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								}
 							}
 						}
+						
+						// Apply truncation (latest comments are most actionable)
+						text = applyTruncation(text, "tail");
 						
 						return {
 							content: [{ type: "text", text }],
