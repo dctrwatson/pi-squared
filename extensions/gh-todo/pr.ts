@@ -164,6 +164,10 @@ Focus on what feedback was addressed and how, not implementation details.`;
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 400, signal });
 
+		if (response.stopReason === "error") {
+			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
+		}
+
 		let summary = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map((c) => c.text)
@@ -229,6 +233,10 @@ Do not include sections for testing, screenshots, or other template sections - j
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 500, signal });
 
+		if (response.stopReason === "error") {
+			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
+		}
+
 		const summary = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map(c => c.text)
@@ -281,6 +289,10 @@ Return the filled template. Only fill the issue link and summary sections, leave
 			systemPrompt: "You are a helpful assistant that fills in PR templates. Only fill in the issue link and summary sections, leave other sections for the user.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 2000, signal });
+
+		if (response.stopReason === "error") {
+			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
+		}
 
 		const filled = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
