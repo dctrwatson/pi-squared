@@ -38,7 +38,7 @@ export interface PrComment {
 }
 
 export interface GhTodoDetails {
-	action: "list" | "add" | "view" | "plan" | "start" | "close" | "reopen" | "update" | "pr" | "feedback" | "pr-update";
+	action: string;
 	issues?: GhIssue[];
 	issue?: GhIssue;
 	userContent?: string;

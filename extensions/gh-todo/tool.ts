@@ -767,7 +767,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 					default:
 						return {
 							content: [{ type: "text", text: `Unknown action: ${params.action}` }],
-							details: { action: "list", error: `unknown action: ${params.action}` } as GhTodoDetails,
+							details: { action: params.action, error: `unknown action: ${params.action}` },
 							isError: true,
 						};
 				}
