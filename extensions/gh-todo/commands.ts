@@ -351,6 +351,10 @@ Keep it under 200 words.`;
 								messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }], timestamp: Date.now() }],
 							}, { apiKey });
 							
+							if (response.stopReason === "error") {
+								throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
+							}
+							
 							const summary = response.content
 								.filter((c): c is { type: "text"; text: string } => c.type === "text")
 								.map(c => c.text)
