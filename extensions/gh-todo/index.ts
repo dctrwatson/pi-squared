@@ -18,20 +18,17 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { GhIssue, GhTodoDetails } from "./types.js";
+import type { GhTodoDetails } from "./types.js";
 import { PR_LABEL_CREATED, PR_LABEL_UPDATED, findEntryByToolCallId } from "./utils.js";
 import { registerTool } from "./tool.js";
 import { registerCommands } from "./commands.js";
 
 export default function (pi: ExtensionAPI) {
-	// Cache of issues (refreshed on each list action)
-	const cachedIssues: { value: GhIssue[] } = { value: [] };
-
 	// Register the gh_todo tool for the LLM
-	registerTool(pi, cachedIssues);
+	registerTool(pi);
 
 	// Register the /todo and /todo-pr commands for users
-	registerCommands(pi, cachedIssues);
+	registerCommands(pi);
 
 	// Label entries after successful PR actions for scoping pr-update.
 	// Uses turn_end (not tool_result) so session entries exist and can be found by toolCallId.
