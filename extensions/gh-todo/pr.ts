@@ -10,11 +10,11 @@ import { findLastPrCheckpointEntryId, getEntriesAfter } from "./utils.js";
 /**
  * Find PR template file
  */
-export async function findPrTemplate(pi: ExtensionAPI): Promise<string | null> {
+export async function findPrTemplate(pi: ExtensionAPI, signal?: AbortSignal): Promise<string | null> {
 	for (const location of PR_TEMPLATE_LOCATIONS) {
-		const result = await pi.exec("test", ["-f", location], { timeout: 1000 });
+		const result = await pi.exec("test", ["-f", location], { timeout: 1000, signal });
 		if (result.code === 0) {
-			const content = await pi.exec("cat", [location], { timeout: 5000 });
+			const content = await pi.exec("cat", [location], { timeout: 5000, signal });
 			if (content.code === 0) {
 				return content.stdout;
 			}
@@ -107,7 +107,8 @@ export async function generatePrUpdateSummary(
 	scopedContext: string,
 	commits: { hash: string; message: string }[],
 	prNumber: number,
-	ctx: ExtensionContext
+	ctx: ExtensionContext,
+	signal?: AbortSignal
 ): Promise<string> {
 	const hasCommits = commits.length > 0;
 
@@ -175,7 +176,7 @@ Focus on what feedback was addressed and how, not implementation details.`;
 		const response = await complete(model, {
 			system: "You are a helpful assistant that writes concise GitHub PR update comments summarizing how reviewer feedback was addressed.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-		}, { apiKey, maxTokens: 400 });
+		}, { apiKey, maxTokens: 400, signal });
 
 		let summary = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -204,7 +205,8 @@ export async function generatePrSummary(
 	issue: GhIssue,
 	sessionContext: string,
 	closeIssue: boolean,
-	ctx: ExtensionContext
+	ctx: ExtensionContext,
+	signal?: AbortSignal
 ): Promise<string> {
 	const issueLink = closeIssue ? `Closes #${issue.number}` : `Related: #${issue.number}`;
 	
@@ -256,7 +258,7 @@ Do not include sections for testing, screenshots, or other template sections - j
 		const response = await complete(model, {
 			system: "You are a helpful assistant that writes concise GitHub PR descriptions.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-		}, { apiKey, maxTokens: 500 });
+		}, { apiKey, maxTokens: 500, signal });
 
 		const summary = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -277,7 +279,8 @@ export async function fillPrTemplate(
 	issue: GhIssue,
 	sessionContext: string,
 	closeIssue: boolean,
-	ctx: ExtensionContext
+	ctx: ExtensionContext,
+	signal?: AbortSignal
 ): Promise<string> {
 	const issueLink = closeIssue ? `Closes #${issue.number}` : `Related: #${issue.number}`;
 
@@ -324,7 +327,7 @@ Return the filled template. Only fill the issue link and summary sections, leave
 		const response = await complete(model, {
 			system: "You are a helpful assistant that fills in PR templates. Only fill in the issue link and summary sections, leave other sections for the user.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-		}, { apiKey, maxTokens: 2000 });
+		}, { apiKey, maxTokens: 2000, signal });
 
 		const filled = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -344,12 +347,13 @@ export async function createPr(
 	pi: ExtensionAPI,
 	title: string,
 	body: string,
-	branch: string
+	branch: string,
+	signal?: AbortSignal
 ): Promise<{ url: string; number: number }> {
 	const result = await pi.exec(
 		"gh",
 		["pr", "create", "--title", title, "--body", body, "--head", branch],
-		{ timeout: 30000 }
+		{ timeout: 30000, signal }
 	);
 	
 	if (result.code !== 0) {
