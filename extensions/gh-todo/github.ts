@@ -216,7 +216,9 @@ export async function hasUncommittedChanges(pi: ExtensionAPI, signal?: AbortSign
  * Push current branch to origin
  */
 export async function pushBranch(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<void> {
-	const result = await pi.exec("git", ["push", "-u", "origin", branch], { timeout: 30000, signal });
+	const needsUpstream = !(await hasUpstream(pi, branch, signal));
+	const args = needsUpstream ? ["push", "-u", "origin", branch] : ["push", "origin", branch];
+	const result = await pi.exec("git", args, { timeout: 30000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to push branch: ${result.stderr}`);
 	}
