@@ -43,7 +43,7 @@ import {
 } from "./pr.js";
 import { TodoListComponent } from "./ui.js";
 
-export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] }) {
+export function registerCommands(pi: ExtensionAPI) {
 	// Register the /todo command for users
 	pi.registerCommand("todo", {
 		description: "Interactive GitHub issues todo manager (pi-todo label)",
@@ -64,7 +64,6 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 			let issues: GhIssue[];
 			try {
 				issues = await listIssues(pi, true);
-				cachedIssues.value = issues;
 			} catch (err) {
 				ctx.ui.setStatus("gh-todo", undefined);
 				const message = err instanceof Error ? err.message : String(err);
@@ -87,7 +86,6 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 							switch (action) {
 								case "refresh": {
 									const refreshed = await listIssues(pi, true);
-									cachedIssues.value = refreshed;
 									component.updateIssues(refreshed);
 									component.setStatus("Refreshed", "success");
 									break;
@@ -101,7 +99,6 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 										if (!refreshed.find(i => i.number === newIssue.number)) {
 											refreshed = [newIssue, ...refreshed];
 										}
-										cachedIssues.value = refreshed;
 										component.updateIssues(refreshed);
 										const openCount = refreshed.filter(i => i.state === "open").length;
 										component.setStatus(`Created #${newIssue.number}: ${newIssue.title} (${openCount} open)`, "success");
@@ -128,7 +125,6 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 									if (issue) {
 										await closeIssue(pi, issue.number);
 										const refreshed = await listIssues(pi, true);
-										cachedIssues.value = refreshed;
 										component.updateIssues(refreshed);
 										component.setStatus(`Closed #${issue.number}`, "info");
 									}
@@ -138,7 +134,6 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 									if (issue) {
 										await reopenIssue(pi, issue.number);
 										const refreshed = await listIssues(pi, true);
-										cachedIssues.value = refreshed;
 										component.updateIssues(refreshed);
 										component.setStatus(`Reopened #${issue.number}`, "info");
 									}

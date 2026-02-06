@@ -82,7 +82,7 @@ function applyTruncation(text: string, strategy: "head" | "tail"): string {
 	return result;
 }
 
-export function registerTool(pi: ExtensionAPI, cachedIssues: { value: any[] }) {
+export function registerTool(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "gh_todo",
 		label: "GitHub Todo",
@@ -115,7 +115,6 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 				switch (params.action) {
 					case "list": {
 						const issues = await listIssues(pi, true, signal);
-						cachedIssues.value = issues;
 						const openIssues = issues.filter((i) => i.state === "open");
 						const closedIssues = issues.filter((i) => i.state === "closed");
 
