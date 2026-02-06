@@ -19,7 +19,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { GhIssue, GhTodoDetails } from "./types.js";
-import { PR_LABEL_CREATED, PR_LABEL_UPDATED } from "./utils.js";
+import { PR_LABEL_CREATED, PR_LABEL_UPDATED, findEntryByToolCallId } from "./utils.js";
 import { registerTool } from "./tool.js";
 import { registerCommands } from "./commands.js";
 
@@ -33,21 +33,27 @@ export default function (pi: ExtensionAPI) {
 	// Register the /todo and /todo-pr commands for users
 	registerCommands(pi, cachedIssues);
 
-	// Label entries after successful PR actions for scoping pr-update
-	pi.on("tool_result", async (event, ctx) => {
-		if (event.toolName !== "gh_todo") return;
+	// Label entries after successful PR actions for scoping pr-update.
+	// Uses turn_end (not tool_result) so session entries exist and can be found by toolCallId.
+	pi.on("turn_end", async (event, ctx) => {
+		for (const toolResult of event.toolResults) {
+			if (toolResult.toolName !== "gh_todo") continue;
 
-		const details = event.details as GhTodoDetails | undefined;
-		if (!details || details.error) return;
+			const details = toolResult.details as GhTodoDetails | undefined;
+			if (!details || details.error) continue;
 
-		const leafId = ctx.sessionManager.getLeafId();
-		if (!leafId) return;
+			let label: string | undefined;
+			if (details.action === "pr") {
+				label = PR_LABEL_CREATED;
+			} else if (details.action === "pr-update" && details.commentOnly !== undefined) {
+				label = PR_LABEL_UPDATED;
+			}
+			if (!label) continue;
 
-		if (details.action === "pr") {
-			pi.setLabel(leafId, PR_LABEL_CREATED);
-		} else if (details.action === "pr-update" && details.commentOnly !== undefined) {
-			// Only label if pr-update actually did something (commentOnly is set)
-			pi.setLabel(leafId, PR_LABEL_UPDATED);
+			const entry = findEntryByToolCallId(ctx, toolResult.toolCallId);
+			if (entry) {
+				pi.setLabel(entry.id, label);
+			}
 		}
 	});
 

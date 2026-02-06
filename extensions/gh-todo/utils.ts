@@ -2,11 +2,30 @@
  * Utility functions for gh-todo extension
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { PI_SECTION_START, PI_SECTION_END, PI_SECTION_TITLE, type GhIssue } from "./types.js";
 
 export const PR_LABEL_CREATED = "pr-created";
 export const PR_LABEL_UPDATED = "pr-update";
+
+/**
+ * Find the session entry for a specific tool call by its toolCallId.
+ * Scans the current branch in reverse for a tool result message entry matching the given ID.
+ * Returns the entry, or null if not found.
+ */
+export function findEntryByToolCallId(ctx: ExtensionContext, toolCallId: string): SessionEntry | null {
+	const entries = ctx.sessionManager.getBranch();
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type === "message") {
+			const msg = entry.message as { role?: string; toolCallId?: string };
+			if (msg.role === "toolResult" && msg.toolCallId === toolCallId) {
+				return entry;
+			}
+		}
+	}
+	return null;
+}
 
 /**
  * Wrap content in a collapsible GitHub markdown section
