@@ -94,7 +94,7 @@ pr-update: pushes and posts auto-generated summary comment to PR. No 'body' need
 Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 		parameters: GhTodoParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			// Check for gh CLI
 			if (!(await checkGhCli(pi, signal))) {
 				return {
@@ -490,7 +490,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Gather session context
-						const sessionContext = gatherSessionContext(_ctx);
+						const sessionContext = gatherSessionContext(ctx);
 						
 						// Check for PR template
 						const template = await findPrTemplate(pi, signal);
@@ -506,9 +506,9 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						// Generate PR body
 						let prBody: string;
 						if (template) {
-							prBody = await fillPrTemplate(template, issue, sessionContext, shouldClose, _ctx, signal);
+							prBody = await fillPrTemplate(template, issue, sessionContext, shouldClose, ctx, signal);
 						} else {
-							prBody = await generatePrSummary(issue, sessionContext, shouldClose, _ctx, signal);
+							prBody = await generatePrSummary(issue, sessionContext, shouldClose, ctx, signal);
 						}
 						
 						if (signal?.aborted) {
@@ -640,7 +640,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Verify there's a PR checkpoint label (from 'pr' or previous 'pr-update')
-						const checkpointId = findLastPrCheckpointEntryId(_ctx);
+						const checkpointId = findLastPrCheckpointEntryId(ctx);
 						if (!checkpointId) {
 							return {
 								content: [{ type: "text", text: "Error: No PR checkpoint found. Create a PR first with the 'pr' action." }],
@@ -667,7 +667,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						
 						// Gather scoped data
 						const commits = await getUnpushedCommits(pi, currentBranch, signal);
-						const scopedContext = gatherScopedSessionContext(_ctx);
+						const scopedContext = gatherScopedSessionContext(ctx);
 						const hasCommits = commits.length > 0;
 						const hasContext = scopedContext.trim().length > 0;
 						
@@ -708,7 +708,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Auto-generate summary
-						const commentBody = await generatePrUpdateSummary(scopedContext, commits, pr.number, _ctx, signal);
+						const commentBody = await generatePrUpdateSummary(scopedContext, commits, pr.number, ctx, signal);
 						
 						if (signal?.aborted) {
 							return {
