@@ -2,7 +2,7 @@
  * Command handlers for gh-todo extension
  */
 
-import { complete, getModel, getEnvApiKey } from "@mariozechner/pi-ai";
+import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { type GhIssue } from "./types.js";
@@ -14,6 +14,7 @@ import {
 	extractIssueNumberFromSession,
 	extractIssueNumberFromBranch,
 	isMainBranch,
+	getSmallModel,
 } from "./utils.js";
 import {
 	checkGhCli,
@@ -378,37 +379,21 @@ Keep it under 200 words.`;
 					ctx.ui.setStatus("gh-todo", "Generating summary...");
 					
 					try {
-						// Try Claude Haiku first, fall back to current model
-						let model: any = null;
-						try {
-							if (getEnvApiKey("anthropic")) {
-								model = getModel("anthropic", "claude-haiku-4-5");
-							}
-						} catch {
-							// Haiku not available
-						}
-						
-						if (!model) {
-							model = ctx.model;
-						}
-						
-						if (model) {
-							const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
+						const result = await getSmallModel(ctx);
+						if (result) {
+							const { model, apiKey } = result;
+							const response = await complete(model, {
+								systemPrompt: "You are a helpful assistant that writes concise GitHub issue progress comments.",
+								messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }], timestamp: Date.now() }],
+							}, { apiKey });
 							
-							if (apiKey) {
-								const response = await complete(model, {
-									systemPrompt: "You are a helpful assistant that writes concise GitHub issue progress comments.",
-									messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }], timestamp: Date.now() }],
-								}, { apiKey });
-								
-								const summary = response.content
-									.filter((c): c is { type: "text"; text: string } => c.type === "text")
-									.map(c => c.text)
-									.join("");
-								
-								if (summary) {
-									draftSummary = summary;
-								}
+							const summary = response.content
+								.filter((c): c is { type: "text"; text: string } => c.type === "text")
+								.map(c => c.text)
+								.join("");
+							
+							if (summary) {
+								draftSummary = summary;
 							}
 						}
 					} catch (err) {

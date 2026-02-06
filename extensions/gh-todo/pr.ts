@@ -2,10 +2,10 @@
  * PR-related functions for gh-todo extension
  */
 
-import { complete, getModel, getEnvApiKey } from "@mariozechner/pi-ai";
+import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { PR_TEMPLATE_LOCATIONS, type GhIssue } from "./types.js";
-import { findLastPrCheckpointEntryId, getEntriesAfter } from "./utils.js";
+import { findLastPrCheckpointEntryId, getEntriesAfter, getSmallModel } from "./utils.js";
 
 /**
  * Find PR template file
@@ -133,28 +133,11 @@ export async function generatePrUpdateSummary(
 	}
 
 	try {
-		// Try Claude Haiku first
-		let model: any = null;
-		try {
-			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5");
-			}
-		} catch {
-			// Haiku not available
-		}
-
-		if (!model) {
-			model = ctx.model;
-		}
-
-		if (!model) {
+		const result = await getSmallModel(ctx);
+		if (!result) {
 			return fallback;
 		}
-
-		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
-		if (!apiKey) {
-			return fallback;
-		}
+		const { model, apiKey } = result;
 
 		let commitContext = "";
 		if (hasCommits) {
@@ -220,28 +203,11 @@ export async function generatePrSummary(
 	}
 
 	try {
-		// Try Claude Haiku
-		let model: any = null;
-		try {
-			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5");
-			}
-		} catch {
-			// Haiku not available
-		}
-
-		if (!model) {
-			model = ctx.model;
-		}
-
-		if (!model) {
+		const result = await getSmallModel(ctx);
+		if (!result) {
 			return defaultBody;
 		}
-
-		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
-		if (!apiKey) {
-			return defaultBody;
-		}
+		const { model, apiKey } = result;
 
 		const prompt = `Generate a brief PR description for the following changes. Keep it concise (under 200 words).
 
@@ -287,28 +253,12 @@ export async function fillPrTemplate(
 	const issueLink = closeIssue ? `Closes #${issue.number}` : `Related: #${issue.number}`;
 
 	try {
-		let model: any = null;
-		try {
-			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5");
-			}
-		} catch {
-			// Haiku not available
-		}
-
-		if (!model) {
-			model = ctx.model;
-		}
-
-		if (!model) {
+		const result = await getSmallModel(ctx);
+		if (!result) {
 			// Fallback: prepend issue link to template
 			return `${issueLink}\n\n${template}`;
 		}
-
-		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
-		if (!apiKey) {
-			return `${issueLink}\n\n${template}`;
-		}
+		const { model, apiKey } = result;
 
 		const prompt = `Fill in this PR template. You should ONLY fill in:
 1. Place "${issueLink}" in the appropriate section (usually near the top, or in a "Related Issues" section)
