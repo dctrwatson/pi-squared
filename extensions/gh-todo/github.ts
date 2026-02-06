@@ -9,32 +9,32 @@ import { parseIssues, parseIssue, updatePiSection } from "./utils.js";
 /**
  * Check if gh CLI is available
  */
-export async function checkGhCli(pi: ExtensionAPI): Promise<boolean> {
-	const result = await pi.exec("which", ["gh"], { timeout: 5000 });
+export async function checkGhCli(pi: ExtensionAPI, signal?: AbortSignal): Promise<boolean> {
+	const result = await pi.exec("which", ["gh"], { timeout: 5000, signal });
 	return result.code === 0;
 }
 
 /**
  * Ensure the pi-todo label exists
  */
-export async function ensureLabel(pi: ExtensionAPI): Promise<void> {
+export async function ensureLabel(pi: ExtensionAPI, signal?: AbortSignal): Promise<void> {
 	// Try to create label (will fail silently if exists)
 	await pi.exec(
 		"gh",
 		["label", "create", PI_TODO_LABEL, "--description", "Todo item managed by pi", "--color", "7057ff"],
-		{ timeout: 10000 }
+		{ timeout: 10000, signal }
 	);
 }
 
 /**
  * List all issues with pi-todo label
  */
-export async function listIssues(pi: ExtensionAPI, includesClosed = false): Promise<GhIssue[]> {
+export async function listIssues(pi: ExtensionAPI, includesClosed = false, signal?: AbortSignal): Promise<GhIssue[]> {
 	const stateArg = includesClosed ? "all" : "open";
 	const result = await pi.exec(
 		"gh",
 		["issue", "list", "--label", PI_TODO_LABEL, "--state", stateArg, "--json", "number,title,state,body,labels,assignees,url,createdAt,updatedAt", "--limit", "100"],
-		{ timeout: 30000 }
+		{ timeout: 30000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to list issues: ${result.stderr}`);
@@ -46,12 +46,12 @@ export async function listIssues(pi: ExtensionAPI, includesClosed = false): Prom
  * Create a new issue
  * The body is treated as user content (not wrapped in Pi Agent Notes)
  */
-export async function createIssue(pi: ExtensionAPI, title: string, body?: string): Promise<GhIssue> {
-	await ensureLabel(pi);
+export async function createIssue(pi: ExtensionAPI, title: string, body?: string, signal?: AbortSignal): Promise<GhIssue> {
+	await ensureLabel(pi, signal);
 	const args = ["issue", "create", "--title", title, "--label", PI_TODO_LABEL];
 	// Body is user content - Pi Agent Notes section is added later via update
 	args.push("--body", body || "");
-	const result = await pi.exec("gh", args, { timeout: 30000 });
+	const result = await pi.exec("gh", args, { timeout: 30000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to create issue: ${result.stderr}`);
 	}
@@ -62,36 +62,36 @@ export async function createIssue(pi: ExtensionAPI, title: string, body?: string
 	}
 	const issueNum = parseInt(match[1], 10);
 	// Fetch the created issue
-	return await getIssue(pi, issueNum);
+	return await getIssue(pi, issueNum, signal);
 }
 
 /**
  * Update the pi-managed section of an issue's body
  */
-export async function updateIssueNotes(pi: ExtensionAPI, number: number, notes: string): Promise<GhIssue> {
+export async function updateIssueNotes(pi: ExtensionAPI, number: number, notes: string, signal?: AbortSignal): Promise<GhIssue> {
 	// Get current issue to preserve non-pi content
-	const current = await getIssue(pi, number);
+	const current = await getIssue(pi, number, signal);
 	const newBody = updatePiSection(current.body, notes);
 	
 	const result = await pi.exec(
 		"gh",
 		["issue", "edit", String(number), "--body", newBody],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to update issue #${number}: ${result.stderr}`);
 	}
-	return await getIssue(pi, number);
+	return await getIssue(pi, number, signal);
 }
 
 /**
  * Get a single issue by number
  */
-export async function getIssue(pi: ExtensionAPI, number: number): Promise<GhIssue> {
+export async function getIssue(pi: ExtensionAPI, number: number, signal?: AbortSignal): Promise<GhIssue> {
 	const result = await pi.exec(
 		"gh",
 		["issue", "view", String(number), "--json", "number,title,state,body,labels,assignees,url,createdAt,updatedAt"],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to get issue #${number}: ${result.stderr}`);
@@ -106,11 +106,11 @@ export async function getIssue(pi: ExtensionAPI, number: number): Promise<GhIssu
 /**
  * Add a comment to an issue without closing it
  */
-export async function addIssueComment(pi: ExtensionAPI, number: number, comment: string): Promise<void> {
+export async function addIssueComment(pi: ExtensionAPI, number: number, comment: string, signal?: AbortSignal): Promise<void> {
 	const result = await pi.exec(
 		"gh",
 		["issue", "comment", String(number), "--body", comment],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to add comment to issue #${number}: ${result.stderr}`);
@@ -120,45 +120,45 @@ export async function addIssueComment(pi: ExtensionAPI, number: number, comment:
 /**
  * Close an issue (not completed)
  */
-export async function closeIssue(pi: ExtensionAPI, number: number): Promise<GhIssue> {
+export async function closeIssue(pi: ExtensionAPI, number: number, signal?: AbortSignal): Promise<GhIssue> {
 	const result = await pi.exec(
 		"gh",
 		["issue", "close", String(number), "--reason", "not planned"],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to close issue #${number}: ${result.stderr}`);
 	}
-	return await getIssue(pi, number);
+	return await getIssue(pi, number, signal);
 }
 
 /**
  * Reopen an issue
  */
-export async function reopenIssue(pi: ExtensionAPI, number: number): Promise<GhIssue> {
+export async function reopenIssue(pi: ExtensionAPI, number: number, signal?: AbortSignal): Promise<GhIssue> {
 	const result = await pi.exec(
 		"gh",
 		["issue", "reopen", String(number)],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	if (result.code !== 0) {
 		throw new Error(`Failed to reopen issue #${number}: ${result.stderr}`);
 	}
-	return await getIssue(pi, number);
+	return await getIssue(pi, number, signal);
 }
 
 /**
  * Open issue in browser
  */
-export async function openInBrowser(pi: ExtensionAPI, url: string): Promise<void> {
-	await pi.exec("open", [url], { timeout: 5000 });
+export async function openInBrowser(pi: ExtensionAPI, url: string, signal?: AbortSignal): Promise<void> {
+	await pi.exec("open", [url], { timeout: 5000, signal });
 }
 
 /**
  * Pull the current branch from origin (fast-forward only)
  */
-export async function pullBranch(pi: ExtensionAPI): Promise<void> {
-	const result = await pi.exec("git", ["pull", "--ff-only"], { timeout: 30000 });
+export async function pullBranch(pi: ExtensionAPI, signal?: AbortSignal): Promise<void> {
+	const result = await pi.exec("git", ["pull", "--ff-only"], { timeout: 30000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to pull: ${result.stderr}`);
 	}
@@ -167,8 +167,8 @@ export async function pullBranch(pi: ExtensionAPI): Promise<void> {
 /**
  * Checkout a branch, creating it if it doesn't exist
  */
-export async function checkoutNewBranch(pi: ExtensionAPI, branch: string): Promise<void> {
-	const result = await pi.exec("git", ["checkout", "-b", branch], { timeout: 10000 });
+export async function checkoutNewBranch(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<void> {
+	const result = await pi.exec("git", ["checkout", "-b", branch], { timeout: 10000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to create branch "${branch}": ${result.stderr}`);
 	}
@@ -177,16 +177,16 @@ export async function checkoutNewBranch(pi: ExtensionAPI, branch: string): Promi
 /**
  * Check if a local branch exists
  */
-export async function branchExists(pi: ExtensionAPI, branch: string): Promise<boolean> {
-	const result = await pi.exec("git", ["rev-parse", "--verify", branch], { timeout: 5000 });
+export async function branchExists(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<boolean> {
+	const result = await pi.exec("git", ["rev-parse", "--verify", branch], { timeout: 5000, signal });
 	return result.code === 0;
 }
 
 /**
  * Checkout an existing branch
  */
-export async function checkoutBranch(pi: ExtensionAPI, branch: string): Promise<void> {
-	const result = await pi.exec("git", ["checkout", branch], { timeout: 10000 });
+export async function checkoutBranch(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<void> {
+	const result = await pi.exec("git", ["checkout", branch], { timeout: 10000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to checkout branch "${branch}": ${result.stderr}`);
 	}
@@ -195,8 +195,8 @@ export async function checkoutBranch(pi: ExtensionAPI, branch: string): Promise<
 /**
  * Get current git branch name
  */
-export async function getCurrentBranch(pi: ExtensionAPI): Promise<string> {
-	const result = await pi.exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { timeout: 5000 });
+export async function getCurrentBranch(pi: ExtensionAPI, signal?: AbortSignal): Promise<string> {
+	const result = await pi.exec("git", ["rev-parse", "--abbrev-ref", "HEAD"], { timeout: 5000, signal });
 	if (result.code !== 0) {
 		throw new Error("Not in a git repository or failed to get branch name");
 	}
@@ -206,16 +206,16 @@ export async function getCurrentBranch(pi: ExtensionAPI): Promise<string> {
 /**
  * Check if there are uncommitted changes
  */
-export async function hasUncommittedChanges(pi: ExtensionAPI): Promise<boolean> {
-	const result = await pi.exec("git", ["status", "--porcelain"], { timeout: 5000 });
+export async function hasUncommittedChanges(pi: ExtensionAPI, signal?: AbortSignal): Promise<boolean> {
+	const result = await pi.exec("git", ["status", "--porcelain"], { timeout: 5000, signal });
 	return result.stdout.trim().length > 0;
 }
 
 /**
  * Push current branch to origin
  */
-export async function pushBranch(pi: ExtensionAPI, branch: string): Promise<void> {
-	const result = await pi.exec("git", ["push", "-u", "origin", branch], { timeout: 30000 });
+export async function pushBranch(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<void> {
+	const result = await pi.exec("git", ["push", "-u", "origin", branch], { timeout: 30000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to push branch: ${result.stderr}`);
 	}
@@ -224,19 +224,19 @@ export async function pushBranch(pi: ExtensionAPI, branch: string): Promise<void
 /**
  * Check if branch has upstream
  */
-export async function hasUpstream(pi: ExtensionAPI, branch: string): Promise<boolean> {
-	const result = await pi.exec("git", ["rev-parse", "--abbrev-ref", `${branch}@{u}`], { timeout: 5000 });
+export async function hasUpstream(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<boolean> {
+	const result = await pi.exec("git", ["rev-parse", "--abbrev-ref", `${branch}@{u}`], { timeout: 5000, signal });
 	return result.code === 0;
 }
 
 /**
  * Get PR number for current branch
  */
-export async function getPrForBranch(pi: ExtensionAPI, branch: string): Promise<{ number: number; url: string; state: string } | null> {
+export async function getPrForBranch(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<{ number: number; url: string; state: string } | null> {
 	const result = await pi.exec(
 		"gh",
 		["pr", "view", branch, "--json", "number,url,state"],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	
 	if (result.code !== 0) {
@@ -260,14 +260,14 @@ export async function getPrForBranch(pi: ExtensionAPI, branch: string): Promise<
  * Returns commits between origin/<branch>..HEAD.
  * If no upstream exists, compares against main/master.
  */
-export async function getUnpushedCommits(pi: ExtensionAPI, branch: string): Promise<{ hash: string; message: string }[]> {
+export async function getUnpushedCommits(pi: ExtensionAPI, branch: string, signal?: AbortSignal): Promise<{ hash: string; message: string }[]> {
 	let range: string;
 
-	if (await hasUpstream(pi, branch)) {
+	if (await hasUpstream(pi, branch, signal)) {
 		range = `origin/${branch}..HEAD`;
 	} else {
 		// No upstream — compare against main/master to get all branch commits
-		const mainResult = await pi.exec("git", ["rev-parse", "--verify", "main"], { timeout: 5000 });
+		const mainResult = await pi.exec("git", ["rev-parse", "--verify", "main"], { timeout: 5000, signal });
 		const baseBranch = mainResult.code === 0 ? "main" : "master";
 		range = `${baseBranch}..HEAD`;
 	}
@@ -275,7 +275,7 @@ export async function getUnpushedCommits(pi: ExtensionAPI, branch: string): Prom
 	const result = await pi.exec(
 		"git",
 		["log", range, "--oneline", "--no-decorate"],
-		{ timeout: 10000 }
+		{ timeout: 10000, signal }
 	);
 
 	if (result.code !== 0 || !result.stdout.trim()) {
@@ -295,7 +295,7 @@ export async function getUnpushedCommits(pi: ExtensionAPI, branch: string): Prom
 /**
  * Get PR comments and reviews
  */
-export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise<{
+export async function getPrFeedback(pi: ExtensionAPI, prNumber: number, signal?: AbortSignal): Promise<{
 	reviewComments: Array<{ author: string; body: string; path?: string; line?: number; state?: string; createdAt: string }>;
 	conversationComments: Array<{ author: string; body: string; createdAt: string }>;
 }> {
@@ -303,7 +303,7 @@ export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise
 	const conversationComments: Array<{ author: string; body: string; createdAt: string }> = [];
 	
 	// Get repository info
-	const repoResult = await pi.exec("gh", ["repo", "view", "--json", "owner,name"], { timeout: 5000 });
+	const repoResult = await pi.exec("gh", ["repo", "view", "--json", "owner,name"], { timeout: 5000, signal });
 	if (repoResult.code !== 0) {
 		throw new Error("Failed to get repository info");
 	}
@@ -322,7 +322,7 @@ export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise
 	const reviewResult = await pi.exec(
 		"gh",
 		["api", `/repos/${owner}/${repo}/pulls/${prNumber}/comments`],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	
 	if (reviewResult.code === 0) {
@@ -346,7 +346,7 @@ export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise
 	const commentResult = await pi.exec(
 		"gh",
 		["api", `/repos/${owner}/${repo}/issues/${prNumber}/comments`],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	
 	if (commentResult.code === 0) {
@@ -368,7 +368,7 @@ export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise
 	const reviewsResult = await pi.exec(
 		"gh",
 		["api", `/repos/${owner}/${repo}/pulls/${prNumber}/reviews`],
-		{ timeout: 15000 }
+		{ timeout: 15000, signal }
 	);
 	
 	if (reviewsResult.code === 0) {
@@ -390,4 +390,18 @@ export async function getPrFeedback(pi: ExtensionAPI, prNumber: number): Promise
 	}
 	
 	return { reviewComments, conversationComments };
+}
+
+/**
+ * Add a comment to a PR
+ */
+export async function addPrComment(pi: ExtensionAPI, prNumber: number, body: string, signal?: AbortSignal): Promise<void> {
+	const result = await pi.exec(
+		"gh",
+		["pr", "comment", String(prNumber), "--body", body],
+		{ timeout: 15000, signal }
+	);
+	if (result.code !== 0) {
+		throw new Error(`Failed to add comment to PR #${prNumber}: ${result.stderr}`);
+	}
 }
