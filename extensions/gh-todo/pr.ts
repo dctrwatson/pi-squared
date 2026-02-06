@@ -9,6 +9,16 @@ import { PR_TEMPLATE_LOCATIONS, type GhIssue } from "./types.js";
 import { findLastPrCheckpointEntryId, getEntriesAfter, getSmallModel } from "./utils.js";
 
 /**
+ * Strip wrapping markdown code fences from LLM output.
+ * Handles ```markdown ... ```, ```md ... ```, and bare ``` ... ```.
+ */
+function stripCodeFences(text: string): string {
+	const trimmed = text.trim();
+	const match = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n\s*```\s*$/);
+	return match ? match[1] : trimmed;
+}
+
+/**
  * Find PR template file
  */
 export function findPrTemplate(): string | null {
@@ -168,10 +178,12 @@ Focus on what feedback was addressed and how, not implementation details.`;
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
 		}
 
-		let summary = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map((c) => c.text)
-			.join("");
+		let summary = stripCodeFences(
+			response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("")
+		);
 
 		if (!summary) {
 			return fallback;
@@ -237,10 +249,12 @@ Do not include sections for testing, screenshots, or other template sections - j
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
 		}
 
-		const summary = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map(c => c.text)
-			.join("");
+		const summary = stripCodeFences(
+			response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map(c => c.text)
+				.join("")
+		);
 
 		return summary || defaultBody;
 	} catch {
@@ -294,10 +308,12 @@ Return the filled template. Only fill the issue link and summary sections, leave
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
 		}
 
-		const filled = response.content
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map(c => c.text)
-			.join("");
+		const filled = stripCodeFences(
+			response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map(c => c.text)
+				.join("")
+		);
 
 		return filled || `${issueLink}\n\n${template}`;
 	} catch {
