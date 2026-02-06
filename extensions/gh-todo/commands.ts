@@ -49,7 +49,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 		description: "Interactive GitHub issues todo manager (pi-todo label)",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("/todo requires interactive mode", "error");
+				console.error("/todo requires interactive mode");
 				return;
 			}
 
@@ -409,7 +409,7 @@ Keep it under 200 words.`;
 		description: "Create a PR for the current todo issue",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("/todo-pr requires interactive mode", "error");
+				console.error("/todo-pr requires interactive mode");
 				return;
 			}
 
