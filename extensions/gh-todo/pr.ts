@@ -4,19 +4,20 @@
 
 import { complete } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
 import { PR_TEMPLATE_LOCATIONS, type GhIssue } from "./types.js";
 import { findLastPrCheckpointEntryId, getEntriesAfter, getSmallModel } from "./utils.js";
 
 /**
  * Find PR template file
  */
-export async function findPrTemplate(pi: ExtensionAPI, signal?: AbortSignal): Promise<string | null> {
+export function findPrTemplate(): string | null {
 	for (const location of PR_TEMPLATE_LOCATIONS) {
-		const result = await pi.exec("test", ["-f", location], { timeout: 1000, signal });
-		if (result.code === 0) {
-			const content = await pi.exec("cat", [location], { timeout: 5000, signal });
-			if (content.code === 0) {
-				return content.stdout;
+		if (existsSync(location)) {
+			try {
+				return readFileSync(location, "utf-8");
+			} catch {
+				// Continue to next location if read fails
 			}
 		}
 	}

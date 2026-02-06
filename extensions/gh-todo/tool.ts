@@ -513,7 +513,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						const sessionContext = gatherSessionContext(ctx);
 						
 						// Check for PR template
-						const template = await findPrTemplate(pi, signal);
+						const template = findPrTemplate();
 						const shouldClose = params.close === true;
 						
 						if (signal?.aborted) {

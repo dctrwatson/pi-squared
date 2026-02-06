@@ -504,7 +504,7 @@ Keep it under 200 words.`;
 				const sessionContext = gatherSessionContext(ctx);
 				
 				// Check for PR template
-				const template = await findPrTemplate(pi);
+				const template = findPrTemplate();
 				
 				// Generate PR body
 				let prBody: string;
