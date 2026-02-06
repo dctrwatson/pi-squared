@@ -61,7 +61,7 @@ export const GhTodoParams = Type.Object({
 		Type.String({ description: "Issue title (required for 'add')" })
 	),
 	body: Type.Optional(
-		Type.String({ description: "For 'add': user content/description. For 'update': content for Pi Agent Notes section." })
+		Type.String({ description: "For 'add': user content/description. For 'update': self-contained implementation notes for Pi Agent Notes section (injected into fresh sessions when work begins)." })
 	),
 	number: Type.Optional(
 		Type.Number({ description: "Issue number (required for 'view', 'plan', 'start', 'close', 'reopen', 'update')" })

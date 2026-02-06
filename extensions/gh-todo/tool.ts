@@ -88,7 +88,7 @@ export function registerTool(pi: ExtensionAPI, cachedIssues: { value: any[] }) {
 		label: "GitHub Todo",
 		description: `Manage todos via GitHub issues (${PI_TODO_LABEL} label).
 Actions: list, add, view, plan, start, close, reopen, update, pr, feedback, pr-update.
-plan: fetches issue for planning. Use 'update' after to save notes.
+plan: fetches issue for planning. Explore the codebase, propose an approach, get user approval, then use 'update' to save self-contained implementation notes.
 feedback: fetches PR review/conversation comments for current branch's PR.
 pr-update: pushes and posts auto-generated summary comment to PR. No 'body' needed.
 Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
@@ -204,22 +204,44 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						const userContent = extractUserContent(issue.body);
 						const agentNotes = extractPiSection(issue.body);
 						
-						let text = `⚠️ STOP: Present this plan to the user and wait. Do not implement anything.\n\n`;
-						text += `#${issue.number}: ${issue.title} [${issue.state}]\n`;
+						let text = `## Planning #${issue.number}: ${issue.title} [${issue.state}]\n`;
 						if (issue.assignees.length > 0) {
 							text += `Assigned: @${issue.assignees.join(", @")}\n`;
 						}
 						
 						if (userContent) {
-							text += `\n## User Content\n${userContent}`;
+							text += `\n### User Content\n${userContent}`;
 						}
 						
 						if (agentNotes) {
-							text += `\n\n## Existing Plan\n${agentNotes}`;
-							text += `\n\nReview the existing plan. Ask the user what to clarify, change, or update. Do not assume — wait for answers before using 'update'.`;
-						} else {
-							text += `\n\nNo plan yet. Ask the user specific questions about unclear requirements, technical decisions, scope, and dependencies. Wait for answers, then use 'update' to write the plan.`;
+							text += `\n\n### Existing Plan\n${agentNotes}`;
 						}
+						
+						text += `\n\n---\n`;
+						text += `### Planning Instructions\n\n`;
+						text += `**Context**: Notes saved via 'update' are stored on the GitHub issue and injected into a *fresh session* with no other context when work begins via 'start'. They must be self-contained, and written in clear markdown that the user can review and edit on GitHub before work starts.\n\n`;
+						
+						text += `**Steps**:\n`;
+						text += `1. Read the issue content above carefully\n`;
+						text += `2. Explore the codebase — read relevant files to understand current architecture, patterns, and conventions\n`;
+						text += `3. Propose an approach to the user, referencing specific files and code\n`;
+						text += `4. Ask targeted questions about anything still unclear\n`;
+						text += `5. Once the user is satisfied, present the full notes text for review\n`;
+						text += `6. Only save via 'update' after the user approves the notes\n\n`;
+						
+						text += `**Note structure** (what to save via 'update'):\n`;
+						text += `- **Goal**: Clear restatement of what needs to happen\n`;
+						text += `- **Approach**: Technical strategy and key decisions (with rationale)\n`;
+						text += `- **Key files**: Files to read and modify, with what changes to make\n`;
+						text += `- **Steps**: Ordered implementation steps\n`;
+						text += `- **Scope**: What's included/excluded, edge cases\n`;
+						text += `- **Done when**: How to verify the work is complete\n\n`;
+
+						if (agentNotes) {
+							text += `There is an existing plan above. Evaluate whether it is still accurate, identify gaps or issues, and propose specific refinements. Do not ask open-ended questions — suggest concrete changes.\n\n`;
+						}
+
+						text += `⚠️ Do not implement anything. Do not save notes until the user has reviewed and approved the plan text.\n`;
 						
 						// Apply truncation (beginning of content matters most)
 						text = applyTruncation(text, "head");
@@ -392,7 +414,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						const issue = await updateIssueNotes(pi, params.number, params.body, signal);
 						return {
-							content: [{ type: "text", text: `Updated notes on #${issue.number}: ${issue.title}` }],
+							content: [{ type: "text", text: `Updated notes on #${issue.number}: ${issue.title}\nThe user can review and edit the notes on the issue page: ${issue.url}` }],
 							details: { action: "update", issue } as GhTodoDetails,
 						};
 					}
