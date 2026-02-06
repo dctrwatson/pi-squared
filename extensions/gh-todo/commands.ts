@@ -214,11 +214,11 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 				const agentNotes = extractPiSection(issue.body);
 				const hasNotes = agentNotes && agentNotes.trim().length > 0;
 				
-				// Warn if notes are empty - prompt to continue or plan
+				// Warn if notes are empty - prompt to plan or continue
 				if (!hasNotes) {
 					const choice = await ctx.ui.select(
 						`⚠️ Pi Agent Notes are empty for #${issue.number}.`,
-						["Continue", "Plan"]
+						["Plan", "Continue"]
 					);
 					
 					if (choice === "Plan") {
