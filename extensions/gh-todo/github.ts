@@ -149,7 +149,10 @@ export async function reopenIssue(pi: ExtensionAPI, number: number, signal?: Abo
  * Open issue in browser
  */
 export async function openInBrowser(pi: ExtensionAPI, url: string, signal?: AbortSignal): Promise<void> {
-	await pi.exec("open", [url], { timeout: 5000, signal });
+	const platform = process.platform;
+	const cmd = platform === "darwin" ? "open" : platform === "win32" ? "cmd" : "xdg-open";
+	const args = platform === "win32" ? ["/c", "start", url] : [url];
+	await pi.exec(cmd, args, { timeout: 5000, signal });
 }
 
 /**
