@@ -295,6 +295,8 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							text += `\n\n⚠️ Warning: Pi Agent Notes are empty. Consider using 'plan' to understand the issue and 'update' to add notes before starting work.`;
 						}
 						
+						text += `\n\nDo not create a PR unless the user explicitly asks for it.`;
+						
 						return {
 							content: [{ type: "text", text }],
 							details: { action: "start", issue, sessionName: existingSession?.name ?? sessionName, sessionExists: !!existingSession } as GhTodoDetails,
