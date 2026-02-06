@@ -17,11 +17,10 @@ export function findEntryByToolCallId(ctx: ExtensionContext, toolCallId: string)
 	const entries = ctx.sessionManager.getBranch();
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (entry.type === "message") {
-			const msg = entry.message as { role?: string; toolCallId?: string };
-			if (msg.role === "toolResult" && msg.toolCallId === toolCallId) {
-				return entry;
-			}
+		if (!entry || entry.type !== "message") continue;
+		const msg = entry.message as { role?: string; toolCallId?: string };
+		if (msg.role === "toolResult" && msg.toolCallId === toolCallId) {
+			return entry;
 		}
 	}
 	return null;
@@ -54,7 +53,7 @@ export function extractPiSection(body: string): string | null {
 	// Extract content between markers, then between <details> tags
 	const section = body.slice(startIdx + PI_SECTION_START.length, endIdx);
 	const detailsMatch = section.match(/<details>[\s\S]*?<summary>[^<]*<\/summary>([\s\S]*?)<\/details>/);
-	return detailsMatch ? detailsMatch[1].trim() : null;
+	return detailsMatch?.[1] ? detailsMatch[1].trim() : null;
 }
 
 /**
@@ -173,7 +172,7 @@ export function parseIssue(json: string): GhIssue | null {
 export function extractIssueNumberFromSession(sessionName: string | undefined): number | null {
 	if (!sessionName) return null;
 	const match = sessionName.match(/^#(\d+):/);
-	return match ? parseInt(match[1], 10) : null;
+	return match?.[1] ? parseInt(match[1], 10) : null;
 }
 
 /**
@@ -181,7 +180,7 @@ export function extractIssueNumberFromSession(sessionName: string | undefined): 
  */
 export function extractIssueNumberFromBranch(branchName: string): number | null {
 	const match = branchName.match(/^todo\/(\d+)-/);
-	return match ? parseInt(match[1], 10) : null;
+	return match?.[1] ? parseInt(match[1], 10) : null;
 }
 
 /**
@@ -213,6 +212,7 @@ export function findLastPrCheckpointEntryId(ctx: ExtensionContext): string | nul
 	// Scan in reverse to find the most recent checkpoint
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
+		if (!entry) continue;
 		const label = ctx.sessionManager.getLabel(entry.id);
 		if (label === PR_LABEL_CREATED || label === PR_LABEL_UPDATED) {
 			return entry.id;

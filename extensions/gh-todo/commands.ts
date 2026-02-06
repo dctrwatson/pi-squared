@@ -129,7 +129,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 										const refreshed = await listIssues(pi, true);
 										cachedIssues.value = refreshed;
 										component.updateIssues(refreshed);
-										component.setStatus(`Closed #${issue.number}`, "success");
+										component.setStatus(`Closed #${issue.number}`, "info");
 									}
 									break;
 								}
@@ -139,7 +139,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 										const refreshed = await listIssues(pi, true);
 										cachedIssues.value = refreshed;
 										component.updateIssues(refreshed);
-										component.setStatus(`Reopened #${issue.number}`, "success");
+										component.setStatus(`Reopened #${issue.number}`, "info");
 									}
 									break;
 								}
@@ -199,7 +199,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 							ctx.ui.notify(`Checked out existing branch: ${targetBranch}`, "info");
 						} else {
 							await checkoutNewBranch(pi, targetBranch);
-							ctx.ui.notify(`Created branch: ${targetBranch}`, "success");
+							ctx.ui.notify(`Created branch: ${targetBranch}`, "info");
 						}
 					} catch (err) {
 						ctx.ui.setStatus("gh-todo", undefined);
@@ -252,7 +252,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 				} else if (!currentSessionName) {
 					// Session has no name - auto-rename and inject notes
 					pi.setSessionName(sessionName);
-					ctx.ui.notify(`Session "${sessionName}" ready. Starting work!`, "success");
+					ctx.ui.notify(`Session "${sessionName}" ready. Starting work!`, "info");
 					
 					// Inject agent notes
 					try {
@@ -289,7 +289,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 						
 						if (!newSessionResult.cancelled) {
 							pi.setSessionName(sessionName);
-							ctx.ui.notify(`Session "${sessionName}" created. Ready to work!`, "success");
+							ctx.ui.notify(`Session "${sessionName}" created. Ready to work!`, "info");
 							
 							// Inject agent notes into the new session
 							try {
@@ -313,7 +313,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 						}
 					} else if (choice === "Rename current session") {
 						pi.setSessionName(sessionName);
-						ctx.ui.notify(`Session renamed to "${sessionName}"`, "success");
+						ctx.ui.notify(`Session renamed to "${sessionName}"`, "info");
 					} else {
 						ctx.ui.notify(`Cancelled`, "info");
 					}
@@ -333,10 +333,12 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 						if (entry.type === "message") {
 							const msg = entry.message;
 							if (msg.role === "user") {
-								const text = msg.content.map((c: any) => c.type === "text" ? c.text : "").join("");
+								const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
+								const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
 								if (text) sessionContext += `User: ${text.slice(0, 500)}\n\n`;
 							} else if (msg.role === "assistant") {
-								const text = msg.content.map((c: any) => c.type === "text" ? c.text : "").join("");
+								const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
+								const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
 								if (text) sessionContext += `Assistant: ${text.slice(0, 500)}\n\n`;
 							} else if (msg.role === "toolResult" && !msg.isError) {
 								if (msg.toolName === "write" || msg.toolName === "edit") {
@@ -380,7 +382,7 @@ Keep it under 200 words.`;
 						let model: any = null;
 						try {
 							if (getEnvApiKey("anthropic")) {
-								model = getModel("anthropic", "claude-haiku-4-5-20241022");
+								model = getModel("anthropic", "claude-haiku-4-5");
 							}
 						} catch {
 							// Haiku not available
@@ -391,12 +393,12 @@ Keep it under 200 words.`;
 						}
 						
 						if (model) {
-							const apiKey = getEnvApiKey(model.provider as any) || ctx.modelRegistry.getApiKey(model.provider);
+							const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
 							
 							if (apiKey) {
 								const response = await complete(model, {
-									system: "You are a helpful assistant that writes concise GitHub issue progress comments.",
-									messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }] }],
+									systemPrompt: "You are a helpful assistant that writes concise GitHub issue progress comments.",
+									messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }], timestamp: Date.now() }],
 								}, { apiKey });
 								
 								const summary = response.content
@@ -433,7 +435,7 @@ Keep it under 200 words.`;
 					if (choice === "Post comment") {
 						try {
 							await addIssueComment(pi, issue.number, editedSummary.trim());
-							ctx.ui.notify(`Comment posted to #${issue.number}`, "success");
+							ctx.ui.notify(`Comment posted to #${issue.number}`, "info");
 						} catch (err) {
 							const message = err instanceof Error ? err.message : String(err);
 							ctx.ui.notify(`Failed to post comment: ${message}`, "error");
@@ -546,7 +548,7 @@ Keep it under 200 words.`;
 					return;
 				}
 				
-				const shouldClose = closeChoice?.includes("Closes");
+				const shouldClose = closeChoice ? closeChoice.includes("Closes") : false;
 				
 				// Gather session context
 				ctx.ui.setStatus("todo-pr", "Generating PR description...");
@@ -589,9 +591,9 @@ Keep it under 200 words.`;
 				ctx.ui.setStatus("todo-pr", "Creating PR...");
 				
 				try {
-					const pr = await createPr(pi, prTitle, editedBody, currentBranch);
+					const pr = await createPr(pi, prTitle, editedBody.trim(), currentBranch);
 					ctx.ui.setStatus("todo-pr", undefined);
-					ctx.ui.notify(`Created PR #${pr.number}: ${pr.url}`, "success");
+					ctx.ui.notify(`Created PR #${pr.number}: ${pr.url}`, "info");
 				} catch (err) {
 					ctx.ui.setStatus("todo-pr", undefined);
 					const message = err instanceof Error ? err.message : String(err);

@@ -36,10 +36,12 @@ export function gatherSessionContext(ctx: ExtensionContext): string {
 			if (entry.type === "message") {
 				const msg = entry.message;
 				if (msg.role === "user") {
-					const text = msg.content.map((c: any) => c.type === "text" ? c.text : "").join("");
+					const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
+					const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
 					if (text) sessionContext += `User: ${text.slice(0, 500)}\n\n`;
 				} else if (msg.role === "assistant") {
-					const text = msg.content.map((c: any) => c.type === "text" ? c.text : "").join("");
+					const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
+					const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
 					if (text) sessionContext += `Assistant: ${text.slice(0, 500)}\n\n`;
 				} else if (msg.role === "toolResult" && !msg.isError) {
 					if (msg.toolName === "write" || msg.toolName === "edit") {
@@ -135,7 +137,7 @@ export async function generatePrUpdateSummary(
 		let model: any = null;
 		try {
 			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5-20241022");
+				model = getModel("anthropic", "claude-haiku-4-5");
 			}
 		} catch {
 			// Haiku not available
@@ -149,7 +151,7 @@ export async function generatePrUpdateSummary(
 			return fallback;
 		}
 
-		const apiKey = getEnvApiKey(model.provider as any) || ctx.modelRegistry.getApiKey(model.provider);
+		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
 		if (!apiKey) {
 			return fallback;
 		}
@@ -174,8 +176,8 @@ ${hasCommits ? '3. End with a "### Commits" section listing the commits (I will 
 Focus on what feedback was addressed and how, not implementation details.`;
 
 		const response = await complete(model, {
-			system: "You are a helpful assistant that writes concise GitHub PR update comments summarizing how reviewer feedback was addressed.",
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+			systemPrompt: "You are a helpful assistant that writes concise GitHub PR update comments summarizing how reviewer feedback was addressed.",
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 400, signal });
 
 		let summary = response.content
@@ -222,7 +224,7 @@ export async function generatePrSummary(
 		let model: any = null;
 		try {
 			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5-20241022");
+				model = getModel("anthropic", "claude-haiku-4-5");
 			}
 		} catch {
 			// Haiku not available
@@ -236,7 +238,7 @@ export async function generatePrSummary(
 			return defaultBody;
 		}
 
-		const apiKey = getEnvApiKey(model.provider as any) || ctx.modelRegistry.getApiKey(model.provider);
+		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
 		if (!apiKey) {
 			return defaultBody;
 		}
@@ -256,8 +258,8 @@ Write a markdown PR body with:
 Do not include sections for testing, screenshots, or other template sections - just the issue link and summary.`;
 
 		const response = await complete(model, {
-			system: "You are a helpful assistant that writes concise GitHub PR descriptions.",
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+			systemPrompt: "You are a helpful assistant that writes concise GitHub PR descriptions.",
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 500, signal });
 
 		const summary = response.content
@@ -288,7 +290,7 @@ export async function fillPrTemplate(
 		let model: any = null;
 		try {
 			if (getEnvApiKey("anthropic")) {
-				model = getModel("anthropic", "claude-haiku-4-5-20241022");
+				model = getModel("anthropic", "claude-haiku-4-5");
 			}
 		} catch {
 			// Haiku not available
@@ -303,7 +305,7 @@ export async function fillPrTemplate(
 			return `${issueLink}\n\n${template}`;
 		}
 
-		const apiKey = getEnvApiKey(model.provider as any) || ctx.modelRegistry.getApiKey(model.provider);
+		const apiKey = getEnvApiKey(model.provider as any) || await ctx.modelRegistry.getApiKey(model.provider);
 		if (!apiKey) {
 			return `${issueLink}\n\n${template}`;
 		}
@@ -325,8 +327,8 @@ ${template}
 Return the filled template. Only fill the issue link and summary sections, leave everything else as-is.`;
 
 		const response = await complete(model, {
-			system: "You are a helpful assistant that fills in PR templates. Only fill in the issue link and summary sections, leave other sections for the user.",
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+			systemPrompt: "You are a helpful assistant that fills in PR templates. Only fill in the issue link and summary sections, leave other sections for the user.",
+			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
 		}, { apiKey, maxTokens: 2000, signal });
 
 		const filled = response.content
@@ -363,7 +365,7 @@ export async function createPr(
 	// Parse PR URL from output
 	const url = result.stdout.trim();
 	const prNumMatch = url.match(/\/pull\/(\d+)/);
-	const prNumber = prNumMatch ? parseInt(prNumMatch[1], 10) : 0;
+	const prNumber = prNumMatch?.[1] ? parseInt(prNumMatch[1], 10) : 0;
 	
 	return { url, number: prNumber };
 }

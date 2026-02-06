@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 	// Register /undo command
 	pi.registerCommand("undo", {
 		description: "Undo the last pi auto-commit",
-		handler: async (args, ctx) => {
+		handler: async (_args, ctx) => {
 			if (!inGitRepo) {
 				if (ctx.hasUI) {
 					ctx.ui.notify("Not in a git repository", "warning");
@@ -279,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (resetCode === 0) {
 					if (ctx.hasUI) {
-						ctx.ui.notify(`Undone: ${message}`, "success");
+						ctx.ui.notify(`Undone: ${message}`, "info");
 					}
 				} else {
 					if (ctx.hasUI) {

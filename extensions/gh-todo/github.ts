@@ -48,16 +48,14 @@ export async function listIssues(pi: ExtensionAPI, includesClosed = false, signa
  */
 export async function createIssue(pi: ExtensionAPI, title: string, body?: string, signal?: AbortSignal): Promise<GhIssue> {
 	await ensureLabel(pi, signal);
-	const args = ["issue", "create", "--title", title, "--label", PI_TODO_LABEL];
-	// Body is user content - Pi Agent Notes section is added later via update
-	args.push("--body", body || "");
+	const args: string[] = ["issue", "create", "--title", title, "--label", PI_TODO_LABEL, "--body", body ?? ""];
 	const result = await pi.exec("gh", args, { timeout: 30000, signal });
 	if (result.code !== 0) {
 		throw new Error(`Failed to create issue: ${result.stderr}`);
 	}
 	// Extract issue number from output URL
 	const match = result.stdout.match(/\/issues\/(\d+)/);
-	if (!match) {
+	if (!match?.[1]) {
 		throw new Error("Could not parse created issue number");
 	}
 	const issueNum = parseInt(match[1], 10);
