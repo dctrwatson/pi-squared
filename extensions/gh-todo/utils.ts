@@ -191,6 +191,7 @@ export function isMainBranch(branchName: string): boolean {
 	return branchName === "main" || branchName === "master";
 }
 
+
 /**
  * Generate a branch name for a todo issue (e.g., "todo/42-my-feature-title")
  */
