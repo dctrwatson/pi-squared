@@ -204,7 +204,8 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						const userContent = extractUserContent(issue.body);
 						const agentNotes = extractPiSection(issue.body);
 						
-						let text = `#${issue.number}: ${issue.title} [${issue.state}]\n`;
+						let text = `⚠️ STOP: Present this plan to the user and wait. Do not implement anything.\n\n`;
+						text += `#${issue.number}: ${issue.title} [${issue.state}]\n`;
 						if (issue.assignees.length > 0) {
 							text += `Assigned: @${issue.assignees.join(", @")}\n`;
 						}
@@ -219,8 +220,6 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						} else {
 							text += `\n\nNo plan yet. Ask the user specific questions about unclear requirements, technical decisions, scope, and dependencies. Wait for answers, then use 'update' to write the plan.`;
 						}
-						
-						text += `\n\nDo not implement changes until the user explicitly says to proceed.`;
 						
 						// Apply truncation (beginning of content matters most)
 						text = applyTruncation(text, "head");
