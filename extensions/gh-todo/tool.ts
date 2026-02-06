@@ -5,7 +5,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { PI_TODO_LABEL, GhTodoParams, type GhTodoDetails, type GhTodoInput } from "./types.js";
+import { PI_TODO_LABEL, GhTodoParams, type GhTodoDetails } from "./types.js";
 import {
 	extractUserContent,
 	extractPiSection,
@@ -96,7 +96,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								const assigned = issue.assignees.length > 0 ? ` [assigned: @${issue.assignees.join(", @")}]` : "";
 								text += `  #${issue.number}: ${issue.title}${assigned}\n`;
 								if (issue.body) {
-									const bodyPreview = issue.body.split("\n")[0].slice(0, 100);
+									const bodyPreview = (issue.body.split("\n")[0] ?? "").slice(0, 100);
 									text += `    ${bodyPreview}${issue.body.length > 100 ? "..." : ""}\n`;
 								}
 							}
@@ -811,7 +811,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 					if (!issue) return new Text(theme.fg("muted", "Start issue"), 0, 0);
 					let text = theme.fg("accent", `#${issue.number}`) + " " + theme.fg("text", issue.title);
 					if (details.sessionExists) {
-						text += "\n" + theme.fg("success", "Session exists: ") + theme.fg("dim", details.sessionName);
+						text += "\n" + theme.fg("success", "Session exists: ") + theme.fg("dim", details.sessionName ?? "");
 					} else {
 						text += "\n" + theme.fg("warning", "No session yet");
 					}

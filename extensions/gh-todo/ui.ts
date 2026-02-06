@@ -3,7 +3,7 @@
  */
 
 import type { Theme } from "@mariozechner/pi-coding-agent";
-import { Editor, type EditorTheme, matchesKey, Text, truncateToWidth, type TUI } from "@mariozechner/pi-tui";
+import { Editor, type EditorTheme, matchesKey, truncateToWidth, type TUI } from "@mariozechner/pi-tui";
 import { PI_TODO_LABEL, type GhIssue, type ViewMode } from "./types.js";
 
 /**
@@ -17,7 +17,6 @@ export class TodoListComponent {
 	private onAction: (action: string, issue?: GhIssue, title?: string, body?: string) => Promise<void>;
 	
 	private selectedIndex = 0;
-	private scrollOffset = 0;
 	private viewMode: ViewMode = "list";
 	private statusMessage = "";
 	private statusType: "info" | "error" | "success" = "info";
@@ -120,6 +119,7 @@ export class TodoListComponent {
 		const indices = this.selectableIndices;
 		if (this.selectedIndex < 0 || this.selectedIndex >= indices.length) return undefined;
 		const displayIdx = indices[this.selectedIndex];
+		if (displayIdx === undefined) return undefined;
 		return this.allDisplayItems[displayIdx]?.issue;
 	}
 
@@ -406,12 +406,13 @@ export class TodoListComponent {
 			add("");
 			for (let i = startIdx; i < endIdx; i++) {
 				const item = items[i];
+				if (!item) continue;
 				if (item.type === "header") {
 					if (i > startIdx) add(""); // spacing before header
-					add(th.fg("accent", ` ${item.label}:`));
+					add(th.fg("accent", ` ${item.label ?? ""}:`));
 				} else if (item.issue) {
 					const issue = item.issue;
-					const isSelected = indices[this.selectedIndex] === i;
+					const isSelected = (indices[this.selectedIndex] ?? -1) === i;
 					const prefix = isSelected ? th.fg("accent", "> ") : "  ";
 					const num = th.fg("accent", `#${issue.number}`);
 					const titleColor = issue.state === "open" ? "text" : "dim";

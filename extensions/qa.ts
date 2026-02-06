@@ -73,20 +73,20 @@ export default function (pi: ExtensionAPI) {
 
 			for (let i = branch.length - 1; i >= 0; i--) {
 				const entry = branch[i];
-				if (entry.type === "message") {
-					const msg = entry.message;
-					if ("role" in msg && msg.role === "assistant") {
-						if (msg.stopReason !== "stop") {
-							ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-							return;
-						}
-						const textParts = msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text);
-						if (textParts.length > 0) {
-							lastAssistantText = textParts.join("\n");
-							break;
-						}
+				if (!entry || entry.type !== "message") continue;
+				const msg = entry.message;
+				if ("role" in msg && msg.role === "assistant") {
+					if (msg.stopReason !== "stop") {
+						ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
+						return;
+					}
+					const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
+					const textParts = content
+						.filter((c): c is { type: "text"; text: string } => c.type === "text")
+						.map((c) => c.text);
+					if (textParts.length > 0) {
+						lastAssistantText = textParts.join("\n");
+						break;
 					}
 				}
 			}
@@ -377,6 +377,7 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 					for (let i = 0; i < state.questions.length; i++) {
 						const q = state.questions[i];
+						if (!q) continue;
 						const isCurrent = i === current;
 						const isAnswered = state.answers.has(i);
 						
@@ -386,7 +387,7 @@ export default function (pi: ExtensionAPI) {
 						
 						// Truncate question text for sidebar
 						const maxQLen = width - 12;
-						let qText = q.question.split("\n")[0]; // First line only for sidebar
+						let qText = (q.question.split("\n")[0] ?? ""); // First line only for sidebar
 						if (qText.length > maxQLen) {
 							qText = qText.substring(0, maxQLen - 3) + "...";
 						}
@@ -408,7 +409,7 @@ export default function (pi: ExtensionAPI) {
 					const qPrefix = `Q${current + 1}: `;
 					const indent = " ".repeat(qPrefix.length + 1); // +1 for leading space
 					const wrapWidth = width - indent.length;
-					const questionLines = currentQ.question.split("\n");
+					const questionLines = (currentQ?.question ?? "").split("\n");
 					let firstLine = true;
 					for (const qLine of questionLines) {
 						if (qLine.trim() === "") {
@@ -476,6 +477,7 @@ export default function (pi: ExtensionAPI) {
 			const qaPairs: string[] = [];
 			for (let i = 0; i < questions.length; i++) {
 				const q = questions[i];
+				if (!q) continue;
 				const a = result.get(i) || "(no answer)";
 				qaPairs.push(`Q: ${q.question}\nA: ${a}`);
 			}
