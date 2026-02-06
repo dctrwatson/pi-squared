@@ -203,15 +203,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						const sessionName = getIssueSessionName(issue);
 						const targetBranch = getIssueBranchName(issue);
 						
-						// Check for Pi Agent Notes
-						const agentNotes = extractPiSection(issue.body);
-						const hasNotes = agentNotes && agentNotes.trim().length > 0;
-						
-						// Check if a session for this issue exists (match by issue number prefix)
-						const sessions = await SessionManager.listAll();
-						const existingSession = sessions.find(s => sessionMatchesIssue(s.name, issue.number));
-						
-						// Handle git branch: if on main, pull and create/checkout the todo branch
+						// Ensure we're not on the default branch
 						const currentBranch = await getCurrentBranch(pi);
 						let branchInfo = "";
 						
@@ -247,6 +239,14 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						} else {
 							branchInfo += `On branch: ${currentBranch} (expected ${targetBranch})\n`;
 						}
+						
+						// Check for Pi Agent Notes
+						const agentNotes = extractPiSection(issue.body);
+						const hasNotes = agentNotes && agentNotes.trim().length > 0;
+						
+						// Check if a session for this issue exists (match by issue number prefix)
+						const sessions = await SessionManager.listAll();
+						const existingSession = sessions.find(s => sessionMatchesIssue(s.name, issue.number));
 						
 						let text: string;
 						if (existingSession) {

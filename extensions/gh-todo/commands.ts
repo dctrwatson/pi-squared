@@ -172,26 +172,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 				const sessionName = getIssueSessionName(issue);
 				const targetBranch = getIssueBranchName(issue);
 				
-				// Check for Pi Agent Notes
-				const agentNotes = extractPiSection(issue.body);
-				const hasNotes = agentNotes && agentNotes.trim().length > 0;
-				
-				// Warn if notes are empty - prompt to continue or plan
-				if (!hasNotes) {
-					const choice = await ctx.ui.select(
-						`⚠️ Pi Agent Notes are empty for #${issue.number}.`,
-						["Continue", "Plan"]
-					);
-					
-					if (choice === "Plan") {
-						// Trigger planning via the gh_todo tool
-						pi.sendUserMessage(`Plan todo #${issue.number}`);
-						return;
-					}
-					// If "Continue" is selected, proceed with starting
-				}
-				
-				// Handle git branch: if on main, pull and create/checkout the todo branch
+				// Ensure we're not on the default branch
 				const currentBranch = await getCurrentBranch(pi);
 				
 				if (isMainBranch(currentBranch)) {
@@ -229,6 +210,25 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 					ctx.ui.setStatus("gh-todo", undefined);
 				}
 				
+				// Check for Pi Agent Notes
+				const agentNotes = extractPiSection(issue.body);
+				const hasNotes = agentNotes && agentNotes.trim().length > 0;
+				
+				// Warn if notes are empty - prompt to continue or plan
+				if (!hasNotes) {
+					const choice = await ctx.ui.select(
+						`⚠️ Pi Agent Notes are empty for #${issue.number}.`,
+						["Continue", "Plan"]
+					);
+					
+					if (choice === "Plan") {
+						// Trigger planning via the gh_todo tool
+						pi.sendUserMessage(`Plan todo #${issue.number}`);
+						return;
+					}
+					// If "Continue" is selected, proceed with starting
+				}
+				
 				// Check if a session for this issue already exists (match by issue number prefix)
 				const sessions = await SessionManager.listAll();
 				const existingSession = sessions.find(s => sessionMatchesIssue(s.name, issue.number));
@@ -246,8 +246,29 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 						`Session for #${issue.number} exists. Use /resume and search for "#${issue.number}".`,
 						"info"
 					);
+				} else if (!currentSessionName) {
+					// Session has no name - auto-rename and inject notes
+					pi.setSessionName(sessionName);
+					ctx.ui.notify(`Session "${sessionName}" ready. Starting work!`, "success");
+					
+					// Inject agent notes
+					try {
+						const freshIssue = await getIssue(pi, issue.number);
+						const freshNotes = extractPiSection(freshIssue.body);
+						
+						if (freshNotes && freshNotes.trim().length > 0) {
+							let contextMessage = `Starting work on #${freshIssue.number}: ${freshIssue.title}\n\n`;
+							contextMessage += `## Agent Notes\n${freshNotes}\n\n`;
+							contextMessage += `Review the notes above and ask any clarifying questions.\n\n`;
+							contextMessage += `⚠️ Do NOT start implementing changes until explicitly told to proceed.`;
+							
+							pi.sendUserMessage(contextMessage);
+						}
+					} catch (err) {
+						console.error(`Failed to inject agent notes for #${issue.number}:`, err);
+					}
 				} else {
-					// No existing session - ask what to do
+					// Session has a different name - ask what to do
 					const options = [
 						"Create new session",
 						"Rename current session",
