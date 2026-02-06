@@ -3,6 +3,7 @@
  */
 
 import type { ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
+import { getModel, getEnvApiKey, type Model } from "@mariozechner/pi-ai";
 import { PI_SECTION_START, PI_SECTION_END, PI_SECTION_TITLE, type GhIssue } from "./types.js";
 
 export const PR_LABEL_CREATED = "pr-created";
@@ -239,4 +240,42 @@ export function getEntriesAfter(ctx: ExtensionContext, afterEntryId: string | nu
 	}
 
 	return entries.slice(idx + 1);
+}
+
+/**
+ * Get a small/cheap model for generating summaries.
+ * Tries Claude Haiku first, falls back to the current model with a warning.
+ * Returns null if no model or API key is available.
+ */
+export async function getSmallModel(ctx: ExtensionContext): Promise<{ model: Model<any>; apiKey: string } | null> {
+	let model: Model<any> | null = null;
+
+	// Try Claude Haiku first
+	try {
+		if (getEnvApiKey("anthropic")) {
+			model = getModel("anthropic", "claude-haiku-4-5");
+		}
+	} catch {
+		// Haiku not available
+	}
+
+	// Fall back to current model with warning
+	if (!model) {
+		model = ctx.model ?? null;
+		if (model) {
+			ctx.ui.setStatus("gh-todo", "⚠️ Using current model for summary (no Anthropic key)");
+		}
+	}
+
+	if (!model) {
+		return null;
+	}
+
+	// Get API key
+	const apiKey = getEnvApiKey(model.provider) || (await ctx.modelRegistry.getApiKey(model));
+	if (!apiKey) {
+		return null;
+	}
+
+	return { model, apiKey };
 }
