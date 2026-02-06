@@ -1,0 +1,35 @@
+{
+  "name": "pi-squared",
+  "version": "0.0.1",
+  "description": "Pi extensions and skills",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "pi-skill"],
+  "author": "dctrwatson",
+  "license": "Unlicense",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:dctrwatson/pi-squared.git"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*",
+    "typescript": "^5.7.2"
+  }
+}
