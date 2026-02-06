@@ -326,38 +326,7 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 				const issue = result.issue;
 				
 				// Gather session context for summarization
-				const entries = ctx.sessionManager.getBranch();
-				let sessionContext = "";
-				
-				try {
-					for (const entry of entries) {
-						if (entry.type === "message") {
-							const msg = entry.message;
-							if (msg.role === "user") {
-								const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
-								const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
-								if (text) sessionContext += `User: ${text.slice(0, 500)}\n\n`;
-							} else if (msg.role === "assistant") {
-								const content = Array.isArray(msg.content) ? msg.content : [{ type: "text" as const, text: msg.content }];
-								const text = content.map((c: any) => c.type === "text" ? c.text : "").join("");
-								if (text) sessionContext += `Assistant: ${text.slice(0, 500)}\n\n`;
-							} else if (msg.role === "toolResult" && !msg.isError) {
-								if (msg.toolName === "write" || msg.toolName === "edit") {
-									const details = msg.details as { path?: string } | undefined;
-									if (details?.path) sessionContext += `Tool: ${msg.toolName} ${details.path}\n\n`;
-								} else if (msg.toolName === "bash") {
-									const details = msg.details as { command?: string } | undefined;
-									if (details?.command) sessionContext += `Tool: bash \`${details.command.slice(0, 100)}\`\n\n`;
-								}
-							}
-						}
-					}
-				} catch {
-					// Failed to gather context
-				}
-				
-				// Limit context size
-				sessionContext = sessionContext.slice(0, 8000);
+				const sessionContext = gatherSessionContext(ctx);
 				
 				// Generate summary using LLM
 				let draftSummary = `## Progress Update: ${issue.title}\n\n### Notes:\n(Add your notes here)`;
