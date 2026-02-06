@@ -36,6 +36,7 @@ import {
 	getPrForBranch,
 	getPrFeedback,
 	getUnpushedCommits,
+	addPrComment,
 } from "./github.js";
 import {
 	findPrTemplate,
@@ -61,7 +62,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
 			// Check for gh CLI
-			if (!(await checkGhCli(pi))) {
+			if (!(await checkGhCli(pi, signal))) {
 				return {
 					content: [{ type: "text", text: "Error: GitHub CLI (gh) is not installed or not in PATH. Install it with: brew install gh" }],
 					details: { action: params.action, error: "gh CLI not found" } as GhTodoDetails,
@@ -79,7 +80,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 			try {
 				switch (params.action) {
 					case "list": {
-						const issues = await listIssues(pi, true);
+						const issues = await listIssues(pi, true, signal);
 						cachedIssues.value = issues;
 						const openIssues = issues.filter((i) => i.state === "open");
 						const closedIssues = issues.filter((i) => i.state === "closed");
@@ -115,7 +116,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await createIssue(pi, params.title, params.body);
+						const issue = await createIssue(pi, params.title, params.body, signal);
 						return {
 							content: [{ type: "text", text: `Created issue #${issue.number}: ${issue.title}\n${issue.url}` }],
 							details: { action: "add", issue } as GhTodoDetails,
@@ -130,7 +131,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await getIssue(pi, params.number);
+						const issue = await getIssue(pi, params.number, signal);
 						const userContent = extractUserContent(issue.body);
 						const agentNotes = extractPiSection(issue.body);
 						
@@ -159,7 +160,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await getIssue(pi, params.number);
+						const issue = await getIssue(pi, params.number, signal);
 						const userContent = extractUserContent(issue.body);
 						const agentNotes = extractPiSection(issue.body);
 						
@@ -199,17 +200,32 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await getIssue(pi, params.number);
+						const issue = await getIssue(pi, params.number, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
+						
 						const sessionName = getIssueSessionName(issue);
 						const targetBranch = getIssueBranchName(issue);
 						
 						// Ensure we're not on the default branch
-						const currentBranch = await getCurrentBranch(pi);
+						const currentBranch = await getCurrentBranch(pi, signal);
 						let branchInfo = "";
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						if (isMainBranch(currentBranch)) {
 							// Check for uncommitted changes before switching
-							if (await hasUncommittedChanges(pi)) {
+							if (await hasUncommittedChanges(pi, signal)) {
 								return {
 									content: [{ type: "text", text: `Error: You have uncommitted changes on ${currentBranch}. Commit or stash them before starting a todo.` }],
 									details: { action: "start", error: "uncommitted changes", issue } as GhTodoDetails,
@@ -217,21 +233,35 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								};
 							}
 							
+							if (signal?.aborted) {
+								return {
+									content: [{ type: "text", text: "Cancelled" }],
+									details: { action: params.action } as GhTodoDetails,
+								};
+							}
+							
 							// Pull main to ensure it's up-to-date
 							try {
-								await pullBranch(pi);
+								await pullBranch(pi, signal);
 								branchInfo += `Pulled ${currentBranch} to latest.\n`;
 							} catch (err) {
 								const msg = err instanceof Error ? err.message : String(err);
 								branchInfo += `Warning: Failed to pull ${currentBranch}: ${msg}\n`;
 							}
 							
+							if (signal?.aborted) {
+								return {
+									content: [{ type: "text", text: "Cancelled" }],
+									details: { action: params.action } as GhTodoDetails,
+								};
+							}
+							
 							// Create or checkout the todo branch
-							if (await branchExists(pi, targetBranch)) {
-								await checkoutBranch(pi, targetBranch);
+							if (await branchExists(pi, targetBranch, signal)) {
+								await checkoutBranch(pi, targetBranch, signal);
 								branchInfo += `Checked out existing branch: ${targetBranch}\n`;
 							} else {
-								await checkoutNewBranch(pi, targetBranch);
+								await checkoutNewBranch(pi, targetBranch, signal);
 								branchInfo += `Created and checked out branch: ${targetBranch}\n`;
 							}
 						} else if (currentBranch === targetBranch) {
@@ -279,7 +309,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await closeIssue(pi, params.number);
+						const issue = await closeIssue(pi, params.number, signal);
 						return {
 							content: [{ type: "text", text: `Closed #${issue.number}: ${issue.title} (not planned)` }],
 							details: { action: "close", issue } as GhTodoDetails,
@@ -294,7 +324,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await reopenIssue(pi, params.number);
+						const issue = await reopenIssue(pi, params.number, signal);
 						return {
 							content: [{ type: "text", text: `Reopened #${issue.number}: ${issue.title}` }],
 							details: { action: "reopen", issue } as GhTodoDetails,
@@ -316,7 +346,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 								isError: true,
 							};
 						}
-						const issue = await updateIssueNotes(pi, params.number, params.body);
+						const issue = await updateIssueNotes(pi, params.number, params.body, signal);
 						return {
 							content: [{ type: "text", text: `Updated notes on #${issue.number}: ${issue.title}` }],
 							details: { action: "update", issue } as GhTodoDetails,
@@ -325,7 +355,14 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 
 					case "pr": {
 						// Get current branch
-						const currentBranch = await getCurrentBranch(pi);
+						const currentBranch = await getCurrentBranch(pi, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Don't allow PR from main/master
 						if (isMainBranch(currentBranch)) {
@@ -362,7 +399,14 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Fetch the issue
-						const issue = await getIssue(pi, issueNumber);
+						const issue = await getIssue(pi, issueNumber, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						if (issue.state === "closed") {
 							return {
@@ -373,7 +417,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Check for uncommitted changes
-						if (await hasUncommittedChanges(pi)) {
+						if (await hasUncommittedChanges(pi, signal)) {
 							return {
 								content: [{ type: "text", text: "Error: You have uncommitted changes. Commit or stash them before creating a PR." }],
 								details: { action: "pr", error: "uncommitted changes", issue } as GhTodoDetails,
@@ -381,29 +425,57 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							};
 						}
 						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
+						
 						// Push branch if needed
-						if (!(await hasUpstream(pi, currentBranch))) {
-							await pushBranch(pi, currentBranch);
+						if (!(await hasUpstream(pi, currentBranch, signal))) {
+							await pushBranch(pi, currentBranch, signal);
+						}
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
 						}
 						
 						// Gather session context
 						const sessionContext = gatherSessionContext(_ctx);
 						
 						// Check for PR template
-						const template = await findPrTemplate(pi);
+						const template = await findPrTemplate(pi, signal);
 						const shouldClose = params.close === true;
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Generate PR body
 						let prBody: string;
 						if (template) {
-							prBody = await fillPrTemplate(template, issue, sessionContext, shouldClose, _ctx);
+							prBody = await fillPrTemplate(template, issue, sessionContext, shouldClose, _ctx, signal);
 						} else {
-							prBody = await generatePrSummary(issue, sessionContext, shouldClose, _ctx);
+							prBody = await generatePrSummary(issue, sessionContext, shouldClose, _ctx, signal);
+						}
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
 						}
 						
 						// Create PR
 						const prTitle = `${issue.title} (#${issue.number})`;
-						const pr = await createPr(pi, prTitle, prBody, currentBranch);
+						const pr = await createPr(pi, prTitle, prBody, currentBranch, signal);
 						
 						return {
 							content: [{ type: "text", text: `Created PR #${pr.number} for issue #${issue.number}\n${pr.url}` }],
@@ -413,10 +485,17 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 
 					case "feedback": {
 						// Get current branch
-						const currentBranch = await getCurrentBranch(pi);
+						const currentBranch = await getCurrentBranch(pi, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Auto-detect PR from branch
-						const pr = await getPrForBranch(pi, currentBranch);
+						const pr = await getPrForBranch(pi, currentBranch, signal);
 						if (!pr) {
 							return {
 								content: [{ type: "text", text: "Error: No PR found for current branch. Create a PR first with the 'pr' action." }],
@@ -425,11 +504,18 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							};
 						}
 						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
+						
 						const prNumber = pr.number;
 						const prUrl = pr.url;
 						
 						// Fetch PR feedback
-						const { reviewComments, conversationComments } = await getPrFeedback(pi, prNumber);
+						const { reviewComments, conversationComments } = await getPrFeedback(pi, prNumber, signal);
 						
 						// Format output
 						let text = `PR #${prNumber} Feedback:\n`;
@@ -479,15 +565,29 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 
 					case "pr-update": {
 						// Get current branch
-						const currentBranch = await getCurrentBranch(pi);
+						const currentBranch = await getCurrentBranch(pi, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Get PR for current branch
-						const pr = await getPrForBranch(pi, currentBranch);
+						const pr = await getPrForBranch(pi, currentBranch, signal);
 						if (!pr) {
 							return {
 								content: [{ type: "text", text: "Error: No PR found for current branch. Create a PR first with the 'pr' action." }],
 								details: { action: "pr-update", error: "no PR found" } as GhTodoDetails,
 								isError: true,
+							};
+						}
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
 							};
 						}
 						
@@ -502,7 +602,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						}
 						
 						// Check for uncommitted changes
-						if (await hasUncommittedChanges(pi)) {
+						if (await hasUncommittedChanges(pi, signal)) {
 							return {
 								content: [{ type: "text", text: "Error: You have uncommitted changes. Commit them before running pr-update." }],
 								details: { action: "pr-update", error: "uncommitted changes" } as GhTodoDetails,
@@ -510,11 +610,25 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							};
 						}
 						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
+						
 						// Gather scoped data
-						const commits = await getUnpushedCommits(pi, currentBranch);
+						const commits = await getUnpushedCommits(pi, currentBranch, signal);
 						const scopedContext = gatherScopedSessionContext(_ctx);
 						const hasCommits = commits.length > 0;
 						const hasContext = scopedContext.trim().length > 0;
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Nothing to do
 						if (!hasCommits && !hasContext) {
@@ -527,7 +641,7 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						// Push if there are commits
 						if (hasCommits) {
 							try {
-								await pushBranch(pi, currentBranch);
+								await pushBranch(pi, currentBranch, signal);
 							} catch (err) {
 								const message = err instanceof Error ? err.message : String(err);
 								return {
@@ -538,23 +652,34 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 							}
 						}
 						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
+						
 						// Auto-generate summary
-						const commentBody = await generatePrUpdateSummary(scopedContext, commits, pr.number, _ctx);
+						const commentBody = await generatePrUpdateSummary(scopedContext, commits, pr.number, _ctx, signal);
+						
+						if (signal?.aborted) {
+							return {
+								content: [{ type: "text", text: "Cancelled" }],
+								details: { action: params.action } as GhTodoDetails,
+							};
+						}
 						
 						// Post comment to PR
-						const commentResult = await pi.exec(
-							"gh",
-							["pr", "comment", String(pr.number), "--body", commentBody],
-							{ timeout: 15000 }
-						);
-						
-						if (commentResult.code !== 0) {
+						try {
+							await addPrComment(pi, pr.number, commentBody, signal);
+						} catch (err) {
+							const message = err instanceof Error ? err.message : String(err);
 							const errMsg = hasCommits
-								? `Pushed changes but failed to post comment: ${commentResult.stderr}`
-								: `Failed to post comment: ${commentResult.stderr}`;
+								? `Pushed changes but failed to post comment: ${message}`
+								: `Failed to post comment: ${message}`;
 							return {
 								content: [{ type: "text", text: errMsg }],
-								details: { action: "pr-update", error: `comment failed: ${commentResult.stderr}`, prNumber: pr.number, prUrl: pr.url } as GhTodoDetails,
+								details: { action: "pr-update", error: `comment failed: ${message}`, prNumber: pr.number, prUrl: pr.url } as GhTodoDetails,
 								isError: !hasCommits, // Not a full error if push succeeded
 							};
 						}
@@ -578,6 +703,14 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						};
 				}
 			} catch (err) {
+				// Check if cancelled via signal
+				if (signal?.aborted) {
+					return {
+						content: [{ type: "text", text: "Cancelled" }],
+						details: { action: params.action, error: "Cancelled" } as GhTodoDetails,
+					};
+				}
+				
 				const message = err instanceof Error ? err.message : String(err);
 				return {
 					content: [{ type: "text", text: `Error: ${message}` }],
