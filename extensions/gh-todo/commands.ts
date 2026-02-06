@@ -222,7 +222,10 @@ export function registerCommands(pi: ExtensionAPI, cachedIssues: { value: any[] 
 					);
 					
 					if (choice === "Plan") {
-						// Trigger planning via the gh_todo tool
+						// Rename session before triggering planning
+						if (!pi.getSessionName()) {
+							pi.setSessionName(sessionName);
+						}
 						pi.sendUserMessage(`Plan todo #${issue.number}`);
 						return;
 					}
