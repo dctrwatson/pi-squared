@@ -198,10 +198,8 @@ export function getIssueBranchName(issue: { number: number; title: string }): st
 	const slug = issue.title
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 50)
-		.replace(/-+$/, "");
-	return `todo/${issue.number}-${slug}`;
+		.replace(/^-+|-+$/g, "");
+	return `todo/${`${issue.number}-${slug}`.slice(0, 16).replace(/-+$/, "")}`;
 }
 
 /**
