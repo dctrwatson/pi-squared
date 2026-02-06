@@ -223,8 +223,8 @@ Close issues via PR merge ("Fixes #X" in PR description), not via this tool.`,
 						text += `**Steps**:\n`;
 						text += `1. Read the issue content above carefully\n`;
 						text += `2. Explore the codebase — read relevant files to understand current architecture, patterns, and conventions\n`;
-						text += `3. Propose an approach to the user, referencing specific files and code\n`;
-						text += `4. Ask targeted questions about anything still unclear\n`;
+						text += `3. Ask the user questions before proposing anything. Surface ambiguities, unclear scope, design choices with tradeoffs, and anything where you'd otherwise be making an assumption. Don't ask questions you can confidently answer from the code — but do ask about intent, preferences, and scope.\n`;
+						text += `4. After the user answers, propose an approach referencing specific files and code\n`;
 						text += `5. Once the user is satisfied, present the full notes text for review\n`;
 						text += `6. Only save via 'update' after the user approves the notes\n\n`;
 						
