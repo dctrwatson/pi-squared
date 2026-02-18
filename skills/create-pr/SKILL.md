@@ -27,18 +27,10 @@ The second script outputs: DIFF STAT and DIFF. They are separate to avoid large 
 
 **Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
 
-**Body:** First, check for a PR template. Find the git repo root and look for a template:
+**Body:** First, check for a PR template:
 
 ```bash
-root=$(git rev-parse --show-toplevel)
-for f in "$root/.github/PULL_REQUEST_TEMPLATE.md" "$root/.github/pull_request_template.md" "$root/PULL_REQUEST_TEMPLATE.md" "$root/pull_request_template.md"; do
-  if [ -f "$f" ]; then echo "TEMPLATE: $f"; cat "$f"; exit 0; fi
-done
-if [ -d "$root/.github/PULL_REQUEST_TEMPLATE" ]; then
-  f=$(find "$root/.github/PULL_REQUEST_TEMPLATE" -name '*.md' | head -1)
-  if [ -n "$f" ]; then echo "TEMPLATE: $f"; cat "$f"; exit 0; fi
-fi
-echo "NO TEMPLATE"
+bash <skill_dir>/find-template.sh
 ```
 
 If a template is found, use it as the PR body structure. Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections intact.
