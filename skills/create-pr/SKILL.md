@@ -27,15 +27,21 @@ The second script outputs: DIFF STAT and DIFF. They are separate to avoid large 
 
 **Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
 
-**Body:** First, check for a PR template by reading the first match from this list:
+**Body:** First, check for a PR template. Find the git repo root and look for a template:
 
-1. `.github/PULL_REQUEST_TEMPLATE.md`
-2. `.github/pull_request_template.md`
-3. `PULL_REQUEST_TEMPLATE.md`
-4. `pull_request_template.md`
-5. First `*.md` file in `.github/PULL_REQUEST_TEMPLATE/` directory
+```bash
+root=$(git rev-parse --show-toplevel)
+for f in "$root/.github/PULL_REQUEST_TEMPLATE.md" "$root/.github/pull_request_template.md" "$root/PULL_REQUEST_TEMPLATE.md" "$root/pull_request_template.md"; do
+  if [ -f "$f" ]; then echo "TEMPLATE: $f"; cat "$f"; exit 0; fi
+done
+if [ -d "$root/.github/PULL_REQUEST_TEMPLATE" ]; then
+  f=$(find "$root/.github/PULL_REQUEST_TEMPLATE" -name '*.md' | head -1)
+  if [ -n "$f" ]; then echo "TEMPLATE: $f"; cat "$f"; exit 0; fi
+fi
+echo "NO TEMPLATE"
+```
 
-If a template file exists, read it and use it as the PR body structure. Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections intact.
+If a template is found, use it as the PR body structure. Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections intact.
 
 Only if none of the above files exist, use this fallback structure:
 
