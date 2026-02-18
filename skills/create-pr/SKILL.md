@@ -27,9 +27,11 @@ The second script outputs: DIFF STAT and DIFF. They are separate to avoid large 
 
 **Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
 
-**Body — if a PR TEMPLATE was found:** Fill in each section from the template using the diff/commits. Keep checkboxes and required sections. Replace placeholder text with real content.
+**Body:** Check whether gather-context.sh found a PR TEMPLATE.
 
-**Body — if no template:** Use this structure:
+- **If a PR TEMPLATE was found, you MUST use it as the body structure.** Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections from the template intact. Do NOT use the fallback structure below — the repo's template takes priority.
+
+- **Only if NO template was found**, use this fallback structure:
 
 ```
 ## Summary
