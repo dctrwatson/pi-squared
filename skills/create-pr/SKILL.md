@@ -5,109 +5,45 @@ description: Creates a GitHub pull request by summarizing the current branch's c
 
 # Create Pull Request
 
-Create a GitHub PR for the current branch by analyzing changes and generating a summary. Follows repo PR templates when available.
+## 1. Gather context
 
-## Prerequisites
-
-- `gh` CLI must be installed and authenticated
-- Current branch must have commits ahead of the base branch
-- Branch must be pushed (or will be pushed automatically)
-
-## Steps
-
-### 1. Gather context
+Run the helper script (pass optional base branch as arg):
 
 ```bash
-# Identify the current and default branch
-git branch --show-current
-gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name'
+bash <skill_dir>/gather-context.sh [base_branch]
 ```
 
-Store the default branch as the base. If the current branch IS the default branch, stop and tell the user.
+This outputs structured sections: BRANCHES, EXISTING PR, COMMITS, DIFF STAT, DIFF, PR TEMPLATE, and RECENT PR TITLES.
 
-### 2. Check if a PR already exists
+- If the script errors with "Current branch IS the base branch", stop and tell the user.
+- If EXISTING PR is not "none", ask the user if they want to update the existing PR body instead.
 
-```bash
-gh pr view --json number,title,url 2>/dev/null
-```
+## 2. Generate PR title and body
 
-If a PR already exists, inform the user and ask whether they want to update the existing PR body instead.
+**Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
 
-### 3. Analyze changes
+**Body — if a PR TEMPLATE was found:** Fill in each section from the template using the diff/commits. Keep checkboxes and required sections. Replace placeholder text with real content.
 
-```bash
-# Commit messages (for high-level intent)
-git log <base>..HEAD --oneline
-
-# Full diff (for detailed understanding)
-git diff <base>...HEAD
-```
-
-If the diff is very large, also use `git diff <base>...HEAD --stat` for an overview and read the most important changed files individually.
-
-### 4. Check for a PR template
-
-Look for a PR template in this order:
-
-1. `.github/PULL_REQUEST_TEMPLATE.md`
-2. `.github/pull_request_template.md`
-3. `PULL_REQUEST_TEMPLATE.md`
-4. `pull_request_template.md`
-5. `.github/PULL_REQUEST_TEMPLATE/` directory (if it exists, list files and let the user pick, or use the first one)
-
-If a template is found, read it and use its structure. Fill in each section based on the changes. Keep any checkboxes or required sections. Remove placeholder/instruction text and replace it with actual content.
-
-### 5. Generate the PR content
-
-**If a template was found:** Fill in the template sections faithfully.
-
-**If no template was found:** Use this default structure:
+**Body — if no template:** Use this structure:
 
 ```
 ## Summary
-
-<1-3 sentence high-level description of what this PR does and why>
+<1-3 sentences: why, then what>
 
 ## Changes
-
-<Bulleted list of specific changes, grouped logically>
+<Bulleted list of changes, grouped logically>
 
 ## Notes
-
-<Any additional context: migration steps, breaking changes, testing notes, or "None">
+<Migration steps, breaking changes, testing notes, or "None">
 ```
 
-**Guidelines for the summary:**
-- Be concise but informative
-- Lead with the "why", then the "what"
-- Mention key files/areas changed if helpful
-- Don't just repeat commit messages — synthesize them
-- Call out breaking changes, new dependencies, or migration steps prominently
+**Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies.
 
-### 6. Generate the PR title
-
-Create a concise, descriptive title. Follow conventional style if the repo's recent PRs use one:
+## 3. Push and create
 
 ```bash
-gh pr list --state merged --limit 5 --json title --jq '.[].title'
-```
-
-Match the convention (e.g., `feat: ...`, `fix: ...`, imperative mood, etc.). If no convention is apparent, use a clear imperative sentence.
-
-### 7. Push and create the PR
-
-```bash
-# Ensure branch is pushed
 git push -u origin HEAD
-
-# Create the PR (use --draft if the user asked for a draft)
 gh pr create --base <base> --title "<title>" --body "<body>"
 ```
 
-Show the user the PR URL when done.
-
-## User arguments
-
-- If the user specifies a base branch, use that instead of the default branch.
-- If the user says "draft", add `--draft` to `gh pr create`.
-- If the user provides extra context (e.g., "this fixes the login bug"), incorporate it into the summary.
+Add `--draft` if the user requested a draft. If the user provided extra context, incorporate it into the summary. Show the PR URL when done.
