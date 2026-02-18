@@ -7,15 +7,20 @@ description: Creates a GitHub pull request by summarizing the current branch's c
 
 ## 1. Gather context
 
-Run the helper script (pass optional base branch as arg):
+Run both helper scripts (pass optional base branch as arg):
 
 ```bash
 bash <skill_dir>/gather-context.sh [base_branch]
 ```
 
-This outputs structured sections: BRANCHES, EXISTING PR, COMMITS, DIFF STAT, DIFF, PR TEMPLATE, and RECENT PR TITLES.
+```bash
+bash <skill_dir>/gather-diff.sh [base_branch]
+```
 
-- If the script errors with "Current branch IS the base branch", stop and tell the user.
+The first script outputs: BRANCHES, EXISTING PR, COMMITS, PR TEMPLATE, and RECENT PR TITLES.
+The second script outputs: DIFF STAT and DIFF. They are separate to avoid large diffs truncating the metadata.
+
+- If the first script errors with "Current branch IS the base branch", stop and tell the user.
 - If EXISTING PR is not "none", ask the user if they want to update the existing PR body instead.
 
 ## 2. Generate PR title and body
