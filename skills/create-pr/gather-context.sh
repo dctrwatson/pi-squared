@@ -32,34 +32,6 @@ echo ""
 echo "=== COMMITS ==="
 git log "$base"..HEAD --oneline
 
-# --- PR template ---
-echo ""
-echo "=== PR TEMPLATE ==="
-template=""
-for candidate in \
-  .github/PULL_REQUEST_TEMPLATE.md \
-  .github/pull_request_template.md \
-  PULL_REQUEST_TEMPLATE.md \
-  pull_request_template.md; do
-  if [ -f "$candidate" ]; then
-    template="$candidate"
-    break
-  fi
-done
-# Check template directory
-if [ -z "$template" ] && [ -d ".github/PULL_REQUEST_TEMPLATE" ]; then
-  template=$(find .github/PULL_REQUEST_TEMPLATE -name '*.md' | head -1)
-fi
-
-if [ -n "$template" ]; then
-  echo "found: $template"
-  echo "--- TEMPLATE CONTENT ---"
-  cat "$template"
-  echo "--- END TEMPLATE ---"
-else
-  echo "none"
-fi
-
 # --- PR title convention ---
 echo ""
 echo "=== RECENT PR TITLES ==="
