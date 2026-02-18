@@ -20,7 +20,7 @@ fi
 # --- Existing PR ---
 echo ""
 echo "=== EXISTING PR ==="
-if pr_info=$(gh pr view --json number,title,url 2>/dev/null); then
+if pr_info=$(gh pr view --json number,title,url,state 2>/dev/null) && echo "$pr_info" | grep -q '"state":"OPEN"'; then
   echo "$pr_info"
 else
   echo "none"
