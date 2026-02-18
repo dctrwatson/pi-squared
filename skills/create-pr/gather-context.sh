@@ -31,22 +31,7 @@ echo ""
 echo "=== COMMITS ==="
 git log "$base"..HEAD --oneline
 
-# --- Diff stat ---
-echo ""
-echo "=== DIFF STAT ==="
-git diff "$base"...HEAD --stat
-
-# --- Diff (truncated to ~8000 lines to stay manageable) ---
-echo ""
-echo "=== DIFF ==="
-git diff "$base"...HEAD | head -8000
-diff_lines=$(git diff "$base"...HEAD | wc -l)
-if [ "$diff_lines" -gt 8000 ]; then
-  echo ""
-  echo "[TRUNCATED: diff has $diff_lines lines total, showing first 8000]"
-fi
-
-# --- PR template ---
+# --- PR template (before diff so it's never truncated) ---
 echo ""
 echo "=== PR TEMPLATE ==="
 template=""
@@ -78,3 +63,18 @@ fi
 echo ""
 echo "=== RECENT PR TITLES ==="
 gh pr list --state merged --limit 5 --json title --jq '.[].title' 2>/dev/null || echo "none"
+
+# --- Diff stat ---
+echo ""
+echo "=== DIFF STAT ==="
+git diff "$base"...HEAD --stat
+
+# --- Diff (truncated to ~8000 lines to stay manageable) ---
+echo ""
+echo "=== DIFF ==="
+git diff "$base"...HEAD | head -8000
+diff_lines=$(git diff "$base"...HEAD | wc -l)
+if [ "$diff_lines" -gt 8000 ]; then
+  echo ""
+  echo "[TRUNCATED: diff has $diff_lines lines total, showing first 8000]"
+fi
