@@ -17,7 +17,7 @@ bash <skill_dir>/gather-context.sh [base_branch]
 bash <skill_dir>/gather-diff.sh [base_branch]
 ```
 
-The first script outputs: BRANCHES, EXISTING PR, COMMITS, PR TEMPLATE, and RECENT PR TITLES.
+The first script outputs: BRANCHES, EXISTING PR, COMMITS, and RECENT PR TITLES.
 The second script outputs: DIFF STAT and DIFF. They are separate to avoid large diffs truncating the metadata.
 
 - If the first script errors with "Current branch IS the base branch", stop and tell the user.
@@ -27,11 +27,17 @@ The second script outputs: DIFF STAT and DIFF. They are separate to avoid large 
 
 **Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
 
-**Body:** Check whether gather-context.sh found a PR TEMPLATE.
+**Body:** First, check for a PR template by reading the first match from this list:
 
-- **If a PR TEMPLATE was found, you MUST use it as the body structure.** Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections from the template intact. Do NOT use the fallback structure below — the repo's template takes priority.
+1. `.github/PULL_REQUEST_TEMPLATE.md`
+2. `.github/pull_request_template.md`
+3. `PULL_REQUEST_TEMPLATE.md`
+4. `pull_request_template.md`
+5. First `*.md` file in `.github/PULL_REQUEST_TEMPLATE/` directory
 
-- **Only if NO template was found**, use this fallback structure:
+If a template file exists, read it and use it as the PR body structure. Copy the template exactly, then fill in each section with real content derived from the diff and commits. Keep all headings, checkboxes, and required sections intact.
+
+Only if none of the above files exist, use this fallback structure:
 
 ```
 ## Summary
