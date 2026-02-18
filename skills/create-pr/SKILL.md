@@ -25,7 +25,7 @@ The second script outputs: DIFF STAT and DIFF. They are separate to avoid large 
 
 ## 2. Generate PR title and body
 
-**Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence.
+**Title:** Concise and descriptive. Match the convention from RECENT PR TITLES if one is apparent (e.g. `feat: ...`, `fix: ...`). Otherwise use a clear imperative sentence. If commits share a common prefix/path (e.g. `vm-stack/eks: do something`), preserve it as a scope in the conventional commit format: `type(vm-stack/eks): do something`. Do NOT drop or rewrite the user's prefix.
 
 **Body:** First, check for a PR template:
 
