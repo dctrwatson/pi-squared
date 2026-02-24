@@ -30,7 +30,7 @@ fi
 # --- Commits ---
 echo ""
 echo "=== COMMITS ==="
-git log "$base"..HEAD --oneline
+git log "$base"..HEAD --format="--- %h %s ---%n%b"
 
 # --- PR title convention ---
 echo ""
