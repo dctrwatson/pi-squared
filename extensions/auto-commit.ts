@@ -206,6 +206,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("auto-commit", "Committing...");
+			}
+
 			// Generate commit message
 			let summary: string;
 			if (!skipHaiku && assistantText) {
@@ -222,10 +226,17 @@ export default function (pi: ExtensionAPI) {
 				timeout: 5000,
 			});
 
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("auto-commit", undefined);
+			}
+
 			if (commitCode === 0 && ctx.hasUI) {
 				ctx.ui.notify(`Auto-committed: ${commitMessage}`, "info");
 			}
 		} catch {
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("auto-commit", undefined);
+			}
 			// Silently ignore errors (e.g., nothing to commit)
 		}
 	}
