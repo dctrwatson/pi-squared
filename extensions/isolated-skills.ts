@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 
 interface SkillRunResult {
@@ -367,7 +367,7 @@ export default function (pi: ExtensionAPI) {
 			if (preview) {
 				text += `\n${theme.fg("toolOutput", preview)}`;
 				if (result.output.split("\n").length > 5) {
-					text += `\n${theme.fg("muted", "... (Ctrl+O to expand)")}`;
+					text += `\n${theme.fg("muted", `... (${keyHint("app.tools.expand", "to expand")})`)}`;
 				}
 			} else {
 				text += `\n${theme.fg("muted", "(no output)")}`;

@@ -3,6 +3,7 @@
  */
 
 import { complete } from "@mariozechner/pi-ai";
+import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { type GhIssue } from "./types.js";
@@ -44,9 +45,23 @@ import {
 import { TodoListComponent } from "./ui.js";
 
 export function registerCommands(pi: ExtensionAPI) {
+	// Cache issues for autocomplete (refreshed on list)
+	let cachedIssues: GhIssue[] = [];
+
 	// Register the /todo command for users
 	pi.registerCommand("todo", {
 		description: "Interactive GitHub issues todo manager (pi-todo label)",
+		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+			if (cachedIssues.length === 0) return null;
+			const items = cachedIssues
+				.filter((i) => i.state === "open")
+				.map((i) => ({
+					value: `#${i.number}`,
+					label: `#${i.number}: ${i.title}`,
+				}));
+			const filtered = items.filter((i) => i.value.startsWith(prefix) || i.label.toLowerCase().includes(prefix.toLowerCase()));
+			return filtered.length > 0 ? filtered : null;
+		},
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
 				console.error("/todo requires interactive mode");
@@ -64,6 +79,7 @@ export function registerCommands(pi: ExtensionAPI) {
 			let issues: GhIssue[];
 			try {
 				issues = await listIssues(pi, true);
+				cachedIssues = issues;
 			} catch (err) {
 				ctx.ui.setStatus("gh-todo", undefined);
 				const message = err instanceof Error ? err.message : String(err);

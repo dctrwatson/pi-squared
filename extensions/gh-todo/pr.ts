@@ -15,7 +15,7 @@ import { findLastPrCheckpointEntryId, getEntriesAfter, getSmallModel } from "./u
 function stripCodeFences(text: string): string {
 	const trimmed = text.trim();
 	const match = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n\s*```\s*$/);
-	return match ? match[1] : trimmed;
+	return match ? match[1] ?? trimmed : trimmed;
 }
 
 /**

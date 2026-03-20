@@ -12,7 +12,7 @@
 
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, rawKeyHint } from "@mariozechner/pi-coding-agent";
 import { Editor, type EditorTheme, type Focusable, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 
 const EXTRACTION_SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering from the user.
@@ -439,9 +439,9 @@ export default function (pi: ExtensionAPI) {
 					lines.push("");
 					const canSubmit = allAnswered();
 					if (canSubmit) {
-						add(theme.fg("success", " All questions answered! Press Ctrl+Enter to submit"));
+						add(theme.fg("success", ` All questions answered! ${rawKeyHint("Ctrl+Enter", "submit")}`));
 					} else {
-						add(theme.fg("dim", " Enter next • Shift+Enter newline • Tab/Shift+Tab navigate • Ctrl+Enter submit • Esc cancel"));
+						add(theme.fg("dim", ` ${rawKeyHint("Enter", "next")} • ${rawKeyHint("Shift+Enter", "newline")} • ${rawKeyHint("Tab/Shift+Tab", "navigate")} • ${rawKeyHint("Ctrl+Enter", "submit")} • ${rawKeyHint("Esc", "cancel")}`));
 					}
 
 					// Bottom border

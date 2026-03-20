@@ -3,6 +3,7 @@
  */
 
 import type { Theme } from "@mariozechner/pi-coding-agent";
+import { rawKeyHint } from "@mariozechner/pi-coding-agent";
 import { Editor, type EditorTheme, matchesKey, truncateToWidth, type TUI } from "@mariozechner/pi-tui";
 import { PI_TODO_LABEL, type GhIssue, type ViewMode } from "./types.js";
 
@@ -328,7 +329,7 @@ export class TodoListComponent {
 					add(`  ${line}`);
 				}
 				add("");
-				add(th.fg("dim", " Enter to continue • Esc to cancel"));
+				add(th.fg("dim", ` ${rawKeyHint("Enter", "continue")} • ${rawKeyHint("Esc", "cancel")}`));
 			} else {
 				add(th.fg("muted", ` Title: ${th.fg("text", this.newTitle)}`));
 				add("");
@@ -337,7 +338,7 @@ export class TodoListComponent {
 					add(`  ${line}`);
 				}
 				add("");
-				add(th.fg("dim", " Enter to create • Esc to cancel"));
+				add(th.fg("dim", ` ${rawKeyHint("Enter", "create")} • ${rawKeyHint("Esc", "cancel")}`));
 			}
 			add(th.fg("accent", "─".repeat(width)));
 			this.cachedWidth = width;
@@ -371,7 +372,7 @@ export class TodoListComponent {
 					add(th.fg("dim", " No description"));
 				}
 				add("");
-				add(th.fg("dim", " Enter/Esc to go back"));
+				add(th.fg("dim", ` ${rawKeyHint("Enter/Esc", "go back")}`));
 			}
 			add(th.fg("accent", "─".repeat(width)));
 			this.cachedWidth = width;
@@ -439,20 +440,20 @@ export class TodoListComponent {
 		add(th.fg("accent", "─".repeat(width)));
 		const issue = this.selectedIssue;
 		const helpItems: string[] = [];
-		helpItems.push("a:add");
+		helpItems.push(rawKeyHint("a", "add"));
 		if (issue) {
-			helpItems.push("Enter:view");
-			helpItems.push("o:open");
+			helpItems.push(rawKeyHint("Enter", "view"));
+			helpItems.push(rawKeyHint("o", "open"));
 			if (issue.state === "open") {
-				helpItems.push("s:start");
-				helpItems.push("c:comment");
-				helpItems.push("x:dismiss");
+				helpItems.push(rawKeyHint("s", "start"));
+				helpItems.push(rawKeyHint("c", "comment"));
+				helpItems.push(rawKeyHint("x", "dismiss"));
 			} else {
-				helpItems.push("g:reopen");
+				helpItems.push(rawKeyHint("g", "reopen"));
 			}
 		}
-		helpItems.push("r:refresh");
-		helpItems.push("q/Esc:quit");
+		helpItems.push(rawKeyHint("r", "refresh"));
+		helpItems.push(rawKeyHint("q/Esc", "quit"));
 		add(th.fg("dim", ` ${helpItems.join(" • ")}`));
 
 		this.cachedWidth = width;
