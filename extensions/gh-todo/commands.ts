@@ -361,11 +361,11 @@ Keep it under 200 words.`;
 					try {
 						const result = await getSmallModel(ctx);
 						if (result) {
-							const { model, apiKey } = result;
+							const { model, apiKey, headers } = result;
 							const response = await complete(model, {
 								systemPrompt: "You are a helpful assistant that writes concise GitHub issue progress comments.",
 								messages: [{ role: "user", content: [{ type: "text", text: summaryPrompt }], timestamp: Date.now() }],
-							}, { apiKey });
+							}, { apiKey, headers });
 							
 							if (response.stopReason === "error") {
 								throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);

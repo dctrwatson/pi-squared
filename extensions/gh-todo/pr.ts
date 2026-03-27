@@ -148,7 +148,7 @@ export async function generatePrUpdateSummary(
 		if (!result) {
 			return fallback;
 		}
-		const { model, apiKey } = result;
+		const { model, apiKey, headers } = result;
 
 		let commitContext = "";
 		if (hasCommits) {
@@ -172,7 +172,7 @@ Focus on what feedback was addressed and how, not implementation details.`;
 		const response = await complete(model, {
 			systemPrompt: "You are a helpful assistant that writes concise GitHub PR update comments summarizing how reviewer feedback was addressed.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-		}, { apiKey, maxTokens: 400, signal });
+		}, { apiKey, headers, maxTokens: 400, signal });
 
 		if (response.stopReason === "error") {
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
@@ -224,7 +224,7 @@ export async function generatePrSummary(
 		if (!result) {
 			return defaultBody;
 		}
-		const { model, apiKey } = result;
+		const { model, apiKey, headers } = result;
 
 		const prompt = `Generate a brief PR description for the following changes. Keep it concise (under 200 words).
 
@@ -243,7 +243,7 @@ Do not include sections for testing, screenshots, or other template sections - j
 		const response = await complete(model, {
 			systemPrompt: "You are a helpful assistant that writes concise GitHub PR descriptions.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-		}, { apiKey, maxTokens: 500, signal });
+		}, { apiKey, headers, maxTokens: 500, signal });
 
 		if (response.stopReason === "error") {
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
@@ -281,7 +281,7 @@ export async function fillPrTemplate(
 			// Fallback: prepend issue link to template
 			return `${issueLink}\n\n${template}`;
 		}
-		const { model, apiKey } = result;
+		const { model, apiKey, headers } = result;
 
 		const prompt = `Fill in this PR template. You should ONLY fill in:
 1. Place "${issueLink}" in the appropriate section (usually near the top, or in a "Related Issues" section)
@@ -302,7 +302,7 @@ Return the filled template. Only fill the issue link and summary sections, leave
 		const response = await complete(model, {
 			systemPrompt: "You are a helpful assistant that fills in PR templates. Only fill in the issue link and summary sections, leave other sections for the user.",
 			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-		}, { apiKey, maxTokens: 2000, signal });
+		}, { apiKey, headers, maxTokens: 2000, signal });
 
 		if (response.stopReason === "error") {
 			throw new Error(`LLM call failed: ${response.errorMessage || "Unknown error"}`);
