@@ -100,8 +100,8 @@ export default function (pi: ExtensionAPI) {
 			const haiku = ctx.modelRegistry.find("anthropic", "claude-haiku-4-5");
 			let extractionModel = ctx.model;
 			if (haiku) {
-				const haikuKey = await ctx.modelRegistry.getApiKey(haiku);
-				if (haikuKey) {
+				const haikuAuth = await ctx.modelRegistry.getApiKeyAndHeaders(haiku);
+				if (haikuAuth.ok) {
 					extractionModel = haiku;
 				}
 			}
@@ -118,8 +118,8 @@ export default function (pi: ExtensionAPI) {
 				loader.onAbort = () => done(null);
 
 				const doExtract = async () => {
-					const apiKey = await ctx.modelRegistry.getApiKey(extractionModel);
-					if (!apiKey) {
+					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
+					if (!auth.ok) {
 						extractionError = `No API key available for ${extractionModel.id}`;
 						return null;
 					}
@@ -133,7 +133,7 @@ export default function (pi: ExtensionAPI) {
 					const response = await complete(
 						extractionModel,
 						{ systemPrompt: EXTRACTION_SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey, signal: loader.signal },
+						{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
 					);
 
 					if (response.stopReason === "aborted") {

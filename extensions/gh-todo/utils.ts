@@ -247,7 +247,7 @@ export function getEntriesAfter(ctx: ExtensionContext, afterEntryId: string | nu
  * Tries Claude Haiku first, falls back to the current model with a warning.
  * Returns null if no model or API key is available.
  */
-export async function getSmallModel(ctx: ExtensionContext): Promise<{ model: Model<any>; apiKey: string } | null> {
+export async function getSmallModel(ctx: ExtensionContext): Promise<{ model: Model<any>; apiKey?: string; headers?: Record<string, string> } | null> {
 	let model: Model<any> | null = null;
 
 	// Try Claude Haiku first
@@ -271,11 +271,15 @@ export async function getSmallModel(ctx: ExtensionContext): Promise<{ model: Mod
 		return null;
 	}
 
-	// Get API key
-	const apiKey = getEnvApiKey(model.provider) || (await ctx.modelRegistry.getApiKey(model));
-	if (!apiKey) {
+	// Get API key and headers
+	const envKey = getEnvApiKey(model.provider);
+	if (envKey) {
+		return { model, apiKey: envKey };
+	}
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
 		return null;
 	}
 
-	return { model, apiKey };
+	return { model, apiKey: auth.apiKey, headers: auth.headers };
 }

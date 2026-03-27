@@ -39,8 +39,8 @@ async function generateCommitSummary(
 	const model = getModel("anthropic", "claude-haiku-4-5");
 	if (!model) return null;
 
-	const apiKey = await ctx.modelRegistry.getApiKey(model);
-	if (!apiKey) return null;
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) return null;
 
 	const truncated = truncateText(assistantText, 2000);
 
@@ -61,7 +61,7 @@ async function generateCommitSummary(
 					},
 				],
 			},
-			{ apiKey, maxTokens: 100 }
+			{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 100 }
 		);
 
 		const summary = response.content

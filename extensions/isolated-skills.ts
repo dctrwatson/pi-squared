@@ -248,16 +248,16 @@ export default function (pi: ExtensionAPI) {
 		// Find the skill
 		const commands = pi.getCommands();
 		const skillCommand = commands.find((c) => c.name === `skill:${skillName}` && c.source === "skill");
-		if (!skillCommand || !skillCommand.path) {
+		if (!skillCommand || !skillCommand.sourceInfo.path) {
 			return { action: "continue" as const };
 		}
 
 		// Read the skill file
 		let skillContent: string;
 		try {
-			skillContent = fs.readFileSync(skillCommand.path, "utf-8");
+			skillContent = fs.readFileSync(skillCommand.sourceInfo.path, "utf-8");
 		} catch {
-			ctx.ui.notify(`Failed to read skill file: ${skillCommand.path}`, "error");
+			ctx.ui.notify(`Failed to read skill file: ${skillCommand.sourceInfo.path}`, "error");
 			return { action: "handled" as const };
 		}
 
