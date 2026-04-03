@@ -114,22 +114,15 @@ export default function (pi: ExtensionAPI) {
 		userPrompt = "";
 	}
 
-	// Check if we're in a git repo on session start
-	pi.on("session_start", async (_event, _ctx) => {
-		const { code } = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 1000 });
-		inGitRepo = code === 0;
-	});
-
-	// Reset state on session switch (e.g., /new, /resume)
-	pi.on("session_switch", async (_event, _ctx) => {
-		const { code } = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 1000 });
-		inGitRepo = code === 0;
-		resetState();
-	});
-
-	// Reset state on session fork
-	pi.on("session_fork", async (_event, _ctx) => {
-		resetState();
+	// Check if we're in a git repo on session start; reset state on switch/fork
+	pi.on("session_start", async (event, _ctx) => {
+		if (event.reason !== "fork") {
+			const { code } = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 1000 });
+			inGitRepo = code === 0;
+		}
+		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
+			resetState();
+		}
 	});
 
 	// Capture user prompt before agent starts
