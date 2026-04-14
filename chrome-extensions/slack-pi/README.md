@@ -6,18 +6,17 @@ This directory also has its own lightweight `package.json` so any future browser
 
 ## Current state
 
-This is scaffolding only.
+Connection scaffolding is implemented.
 
 Implemented so far:
 - MV3 manifest
 - lightweight local `package.json`
-- background service worker placeholder
+- background service worker with WebSocket hello/ack support
+- ping response handling for the Pi bridge
 - Slack content script placeholder
 - minimal popup for status, token storage, and test action
 
 Not implemented yet:
-- WebSocket connection to `slack-pi`
-- request/response protocol
 - Slack thread extraction
 - composer draft extraction
 - composer insertion

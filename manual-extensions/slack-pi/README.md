@@ -17,19 +17,27 @@ slack-pi() {
 
 ## Current state
 
-This is scaffolding only.
+Phase 1 is implemented.
 
 Implemented so far:
 - repo-local extension entrypoint
 - dedicated local `package.json`
 - dedicated local `tsconfig.json`
-- placeholder `/slack-status` command
-- placeholder `/slack-ping` command
+- singleton localhost WebSocket server on `ws://127.0.0.1:27183`
+- local shared-secret creation/loading
+- Chrome hello/ack handshake support
+- `/slack-status` command
+- `/slack-ping` command
 
 Not implemented yet:
-- singleton localhost WebSocket server
-- Chrome extension handshake
 - Slack read/insert tools
 - composer draft context capture
+- Slack DOM integration
+
+## Useful commands
+
+- `/slack-status` — show bridge status
+- `/slack-status --show-token` — reveal the shared secret for Chrome setup
+- `/slack-ping` — ping the connected Chrome extension
 
 See `docs/slack-pi-architecture.md` for the implementation plan.

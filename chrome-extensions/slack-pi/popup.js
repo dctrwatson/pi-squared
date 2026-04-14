@@ -13,9 +13,16 @@ function setTestResult(text) {
   testResultEl.textContent = text;
 }
 
+function formatTimestamp(timestamp) {
+  if (!timestamp) return "never";
+  return new Date(timestamp).toLocaleString();
+}
+
 function formatStatus(status) {
   const lines = [
     `Bridge: ${status.connected ? "connected" : "offline"}`,
+    `Socket state: ${status.socketState}`,
+    `Authenticated: ${status.authenticated ? "yes" : "no"}`,
     `Endpoint: ${status.wsUrl}`,
     `Token configured: ${status.hasToken ? "yes" : "no"}`,
     `Slack tabs: ${status.slackTabCount}`,
@@ -27,8 +34,11 @@ function formatStatus(status) {
     lines.push("Active tab: none");
   }
 
-  if (status.note) {
-    lines.push(`Note: ${status.note}`);
+  lines.push(`Hello sent: ${formatTimestamp(status.lastHelloSentAt)}`);
+  lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
+
+  if (status.lastError) {
+    lines.push(`Last error: ${status.lastError}`);
   }
 
   return lines.join("\n");
