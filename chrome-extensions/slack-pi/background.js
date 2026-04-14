@@ -47,7 +47,7 @@ function getAppearanceState() {
 
   if (state.socketState === "connecting" || state.socketState === "open") {
     return {
-      color: "#f59e0b",
+      color: "#6b7280",
       title: "Slack Pi: connecting",
     };
   }
