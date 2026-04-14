@@ -4,6 +4,7 @@ const TOKEN_KEY = "slackPiToken";
 const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
+const ICON_SIZES = [16, 32, 48, 128];
 
 const state = {
   socket: null,
@@ -22,16 +23,107 @@ const state = {
 
 chrome.runtime.onInstalled.addListener(() => {
   console.log("[slack-pi] background installed");
+  void updateActionAppearance();
   void ensureConnected();
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  void updateActionAppearance();
   void ensureConnected();
 });
 
 async function getToken() {
   const result = await chrome.storage.local.get(TOKEN_KEY);
   return typeof result[TOKEN_KEY] === "string" ? result[TOKEN_KEY] : "";
+}
+
+function getAppearanceState() {
+  if (state.authenticated && state.connected) {
+    return {
+      color: "#22c55e",
+      badgeText: "ON",
+      badgeColor: "#166534",
+      title: "Slack Pi: connected",
+    };
+  }
+
+  if (state.socketState === "connecting" || state.socketState === "open") {
+    return {
+      color: "#f59e0b",
+      badgeText: "…",
+      badgeColor: "#92400e",
+      title: "Slack Pi: connecting",
+    };
+  }
+
+  if (state.lastError) {
+    return {
+      color: "#ef4444",
+      badgeText: "!",
+      badgeColor: "#991b1b",
+      title: `Slack Pi: ${state.lastError}`,
+    };
+  }
+
+  return {
+    color: "#6b7280",
+    badgeText: "",
+    badgeColor: "#374151",
+    title: "Slack Pi: idle",
+  };
+}
+
+function makeIconImageData(size, color) {
+  if (typeof OffscreenCanvas !== "function") {
+    return null;
+  }
+
+  const canvas = new OffscreenCanvas(size, size);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.clearRect(0, 0, size, size);
+
+  const center = size / 2;
+  const outerRadius = Math.max(3, size * 0.42);
+  const innerRadius = Math.max(2, size * 0.3);
+
+  ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
+  ctx.beginPath();
+  ctx.arc(center, center, outerRadius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(center, center, innerRadius, 0, Math.PI * 2);
+  ctx.fill();
+
+  return ctx.getImageData(0, 0, size, size);
+}
+
+async function updateActionAppearance() {
+  const appearance = getAppearanceState();
+
+  try {
+    await chrome.action.setTitle({ title: appearance.title });
+    await chrome.action.setBadgeBackgroundColor({ color: appearance.badgeColor });
+    await chrome.action.setBadgeText({ text: appearance.badgeText });
+
+    const imageData = {};
+    let hasImageData = false;
+    for (const size of ICON_SIZES) {
+      const data = makeIconImageData(size, appearance.color);
+      if (!data) continue;
+      imageData[size] = data;
+      hasImageData = true;
+    }
+
+    if (hasImageData) {
+      await chrome.action.setIcon({ imageData });
+    }
+  } catch (error) {
+    console.warn("[slack-pi] failed to update action appearance", error);
+  }
 }
 
 function clearReconnectTimer() {
@@ -54,6 +146,7 @@ function resetSocketState() {
   state.socketState = "idle";
   state.connected = false;
   state.authenticated = false;
+  void updateActionAppearance();
 }
 
 function closeSocket() {
@@ -97,6 +190,7 @@ function startHeartbeat(socket) {
       });
     } catch (error) {
       state.lastError = error instanceof Error ? error.message : String(error);
+      void updateActionAppearance();
     }
   }, HEARTBEAT_INTERVAL_MS);
 }
@@ -318,6 +412,7 @@ function handleSocketMessage(socket, event) {
     state.lastHelloAckAt = Date.now();
     state.lastError = "";
     startHeartbeat(socket);
+    void updateActionAppearance();
     return;
   }
 
@@ -332,6 +427,7 @@ async function ensureConnected() {
     clearReconnectTimer();
     closeSocket();
     state.lastError = "No shared secret configured.";
+    void updateActionAppearance();
     return false;
   }
 
@@ -348,6 +444,7 @@ async function ensureConnected() {
   if (typeof WebSocket !== "function") {
     state.socketState = "error";
     state.lastError = "WebSocket is not available in this Chrome extension service worker.";
+    void updateActionAppearance();
     return false;
   }
 
@@ -355,6 +452,7 @@ async function ensureConnected() {
   state.connected = false;
   state.authenticated = false;
   state.lastError = "";
+  void updateActionAppearance();
 
   let socket;
   try {
@@ -363,6 +461,7 @@ async function ensureConnected() {
     state.socketState = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
     console.error("[slack-pi] failed to create WebSocket", error);
+    void updateActionAppearance();
     void scheduleReconnect();
     return false;
   }
@@ -372,6 +471,7 @@ async function ensureConnected() {
   socket.addEventListener("open", () => {
     state.socketState = "open";
     state.lastHelloSentAt = Date.now();
+    void updateActionAppearance();
     sendJson(socket, {
       type: "hello",
       role: "chrome",
@@ -389,6 +489,7 @@ async function ensureConnected() {
 
   socket.addEventListener("error", () => {
     state.lastError = "WebSocket error while talking to slack-pi.";
+    void updateActionAppearance();
   });
 
   socket.addEventListener("close", (event) => {
@@ -399,6 +500,7 @@ async function ensureConnected() {
         state.lastError = `Socket closed (${event.code}).`;
       }
       resetSocketState();
+      void updateActionAppearance();
       void scheduleReconnect();
     }
   });
@@ -431,6 +533,7 @@ async function getStatus() {
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !(TOKEN_KEY in changes)) return;
+  void updateActionAppearance();
   void ensureConnected();
 });
 
@@ -456,6 +559,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       clearReconnectTimer();
       closeSocket();
       state.lastError = "No shared secret configured.";
+      void updateActionAppearance();
       sendResponse({ ok: true });
     });
     return true;

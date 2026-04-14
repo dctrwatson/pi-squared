@@ -14,6 +14,7 @@ Implemented so far:
 - background service worker with WebSocket hello/ack support
 - ping response handling for the Pi bridge
 - active Slack tab routing
+- action icon state coloring (green connected, amber connecting, red error, gray idle)
 - Slack content script with current thread extraction
 - composer draft extraction for reply-context capture
 - minimal popup for status, token storage, and test action
