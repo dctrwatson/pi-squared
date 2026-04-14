@@ -38,7 +38,7 @@ Implemented so far:
 - Slack thread normalization for model context
 
 Not implemented yet:
-- reply insertion tool
+- any browser-side write-back tooling
 - Slack DOM hardening beyond the current heuristic extractor
 
 ## Useful commands

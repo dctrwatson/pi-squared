@@ -19,7 +19,7 @@ Implemented so far:
 - minimal popup for status, token storage, and test action
 
 Not implemented yet:
-- composer insertion
+- any browser-side write-back tooling
 - DOM hardening beyond the current heuristic extractor
 
 ## Loading in Chrome

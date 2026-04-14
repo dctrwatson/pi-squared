@@ -13,7 +13,7 @@ This design intentionally avoids:
 It assumes the primary workflow is:
 1. Slack is open in a pinned Chrome tab
 2. `slack-pi` is launched when Slack assistance is needed
-3. Pi uses tool calls to read the current thread, incorporate any existing Slack composer draft as context, and insert a revised reply back into Slack for manual sending in the UI
+3. Pi uses tool calls to read the current thread, incorporate any existing Slack composer draft as context, and produce a revised reply for manual copy/paste back into Slack
 
 ---
 
@@ -24,8 +24,8 @@ It assumes the primary workflow is:
 - Let Pi use the thread as context during a normal tool-calling workflow
 - Accept a short or long user draft/note and turn it into a polished Slack reply
 - If the Slack composer already contains text, use that draft as additional reply context
-- Insert the revised reply into the Slack composer
 - Keep the integration **opt-in** via a dedicated `slack-pi` launcher
+- Keep the final reply workflow manual via copy/paste
 
 ### Secondary goals
 - Keep implementation local-only and personal-workflow-friendly
@@ -40,6 +40,7 @@ It assumes the primary workflow is:
 - No attempt to read messages outside the currently accessible Slack web UI
 - No multi-controller coordination between several Pi instances
 - No Pi-driven final send action; the user always clicks send in Slack manually
+- No Pi-driven composer insertion in the MVP; the user copy/pastes manually
 
 ---
 
@@ -170,7 +171,7 @@ This is a deliberate design choice so there is exactly one Slack controller.
 - expose Slack-oriented tools to the LLM
 - expose a few slash commands for status/debugging
 - normalize Chrome-returned Slack data into clean LLM context
-- enforce safe insertion behavior and the manual-send policy
+- support a read-only Slack integration plus manual copy/paste workflow
 
 ### Proposed slash commands
 - `/slack-status`
@@ -194,15 +195,7 @@ Read the currently open Slack thread from the active Slack tab.
 - normalize it into compact text for the model
 - include structured details for rendering/debugging
 
-#### `slack_insert_reply`
-Insert supplied text into the active Slack composer without sending.
-
-**Behavior:**
-- ask Chrome to focus the active composer
-- replace the current composer contents in the MVP
-- require confirmation before replacing a non-empty composer
-- do not support append mode in the MVP
-- return success/failure
+There is no write-back tool in the MVP. Manual copy/paste is the intended workflow.
 
 #### Optional later tool: `slack_get_selection`
 Read only the currently selected message or visible root message rather than the full thread.
@@ -240,8 +233,6 @@ Expected extension pieces:
 - read visible Slack message/thread DOM
 - read current Slack composer contents when present
 - normalize DOM fragments into structured data
-- locate and manipulate the message composer
-- perform insert actions
 - report whether the page is in a supported state
 
 ### MVP page scope
@@ -267,7 +258,6 @@ The browser side should isolate Slack DOM handling into a small adapter instead 
   - timestamps if available
   - current composer draft text if present
 - normalize message text
-- insert text into the correct composer
 
 ### Design principle
 Expect selectors to break eventually. Keep them centralized and easy to update.
@@ -489,17 +479,12 @@ For long threads:
 5. Pi calls `slack_get_current_thread`
 6. Pi sees both the thread and any existing composer draft text
 7. Pi drafts or refines a reply
-8. Pi calls `slack_insert_reply`
+8. You copy/paste the final reply into Slack
 9. You review it and press send manually in the Slack UI
 
 ## Recommended safety model
-- insertion is low risk, but replacing a non-empty composer should require confirmation
-- final sending always happens manually in Slack UI
-
-### Confirmation recommendation
-Before `slack_insert_reply` replaces a non-empty composer:
-- ask the user to confirm replacement
-- do not support append mode in the MVP
+- the browser integration is read-only in the MVP
+- final copy/paste and send actions always happen manually in Slack UI
 
 ### Final-send policy
 - Pi never triggers Slack send in the MVP
@@ -581,8 +566,8 @@ Fail fast with a clear singleton message.
 ## Configurable values later if needed
 - port
 - reconnect backoff
-- composer replacement policy
 - preferred active Slack tab behavior
+- optional future write-back behavior if manual copy/paste is revisited
 
 ---
 
@@ -658,25 +643,7 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 
 ---
 
-## Phase 4: Insert draft reply
-**Goal:** support writing into the Slack composer.
-
-### Tasks
-- implement composer detection in content script
-- implement `insertReply` action
-- implement Pi tool `slack_insert_reply`
-- verify text insertion works for visible thread and channel composer states
-- require confirmation before replacing a non-empty composer
-
-### Acceptance criteria
-- Pi can insert generated text into the visible Slack composer
-- insertion does not send automatically
-- replacement of a non-empty composer requires confirmation
-- failure messages are actionable
-
----
-
-## Phase 5: polish and hardening
+## Phase 4: polish and hardening
 **Goal:** make the integration pleasant and resilient.
 
 ### Tasks
@@ -702,7 +669,7 @@ The MVP should include only:
 - Chrome extension with reconnect logic
 - minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
-- `slack_insert_reply`
+- `/slack-read`
 - `/slack-status`
 
 Everything else is optional.
@@ -728,11 +695,10 @@ Everything else is optional.
 - test on DM and channel thread if possible
 - test with no thread open
 
-### Insert reply
-- ask Pi to insert a generated draft
-- verify text appears in correct composer
-- verify no send occurs
-- verify replacement confirmation appears when the composer already has text
+### Manual copy/paste workflow
+- ask Pi to produce a generated draft after `/slack-read`
+- verify the draft is easy to copy/paste into Slack manually
+- verify existing composer text can still be used as context without any browser-side write-back
 
 ### Error handling
 - disconnect Chrome
@@ -749,10 +715,9 @@ Everything else is optional.
    - If multiple Slack tabs exist, use the most recently focused one.
    - If no Slack tab exists, fail clearly.
 
-2. **Composer behavior**
-   - Replace composer contents in the MVP.
-   - If the composer is non-empty, require confirmation before replacing it.
-   - Do not support append mode in the MVP.
+2. **Reply workflow**
+   - Manual copy/paste is the MVP workflow.
+   - Do not implement browser-side reply insertion in the MVP.
 
 3. **Thread extraction scope**
    - Read only the currently open thread pane in the MVP.
