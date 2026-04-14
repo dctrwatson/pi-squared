@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Creates or drafts a GitHub pull request from the current branch, cleans up `pi:` auto-commits, and follows repo PR templates.
+description: Creates or drafts a GitHub pull request from the current branch and follows repo PR templates.
 ---
 
 # Create Pull Request
