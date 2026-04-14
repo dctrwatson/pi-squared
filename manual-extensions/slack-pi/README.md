@@ -34,16 +34,18 @@ Implemented so far:
 - Chrome hello/ack handshake support
 - `/slack-status` command
 - `/slack-ping` command
+- `slack_get_current_thread` tool
+- Slack thread normalization for model context
 
 Not implemented yet:
-- Slack read/insert tools
-- composer draft context capture
-- Slack DOM integration
+- reply insertion tool
+- Slack DOM hardening beyond the current heuristic extractor
 
 ## Useful commands
 
 - `/slack-status` — show bridge status
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
+- ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
 
 See `docs/slack-pi-architecture.md` for the implementation plan.

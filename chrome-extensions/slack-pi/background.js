@@ -340,6 +340,7 @@ async function getStatus() {
     hasToken: token.length > 0,
     slackTabCount: tabs.count,
     activeTab: tabs.activeTab,
+    selectionRule: tabs.selectionRule,
     lastHelloSentAt: state.lastHelloSentAt,
     lastHelloAckAt: state.lastHelloAckAt,
     lastPingAt: state.lastPingAt,

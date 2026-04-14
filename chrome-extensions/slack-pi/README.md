@@ -13,13 +13,14 @@ Implemented so far:
 - lightweight local `package.json`
 - background service worker with WebSocket hello/ack support
 - ping response handling for the Pi bridge
-- Slack content script placeholder
+- active Slack tab routing
+- Slack content script with current thread extraction
+- composer draft extraction for reply-context capture
 - minimal popup for status, token storage, and test action
 
 Not implemented yet:
-- Slack thread extraction
-- composer draft extraction
 - composer insertion
+- DOM hardening beyond the current heuristic extractor
 
 ## Loading in Chrome
 

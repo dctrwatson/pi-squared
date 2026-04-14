@@ -34,6 +34,10 @@ function formatStatus(status) {
     lines.push("Active tab: none");
   }
 
+  if (status.selectionRule) {
+    lines.push(`Tab rule: ${status.selectionRule}`);
+  }
+
   lines.push(`Hello sent: ${formatTimestamp(status.lastHelloSentAt)}`);
   lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
 
