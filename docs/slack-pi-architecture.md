@@ -73,11 +73,13 @@ pi-squared/
   manual-extensions/
     slack-pi/
       index.ts
-      package.json          # if Chrome/WebSocket/helper deps are needed
+      package.json
+      tsconfig.json
       README.md             # setup and local usage
   chrome-extensions/
     slack-pi/
       manifest.json
+      package.json
       background.js
       content-script.js
       popup.html
@@ -88,7 +90,8 @@ pi-squared/
 - `extensions/` is already auto-loaded by the root `package.json`
 - `manual-extensions/` is **not** referenced by the root `pi.extensions` manifest
 - the Slack extension can be launched explicitly with `pi -e ...`
-- the Chrome extension can live beside it in the same repo without affecting Pi packaging
+- the Slack Pi pieces can live beside the main package without being auto-loaded
+- separate local package boundaries keep future Slack-specific dependencies out of the root auto-loaded Pi package
 
 ---
 
@@ -592,10 +595,11 @@ Fail fast with a clear singleton message.
 - create `manual-extensions/slack-pi/`
 - create `chrome-extensions/slack-pi/`
 - add local README/setup notes
-- optionally update `tsconfig.json` later to include `manual-extensions/**/*.ts`
+- create separate local package boundaries for Slack Pi code
+- keep root typechecking wired through `npm run check`
 
 ### Deliverable
-Repo structure exists and does not auto-load the Slack extension.
+Repo structure exists, does not auto-load the Slack extension, and keeps Slack-specific dependencies out of the root package.
 
 ---
 

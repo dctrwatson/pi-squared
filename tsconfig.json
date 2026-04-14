@@ -29,8 +29,7 @@
   },
   "include": [
     "extensions/**/*.ts",
-    "skills/**/*.ts",
-    "manual-extensions/**/*.ts"
+    "skills/**/*.ts"
   ],
   "exclude": [
     "node_modules"

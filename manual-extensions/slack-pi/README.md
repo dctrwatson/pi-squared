@@ -2,6 +2,8 @@
 
 Scaffold for the repo-local Slack Pi extension.
 
+This directory is its **own package** so future Slack-specific dependencies can live here instead of in the root auto-loaded Pi package.
+
 ## Purpose
 
 This extension is intentionally **not** part of the root package auto-loaded extensions.
@@ -19,6 +21,8 @@ This is scaffolding only.
 
 Implemented so far:
 - repo-local extension entrypoint
+- dedicated local `package.json`
+- dedicated local `tsconfig.json`
 - placeholder `/slack-status` command
 - placeholder `/slack-ping` command
 

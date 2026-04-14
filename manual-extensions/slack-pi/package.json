@@ -1,0 +1,18 @@
+{
+  "name": "slack-pi-extension",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Repo-local Slack Pi extension package",
+  "type": "module",
+  "scripts": {
+    "check": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "clean": "echo 'nothing to clean'",
+    "build": "echo 'nothing to build'"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  }
+}
