@@ -40,6 +40,7 @@ function formatStatus(status) {
 
   lines.push(`Hello sent: ${formatTimestamp(status.lastHelloSentAt)}`);
   lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
+  lines.push(`Heartbeat: ${formatTimestamp(status.lastHeartbeatSentAt)}`);
 
   if (status.lastError) {
     lines.push(`Last error: ${status.lastError}`);

@@ -35,6 +35,12 @@ interface HelloAckMessage {
 	};
 }
 
+interface EventMessage {
+	type: "event";
+	event: string;
+	payload?: unknown;
+}
+
 interface RequestMessage {
 	id: string;
 	type: "request";
@@ -159,6 +165,11 @@ function isHelloMessage(value: unknown): value is HelloMessage {
 function isResponseMessage(value: unknown): value is ResponseMessage {
 	if (!isRecord(value)) return false;
 	return value.type === "response" && typeof value.id === "string" && typeof value.ok === "boolean";
+}
+
+function isEventMessage(value: unknown): value is EventMessage {
+	if (!isRecord(value)) return false;
+	return value.type === "event" && typeof value.event === "string";
 }
 
 function isSlackThreadMessage(value: unknown): value is SlackThreadMessage {
@@ -423,8 +434,16 @@ function handleAuthenticatedMessage(socket: WebSocket, raw: RawData): void {
 		return;
 	}
 
+	if (state.activeChrome?.socket === socket) {
+		state.activeChrome.lastSeenAt = Date.now();
+	}
+
 	if (isResponseMessage(parsed)) {
 		handleResponse(parsed);
+		return;
+	}
+
+	if (isEventMessage(parsed)) {
 		return;
 	}
 }

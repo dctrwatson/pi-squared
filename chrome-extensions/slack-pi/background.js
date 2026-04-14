@@ -3,6 +3,7 @@ const SLACK_PI_WS_URL = `ws://127.0.0.1:${SLACK_PI_PORT}`;
 const TOKEN_KEY = "slackPiToken";
 const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
+const HEARTBEAT_INTERVAL_MS = 20_000;
 
 const state = {
   socket: null,
@@ -10,9 +11,11 @@ const state = {
   connected: false,
   authenticated: false,
   reconnectTimer: null,
+  heartbeatTimer: null,
   lastError: "",
   lastHelloSentAt: 0,
   lastHelloAckAt: 0,
+  lastHeartbeatSentAt: 0,
   lastPingAt: 0,
   lastPongAt: 0,
 };
@@ -38,7 +41,15 @@ function clearReconnectTimer() {
   }
 }
 
+function clearHeartbeatTimer() {
+  if (state.heartbeatTimer !== null) {
+    clearInterval(state.heartbeatTimer);
+    state.heartbeatTimer = null;
+  }
+}
+
 function resetSocketState() {
+  clearHeartbeatTimer();
   state.socket = null;
   state.socketState = "idle";
   state.connected = false;
@@ -69,6 +80,25 @@ async function scheduleReconnect() {
 
 function sendJson(socket, message) {
   socket.send(JSON.stringify(message));
+}
+
+function startHeartbeat(socket) {
+  clearHeartbeatTimer();
+  state.heartbeatTimer = setInterval(() => {
+    if (!state.authenticated || state.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+    state.lastHeartbeatSentAt = Date.now();
+    try {
+      sendJson(socket, {
+        type: "event",
+        event: "heartbeat",
+        payload: {
+          sentAt: new Date(state.lastHeartbeatSentAt).toISOString(),
+        },
+      });
+    } catch (error) {
+      state.lastError = error instanceof Error ? error.message : String(error);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 }
 
 class BridgeActionError extends Error {
@@ -255,6 +285,7 @@ function handleSocketMessage(socket, event) {
     state.socketState = "authenticated";
     state.lastHelloAckAt = Date.now();
     state.lastError = "";
+    startHeartbeat(socket);
     return;
   }
 
@@ -359,6 +390,7 @@ async function getStatus() {
     selectionRule: tabs.selectionRule,
     lastHelloSentAt: state.lastHelloSentAt,
     lastHelloAckAt: state.lastHelloAckAt,
+    lastHeartbeatSentAt: state.lastHeartbeatSentAt,
     lastPingAt: state.lastPingAt,
     lastPongAt: state.lastPongAt,
     lastError: state.lastError,
