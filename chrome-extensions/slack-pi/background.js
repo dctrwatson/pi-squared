@@ -127,6 +127,27 @@ function serializeTab(tab) {
     : null;
 }
 
+function isReceivingEndMissing(error) {
+  if (!(error instanceof Error)) return false;
+  return /receiving end does not exist|could not establish connection/i.test(error.message);
+}
+
+async function ensureContentScriptLoaded(tabId) {
+  try {
+    const probe = await chrome.tabs.sendMessage(tabId, { type: "slack-pi:content-ping" });
+    if (probe && typeof probe === "object") return;
+  } catch (error) {
+    if (!isReceivingEndMissing(error)) {
+      throw error;
+    }
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ["content-script.js"],
+  });
+}
+
 function toErrorPayload(error) {
   if (error instanceof BridgeActionError) {
     return { code: error.code, message: error.message };
@@ -185,6 +206,17 @@ async function resolveActiveSlackTab() {
 
 async function sendMessageToActiveSlackTab(message) {
   const { tab, selectionRule, tabCount } = await resolveActiveSlackTab();
+
+  try {
+    await ensureContentScriptLoaded(tab.id);
+  } catch (error) {
+    throw new BridgeActionError(
+      "content_script_unavailable",
+      error instanceof Error
+        ? error.message
+        : "The Slack Pi content script could not be loaded into the active Slack tab.",
+    );
+  }
 
   let response;
   try {

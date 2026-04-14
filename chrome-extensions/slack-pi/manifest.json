@@ -5,7 +5,8 @@
   "description": "Scaffold for the local Slack Pi Chrome bridge.",
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://app.slack.com/*"
