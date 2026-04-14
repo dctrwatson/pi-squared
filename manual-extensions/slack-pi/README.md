@@ -7,12 +7,18 @@ This directory is its **own package** so future Slack-specific dependencies can 
 ## Purpose
 
 This extension is intentionally **not** part of the root package auto-loaded extensions.
-It is meant to be launched explicitly, for example via a shell function:
+It is meant to be launched explicitly.
+
+Recommended launcher script:
 
 ```sh
-slack-pi() {
-  pi -e /Users/johnw/Projects/pi-squared/manual-extensions/slack-pi/index.ts "$@"
-}
+/Users/johnw/Projects/pi-squared/bin/slack-pi
+```
+
+You can symlink that into a directory on your `PATH`, for example:
+
+```sh
+ln -sf /Users/johnw/Projects/pi-squared/bin/slack-pi ~/bin/slack-pi
 ```
 
 ## Current state
