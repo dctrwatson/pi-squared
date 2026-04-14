@@ -282,12 +282,28 @@ async function ensureConnected() {
   clearReconnectTimer();
   closeSocket();
 
+  if (typeof WebSocket !== "function") {
+    state.socketState = "error";
+    state.lastError = "WebSocket is not available in this Chrome extension service worker.";
+    return false;
+  }
+
   state.socketState = "connecting";
   state.connected = false;
   state.authenticated = false;
   state.lastError = "";
 
-  const socket = new WebSocket(SLACK_PI_WS_URL);
+  let socket;
+  try {
+    socket = new WebSocket(SLACK_PI_WS_URL);
+  } catch (error) {
+    state.socketState = "error";
+    state.lastError = error instanceof Error ? error.message : String(error);
+    console.error("[slack-pi] failed to create WebSocket", error);
+    void scheduleReconnect();
+    return false;
+  }
+
   state.socket = socket;
 
   socket.addEventListener("open", () => {
