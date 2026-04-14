@@ -11,7 +11,9 @@ const HOST = "127.0.0.1";
 const DEFAULT_PORT = 27183;
 const PROTOCOL_VERSION = 1;
 const HELLO_TIMEOUT_MS = 5_000;
-const REQUEST_TIMEOUT_MS = 5_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const THREAD_REQUEST_TIMEOUT_MS = 20_000;
+const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "slack-pi", "token");
 
 type BridgeLifecycle = "stopped" | "starting" | "listening" | "error";
@@ -619,6 +621,17 @@ function closeSocket(socket: WebSocket, code: number, reason: string): void {
 	}
 }
 
+function getChromeRequestTimeoutMs(action: string): number {
+	switch (action) {
+		case "getCurrentThread":
+			return THREAD_REQUEST_TIMEOUT_MS;
+		case "getChannelRange":
+			return CHANNEL_RANGE_REQUEST_TIMEOUT_MS;
+		default:
+			return DEFAULT_REQUEST_TIMEOUT_MS;
+	}
+}
+
 async function requestChrome(action: string, payload: Record<string, unknown> = {}): Promise<ResponseMessage> {
 	const chrome = state.activeChrome;
 	if (!chrome) {
@@ -626,6 +639,7 @@ async function requestChrome(action: string, payload: Record<string, unknown> = 
 	}
 
 	const id = randomUUID();
+	const timeoutMs = getChromeRequestTimeoutMs(action);
 	const request: RequestMessage = {
 		id,
 		type: "request",
@@ -636,8 +650,8 @@ async function requestChrome(action: string, payload: Record<string, unknown> = 
 	return await new Promise<ResponseMessage>((resolve, reject) => {
 		const timeout = setTimeout(() => {
 			state.pendingRequests.delete(id);
-			reject(new Error(`Timed out waiting for Chrome response to ${action}.`));
-		}, REQUEST_TIMEOUT_MS);
+			reject(new Error(`Timed out waiting for Chrome response to ${action} after ${Math.round(timeoutMs / 1000)}s.`));
+		}, timeoutMs);
 
 		state.pendingRequests.set(id, {
 			action,
