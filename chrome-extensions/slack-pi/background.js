@@ -241,6 +241,130 @@ function isSlackUrl(url) {
   return /^https:\/\/(?:app|[^./]+)\.slack\.com\//i.test(url);
 }
 
+function normalizeSlackTs(ts) {
+  if (typeof ts !== "string") return "";
+  const trimmed = ts.trim();
+  if (!trimmed) return "";
+  if (/^\d{10}\.\d{6}$/.test(trimmed)) return trimmed;
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length === 16) {
+    return `${digits.slice(0, 10)}.${digits.slice(10)}`;
+  }
+  return trimmed.replace(/[^\d.]/g, "");
+}
+
+function parseSlackTeamIdFromUrl(url) {
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    const teamMatch = parsed.pathname.match(/\/client\/(T[A-Z0-9]+)(?:\/|$)/i);
+    if (teamMatch?.[1]) return teamMatch[1];
+    const team = parsed.searchParams.get("team");
+    if (team) return team;
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function parseSlackMessageLink(url) {
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname;
+    const teamId =
+      parseSlackTeamIdFromUrl(url) ||
+      parsed.searchParams.get("team") ||
+      undefined;
+
+    let channelId = parsed.searchParams.get("cid") || undefined;
+    let messageTs = normalizeSlackTs(parsed.searchParams.get("message_ts") || "");
+    let threadTs = normalizeSlackTs(parsed.searchParams.get("thread_ts") || "");
+
+    const archiveMatch = pathname.match(/\/archives\/([A-Z0-9]+)\/p(\d{16})/i);
+    if (archiveMatch?.[1]) {
+      channelId ||= archiveMatch[1];
+      if (!messageTs) {
+        messageTs = normalizeSlackTs(archiveMatch[2]);
+      }
+    }
+
+    const clientMatch = pathname.match(/\/client\/(T[A-Z0-9]+)\/([A-Z0-9]+)(?:\/|$)/i);
+    if (clientMatch?.[1]) {
+      channelId ||= clientMatch[2];
+    }
+
+    const threadPathMatch = pathname.match(/\/thread\/([A-Z0-9]+)-(\d{10}\.\d{6})/i);
+    if (threadPathMatch?.[1]) {
+      channelId ||= threadPathMatch[1];
+      if (!messageTs) {
+        messageTs = normalizeSlackTs(threadPathMatch[2]);
+      }
+      if (!threadTs) {
+        threadTs = normalizeSlackTs(threadPathMatch[2]);
+      }
+    }
+
+    if (!channelId || !messageTs) {
+      return null;
+    }
+
+    return {
+      teamId,
+      channelId,
+      messageTs,
+      threadTs: threadTs || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildSlackWebClientMessageUrl(teamId, channelId, messageTs, threadTs) {
+  const url = new URL(`https://app.slack.com/client/${teamId}/${channelId}`);
+  url.searchParams.set("cid", channelId);
+  url.searchParams.set("message_ts", messageTs);
+  url.searchParams.set("cdn", "1");
+  if (threadTs) {
+    url.searchParams.set("thread_ts", threadTs);
+  }
+  return url.href;
+}
+
+async function resolveSlackWebMessageUrl(url) {
+  const parsed = parseSlackMessageLink(url);
+  if (!parsed) {
+    return { url, rewritten: false, reason: "unrecognized_message_link" };
+  }
+
+  let teamId = parsed.teamId;
+  if (!teamId) {
+    const details = await getSlackTabsDetailed();
+    const candidateTabs = [details.activeTab, ...details.tabs].filter(Boolean);
+    for (const tab of candidateTabs) {
+      const candidateTeamId = parseSlackTeamIdFromUrl(tab.url);
+      if (candidateTeamId) {
+        teamId = candidateTeamId;
+        break;
+      }
+    }
+  }
+
+  if (!teamId) {
+    return { url, rewritten: false, reason: "missing_team_id" };
+  }
+
+  return {
+    url: buildSlackWebClientMessageUrl(teamId, parsed.channelId, parsed.messageTs, parsed.threadTs),
+    rewritten: true,
+    reason: parsed.teamId ? "from_input_url" : "from_open_slack_tab",
+    teamId,
+    channelId: parsed.channelId,
+    messageTs: parsed.messageTs,
+  };
+}
+
 function isReceivingEndMissing(error) {
   if (!(error instanceof Error)) return false;
   return /receiving end does not exist|could not establish connection/i.test(error.message);
@@ -443,7 +567,18 @@ async function sendMessageToTemporarySlackTab(url, message) {
     throw new BridgeActionError("invalid_slack_url", "The supplied Slack link is not a recognized Slack URL.");
   }
 
-  const tab = await chrome.tabs.create({ url, active: false });
+  const resolvedUrl = await resolveSlackWebMessageUrl(url);
+  if (!resolvedUrl.rewritten) {
+    console.warn("[slack-pi] could not rewrite Slack message URL to a browser-safe web client URL", resolvedUrl);
+    if (resolvedUrl.reason === "missing_team_id") {
+      throw new BridgeActionError(
+        "missing_team_id",
+        "Could not map the Slack permalink to a browser-safe web URL. Keep the target workspace open in Chrome and try again.",
+      );
+    }
+  }
+
+  const tab = await chrome.tabs.create({ url: resolvedUrl.url, active: false });
   if (typeof tab.id !== "number") {
     throw new BridgeActionError("invalid_tab", "Could not create a temporary Slack tab.");
   }
@@ -452,7 +587,10 @@ async function sendMessageToTemporarySlackTab(url, message) {
     await waitForTabComplete(tab.id);
     const prepared = await prepareTemporarySlackTab(tab.id);
     if (!prepared.prepared) {
-      console.warn("[slack-pi] temporary Slack tab was not fully prepared", prepared.lastPreparePayload);
+      console.warn("[slack-pi] temporary Slack tab was not fully prepared", {
+        prepare: prepared.lastPreparePayload,
+        resolvedUrl,
+      });
     }
     const loadedTab = await chrome.tabs.get(tab.id);
     const response = await sendMessageToTab(tab.id, message);
@@ -460,6 +598,7 @@ async function sendMessageToTemporarySlackTab(url, message) {
       response,
       tempTab: serializeTab(loadedTab),
       prepare: prepared.lastPreparePayload,
+      resolvedUrl,
     };
   } finally {
     try {
