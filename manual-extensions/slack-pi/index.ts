@@ -114,6 +114,18 @@ interface SlackThreadSnapshot {
 	harvestedViaScroll?: boolean;
 }
 
+interface SlackChannelRangeSnapshot {
+	workspace?: string;
+	channel?: string;
+	title?: string;
+	url: string;
+	startUrl: string;
+	endUrl?: string;
+	requestedLimit?: number;
+	messages: SlackThreadMessage[];
+	harvestedViaScroll?: boolean;
+}
+
 const state: BridgeState = {
 	lifecycle: "stopped",
 	host: HOST,
@@ -202,6 +214,22 @@ function isSlackThreadSnapshot(value: unknown): value is SlackThreadSnapshot {
 	);
 }
 
+function isSlackChannelRangeSnapshot(value: unknown): value is SlackChannelRangeSnapshot {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.url === "string" &&
+		typeof value.startUrl === "string" &&
+		(value.endUrl === undefined || typeof value.endUrl === "string") &&
+		(value.requestedLimit === undefined || typeof value.requestedLimit === "number") &&
+		(value.workspace === undefined || typeof value.workspace === "string") &&
+		(value.channel === undefined || typeof value.channel === "string") &&
+		(value.title === undefined || typeof value.title === "string") &&
+		(value.harvestedViaScroll === undefined || typeof value.harvestedViaScroll === "boolean") &&
+		Array.isArray(value.messages) &&
+		value.messages.every(isSlackThreadMessage)
+	);
+}
+
 function rawDataToString(data: RawData): string {
 	if (typeof data === "string") return data;
 	if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
@@ -271,6 +299,7 @@ function buildSlackSystemPrompt(): string {
 		"",
 		"Workflow:",
 		"- When the user refers to the current Slack thread, use slack_get_current_thread if you need context.",
+		"- When the user pastes a Slack message link and asks for following channel messages, use slack_get_channel_range.",
 		"- Treat any existing composer draft text in the Slack thread result as the user's rough draft or intent.",
 		"- The browser integration is read-only. Produce replies for manual copy/paste into Slack.",
 		"- Never claim to have sent, inserted, or modified a Slack message.",
@@ -291,20 +320,18 @@ function singleLine(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
 }
 
-function buildSessionNameFromThread(thread: SlackThreadSnapshot): string {
-	const parts = ["Slack"];
+function buildSessionName(label: string, workspace: string | undefined, scope: string | undefined, previewSource: string | undefined): string {
+	const parts = [label];
 
-	if (thread.workspace) {
-		parts.push(truncateText(singleLine(thread.workspace), 18));
+	if (workspace) {
+		parts.push(truncateText(singleLine(workspace), 18));
 	}
 
-	const scope = thread.channel || thread.title;
 	if (scope) {
 		parts.push(truncateText(singleLine(scope), 24));
 	}
 
-	const previewSource = thread.rootMessage?.text || thread.composerDraftText || thread.title || "Thread";
-	const preview = truncateText(singleLine(previewSource), 56);
+	const preview = previewSource ? truncateText(singleLine(previewSource), 56) : "";
 	if (preview) {
 		parts.push(preview);
 	}
@@ -312,8 +339,30 @@ function buildSessionNameFromThread(thread: SlackThreadSnapshot): string {
 	return truncateText(parts.join(" · "), 96);
 }
 
+function buildSessionNameFromThread(thread: SlackThreadSnapshot): string {
+	return buildSessionName(
+		"Slack",
+		thread.workspace,
+		thread.channel || thread.title,
+		thread.rootMessage?.text || thread.composerDraftText || thread.title || "Thread",
+	);
+}
+
+function buildSessionNameFromChannelRange(range: SlackChannelRangeSnapshot): string {
+	return buildSessionName(
+		"Slack range",
+		range.workspace,
+		range.channel || range.title,
+		range.messages[0]?.text || range.title || "Channel range",
+	);
+}
+
 function updateSessionNameFromThread(pi: ExtensionAPI, thread: SlackThreadSnapshot): void {
 	pi.setSessionName(buildSessionNameFromThread(thread));
+}
+
+function updateSessionNameFromChannelRange(pi: ExtensionAPI, range: SlackChannelRangeSnapshot): void {
+	pi.setSessionName(buildSessionNameFromChannelRange(range));
 }
 
 function estimateMessageChars(message: SlackThreadMessage): number {
@@ -390,20 +439,7 @@ function selectMessagesForModel(messages: SlackThreadMessage[], charBudget: numb
 	};
 }
 
-function formatSlackThreadForModel(snapshot: SlackThreadSnapshot, charBudget: number): string {
-	const lines = ["Slack thread"];
-	if (snapshot.workspace) lines.push(`Workspace: ${snapshot.workspace}`);
-	if (snapshot.channel) lines.push(`Channel: ${snapshot.channel}`);
-	if (snapshot.title) lines.push(`Title: ${snapshot.title}`);
-	lines.push(`URL: ${snapshot.url}`);
-	if (snapshot.reportedMessageCount !== undefined) {
-		lines.push(`Reported messages: ${snapshot.reportedMessageCount}`);
-	}
-	if (snapshot.harvestedViaScroll) {
-		lines.push("Capture: harvested by scrolling the virtualized thread pane");
-	}
-
-	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
+function formatSlackMessages(lines: string[], messages: SlackThreadMessage[], omittedCount: number): void {
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (!message) continue;
@@ -419,14 +455,104 @@ function formatSlackThreadForModel(snapshot: SlackThreadSnapshot, charBudget: nu
 	}
 
 	if (omittedCount > 0) {
-		lines.push("", `[${omittedCount} middle or tail thread message(s) omitted to fit context]`);
+		lines.push("", `[${omittedCount} middle or tail message(s) omitted to fit context]`);
 	}
+}
+
+function formatSlackThreadForModel(snapshot: SlackThreadSnapshot, charBudget: number): string {
+	const lines = ["Slack thread"];
+	if (snapshot.workspace) lines.push(`Workspace: ${snapshot.workspace}`);
+	if (snapshot.channel) lines.push(`Channel: ${snapshot.channel}`);
+	if (snapshot.title) lines.push(`Title: ${snapshot.title}`);
+	lines.push(`URL: ${snapshot.url}`);
+	if (snapshot.reportedMessageCount !== undefined) {
+		lines.push(`Reported messages: ${snapshot.reportedMessageCount}`);
+	}
+	if (snapshot.harvestedViaScroll) {
+		lines.push("Capture: harvested by scrolling the virtualized thread pane");
+	}
+
+	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
+	formatSlackMessages(lines, messages, omittedCount);
 
 	if (snapshot.composerDraftText?.trim()) {
 		lines.push("", "Current composer draft:", truncateText(snapshot.composerDraftText.trim(), 2_000));
 	}
 
 	return lines.join("\n");
+}
+
+function formatSlackChannelRangeForModel(snapshot: SlackChannelRangeSnapshot, charBudget: number): string {
+	const lines = ["Slack channel range"];
+	if (snapshot.workspace) lines.push(`Workspace: ${snapshot.workspace}`);
+	if (snapshot.channel) lines.push(`Channel: ${snapshot.channel}`);
+	if (snapshot.title) lines.push(`Title: ${snapshot.title}`);
+	lines.push(`Start URL: ${snapshot.startUrl}`);
+	if (snapshot.endUrl) {
+		lines.push(`End URL: ${snapshot.endUrl}`);
+	}
+	if (snapshot.requestedLimit !== undefined) {
+		lines.push(`Requested next messages: ${snapshot.requestedLimit}`);
+	}
+	if (snapshot.harvestedViaScroll) {
+		lines.push("Capture: harvested by scrolling the virtualized channel pane");
+	}
+
+	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
+	formatSlackMessages(lines, messages, omittedCount);
+	return lines.join("\n");
+}
+
+function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: string; limit?: number } {
+	const trimmed = args.trim();
+	if (!trimmed) {
+		throw new Error("Usage: /slack-channel-read <start-url> [--next <n>] [--until <end-url>]");
+	}
+
+	const tokens = trimmed.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
+	const unquote = (value: string): string => value.replace(/^['"]|['"]$/g, "");
+	let startUrl: string | undefined;
+	let endUrl: string | undefined;
+	let limit: number | undefined;
+
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (!token) continue;
+
+		if (token === "--next") {
+			const nextToken = tokens[index + 1];
+			const parsed = Number.parseInt(unquote(nextToken ?? ""), 10);
+			if (!Number.isInteger(parsed) || parsed <= 0) {
+				throw new Error("--next requires a positive integer.");
+			}
+			limit = parsed;
+			index += 1;
+			continue;
+		}
+
+		if (token === "--until") {
+			const nextToken = tokens[index + 1];
+			if (!nextToken) {
+				throw new Error("--until requires a Slack message URL.");
+			}
+			endUrl = unquote(nextToken);
+			index += 1;
+			continue;
+		}
+
+		if (!startUrl) {
+			startUrl = unquote(token);
+			continue;
+		}
+
+		throw new Error(`Unexpected argument: ${token}`);
+	}
+
+	if (!startUrl) {
+		throw new Error("A start Slack message URL is required.");
+	}
+
+	return { startUrl, endUrl, limit };
 }
 
 function createToken(): string {
@@ -745,6 +871,22 @@ async function readCurrentSlackThread(): Promise<SlackThreadSnapshot> {
 	return response.payload;
 }
 
+async function readSlackChannelRange(startUrl: string, endUrl?: string, limit?: number): Promise<SlackChannelRangeSnapshot> {
+	await ensureBridgeStarted();
+	const response = await requestChrome("getChannelRange", {
+		startUrl,
+		...(endUrl ? { endUrl } : {}),
+		...(limit !== undefined ? { limit } : {}),
+	});
+	if (!isSlackChannelRangeSnapshot(response.payload)) {
+		throw new Error("Chrome returned an invalid Slack channel range payload.");
+	}
+	if (response.payload.messages.length === 0) {
+		throw new Error("Chrome returned an empty Slack channel range.");
+	}
+	return response.payload;
+}
+
 function startupFailureMessage(): string {
 	if (state.startupError?.includes("EADDRINUSE")) {
 		return `Slack Pi could not start because ${state.wsUrl} is already in use. Another slack-pi instance is probably running.`;
@@ -777,7 +919,7 @@ export default function slackPi(pi: ExtensionAPI) {
 			return;
 		}
 
-		pi.setActiveTools(["slack_get_current_thread"]);
+		pi.setActiveTools(["slack_get_current_thread", "slack_get_channel_range"]);
 		if (!pi.getSessionName()) {
 			pi.setSessionName("Slack Pi");
 		}
@@ -836,6 +978,38 @@ export default function slackPi(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "slack_get_channel_range",
+		label: "Slack Channel Range",
+		description:
+			"Read a range of channel messages starting from a Slack message link, optionally limited to the next N messages or ending at another Slack message link.",
+		promptSnippet:
+			"Read channel messages starting from a Slack message link, optionally for the next N messages or until another Slack message link.",
+		promptGuidelines: [
+			"Use this tool when the user pastes a Slack message link and asks to summarize following channel messages.",
+			"Prefer limit for 'next N messages' and endUrl for 'until this other message link'.",
+		],
+		parameters: Type.Object({
+			startUrl: Type.String({ description: "Slack message permalink to start from" }),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Number of messages to include starting at startUrl" })),
+			endUrl: Type.Optional(Type.String({ description: "Optional Slack message permalink to stop at, inclusive" })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const range = await readSlackChannelRange(params.startUrl, params.endUrl, params.limit);
+			updateSessionNameFromChannelRange(pi, range);
+			const charBudget = getThreadCharBudget(ctx);
+			return {
+				content: [{ type: "text", text: formatSlackChannelRangeForModel(range, charBudget) }],
+				details: {
+					range,
+					messageCount: range.messages.length,
+					requestedLimit: range.requestedLimit,
+					charBudget,
+				},
+			};
+		},
+	});
+
 	pi.registerCommand("slack-read", {
 		description: "Read the current Slack thread and inject it into the session as a visible Slack message",
 		handler: async (_args, ctx) => {
@@ -863,6 +1037,42 @@ export default function slackPi(pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				const message = `Slack read failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
+			}
+		},
+	});
+
+	pi.registerCommand("slack-channel-read", {
+		description: "Read a channel message range from a Slack permalink: /slack-channel-read <start-url> [--next N] [--until <end-url>]",
+		handler: async (args, ctx) => {
+			try {
+				const parsed = parseSlackChannelReadArgs(args);
+				const range = await readSlackChannelRange(parsed.startUrl, parsed.endUrl, parsed.limit);
+				updateSessionNameFromChannelRange(pi, range);
+				const charBudget = getThreadCharBudget(ctx);
+				const content = formatSlackChannelRangeForModel(range, charBudget);
+				pi.sendMessage({
+					customType: "slack-read",
+					content,
+					display: true,
+					details: {
+						range,
+						messageCount: range.messages.length,
+						requestedLimit: range.requestedLimit,
+						charBudget,
+					},
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify("Slack channel range added to the session.", "info");
+				} else {
+					writeStatus(content);
+				}
+			} catch (error) {
+				const message = `Slack channel read failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "error");
 				} else {

@@ -35,8 +35,6 @@ SLACK_PI_SESSION_DIR=/path/to/sessions slack-pi
 
 ## Current state
 
-Phase 1 is implemented.
-
 Implemented so far:
 - repo-local extension entrypoint
 - dedicated local `package.json`
@@ -45,12 +43,15 @@ Implemented so far:
 - local shared-secret creation/loading
 - Chrome hello/ack handshake support
 - Slack-specific non-coding system prompt override
-- active tools restricted to `slack_get_current_thread`
+- active tools restricted to `slack_get_current_thread` and `slack_get_channel_range`
 - automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
 - `/slack-ping` command
+- `/slack-read` command for the active thread
+- `/slack-channel-read` command for channel ranges by permalink
 - `slack_get_current_thread` tool
-- Slack thread normalization for model context
+- `slack_get_channel_range` tool
+- Slack thread and channel-range normalization for model context
 
 Not implemented yet:
 - any browser-side write-back tooling
@@ -62,7 +63,9 @@ Not implemented yet:
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read` — read the active Slack thread and add it to the session as a visible message
+- `/slack-channel-read <start-url> [--next N] [--until <end-url>]` — read a channel range starting from a Slack message link
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
+- ask Pi to use `slack_get_channel_range` — read channel messages from a Slack permalink range
 
 ## Prompt behavior
 

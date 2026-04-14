@@ -13,7 +13,7 @@ This design intentionally avoids:
 It assumes the primary workflow is:
 1. Slack is open in a pinned Chrome tab
 2. `slack-pi` is launched when Slack assistance is needed
-3. Pi uses tool calls to read the current thread, incorporate any existing Slack composer draft as context, and produce a revised reply for manual copy/paste back into Slack
+3. Pi uses tool calls to read either the current thread or a channel message range starting from a pasted Slack permalink, then produces a revised reply or summary for manual copy/paste back into Slack
 
 ---
 
@@ -21,8 +21,9 @@ It assumes the primary workflow is:
 
 ### Primary goals
 - Read the **currently open Slack thread** from Chrome
-- Let Pi use the thread as context during a normal tool-calling workflow
-- Accept a short or long user draft/note and turn it into a polished Slack reply
+- Read a **channel message range** starting from a pasted Slack message permalink
+- Let Pi use Slack content as context during a normal tool-calling workflow
+- Accept a short or long user draft/note and turn it into a polished Slack reply or concise summary
 - If the Slack composer already contains text, use that draft as additional reply context
 - Keep the integration **opt-in** via a dedicated `slack-pi` launcher
 - Keep the final reply workflow manual via copy/paste
@@ -197,6 +198,17 @@ Read the currently open Slack thread from the active Slack tab.
 - normalize it into compact text for the model
 - include structured details for rendering/debugging
 
+#### `slack_get_channel_range`
+Read a channel message range starting from a Slack message permalink.
+
+**Behavior:**
+- accept a required `startUrl`
+- optionally accept `limit` for “the next N messages”
+- optionally accept `endUrl` for “until this other message permalink”
+- open the permalink in a temporary Slack tab, harvest the relevant channel messages, then close the temporary tab
+- normalize the range into compact text for the model
+- include structured details for rendering/debugging
+
 There is no write-back tool in the MVP. Manual copy/paste is the intended workflow.
 
 #### Optional later tool: `slack_get_selection`
@@ -225,10 +237,11 @@ Expected extension pieces:
 - reconnect when Pi starts/stops
 - route requests between Pi and the Slack tab
 - track which Slack tab is considered active
-- apply the MVP active-tab rule:
+- apply the MVP active-tab rule for current-thread reads:
   - if exactly one Slack tab exists, use it
   - if multiple Slack tabs exist, use the most recently focused one
   - if no Slack tab exists, report that no active Slack tab is available
+- open temporary Slack tabs for permalink-based channel-range reads
 - expose simple connection state for the popup
 
 ### Content script responsibilities
@@ -238,9 +251,10 @@ Expected extension pieces:
 - report whether the page is in a supported state
 
 ### MVP page scope
-- read operations are limited to the currently open thread pane
-- if no thread pane is open, read requests fail clearly
-- top-level channel reads are out of scope for the MVP
+- current-thread reads operate on the currently open thread pane
+- if no thread pane is open, current-thread reads fail clearly
+- channel-range reads operate on Slack permalinks opened in a temporary Slack tab
+- channel-range reads are limited to “start at this message, then the next N messages” or “until this other message permalink”
 
 ---
 
@@ -627,22 +641,25 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 
 ---
 
-## Phase 3: Read current thread and existing draft
-**Goal:** support `slack_get_current_thread` end to end.
+## Phase 3: Read current thread, existing draft, and channel permalink ranges
+**Goal:** support `slack_get_current_thread` and `slack_get_channel_range` end to end.
 
 ### Tasks
 - implement Slack DOM adapter for thread extraction
 - extract current composer draft text when present
 - define normalized thread payload shape
 - implement Pi tool `slack_get_current_thread`
+- implement Pi tool `slack_get_channel_range`
+- add temporary-tab permalink routing for channel-range reads
 - normalize tool output for LLM consumption
-- add truncation/formatting for long threads
+- add truncation/formatting for long threads and long channel ranges
 
 ### Acceptance criteria
 - Pi can read the currently open Slack thread
+- Pi can read a channel range starting from a Slack message permalink
 - output includes workspace/channel/url when available
-- existing composer text is included as separate context when present
-- errors are clear when no thread is open or selectors fail
+- existing composer text is included as separate context when present for thread reads
+- errors are clear when no thread is open, a permalink cannot be parsed, or selectors fail
 
 ---
 
@@ -672,7 +689,9 @@ The MVP should include only:
 - Chrome extension with reconnect logic
 - minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
+- `slack_get_channel_range`
 - `/slack-read`
+- `/slack-channel-read`
 - `/slack-status`
 
 Everything else is optional.
@@ -722,10 +741,10 @@ Everything else is optional.
    - Manual copy/paste is the MVP workflow.
    - Do not implement browser-side reply insertion in the MVP.
 
-3. **Thread extraction scope**
-   - Read only the currently open thread pane in the MVP.
-   - If no thread pane is open, fail clearly.
-   - Top-level channel reads can be added later as a separate tool.
+3. **Read scope**
+   - Current-thread reads operate only on the currently open thread pane.
+   - If no thread pane is open, current-thread reads fail clearly.
+   - Channel reads are supported via pasted Slack message permalinks as a separate tool.
 
 4. **Token/setup UX**
    - Use a one-time setup flow.

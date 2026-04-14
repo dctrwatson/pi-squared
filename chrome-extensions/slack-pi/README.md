@@ -13,9 +13,11 @@ Implemented so far:
 - lightweight local `package.json`
 - background service worker with WebSocket hello/ack support
 - ping response handling for the Pi bridge
-- active Slack tab routing
-- action icon state coloring (green connected, amber connecting, red error, gray idle)
+- active Slack tab routing for current-thread reads
+- temporary Slack tab routing for channel-range reads from permalinks
+- action icon state coloring (green connected, red error, gray otherwise)
 - Slack content script with current thread extraction
+- Slack content script with channel-range extraction from message permalinks
 - composer draft extraction for reply-context capture
 - minimal popup for status, token storage, and test action
 

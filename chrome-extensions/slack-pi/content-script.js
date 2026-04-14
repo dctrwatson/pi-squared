@@ -172,6 +172,28 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return "";
   }
 
+  function parseSlackTsFromUrl(url) {
+    if (!url) return undefined;
+
+    try {
+      const parsed = new URL(url, window.location.href);
+      const messageTs = parsed.searchParams.get("message_ts");
+      if (messageTs) {
+        return messageTs.replace(/[^\d.]/g, "");
+      }
+
+      const archiveMatch = parsed.pathname.match(/\/archives\/[^/]+\/p(\d{16})/i);
+      if (archiveMatch && archiveMatch[1]) {
+        const digits = archiveMatch[1];
+        return `${digits.slice(0, 10)}.${digits.slice(10)}`;
+      }
+    } catch {
+      return undefined;
+    }
+
+    return undefined;
+  }
+
   function extractTimestamp(messageElement) {
     const selectors = [
       'a[href*="/archives/"] time',
@@ -189,6 +211,27 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     return "";
+  }
+
+  function extractMessagePermalinkUrl(messageElement) {
+    const selectors = [
+      'a[href*="/archives/"][href*="/p"]',
+      'a[href*="message_ts="]',
+    ];
+
+    for (const selector of selectors) {
+      const element = messageElement.querySelector(selector);
+      if (!(element instanceof HTMLAnchorElement)) continue;
+      const href = element.href || element.getAttribute("href");
+      if (href) return href;
+    }
+
+    return undefined;
+  }
+
+  function extractMessageTs(messageElement) {
+    const permalinkUrl = extractMessagePermalinkUrl(messageElement);
+    return parseSlackTsFromUrl(permalinkUrl);
   }
 
   function filterLeafCandidates(elements) {
@@ -340,7 +383,18 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return text.length > 30;
   }
 
-  function findMessageElements(threadRoot, composerElement) {
+  function findMainRoot() {
+    const selectors = ['[role="main"]', 'main'];
+    const candidates = queryVisibleAll(document, selectors);
+    for (const candidate of candidates) {
+      if (candidate.querySelector('[data-qa="virtual-list-item"], [role="listitem"]')) {
+        return candidate;
+      }
+    }
+    return candidates[0] ?? null;
+  }
+
+  function findMessageElements(root, composerElement) {
     const selectors = [
       '[data-qa="virtual-list-item"]',
       '[data-qa^="virtual-list-item"]',
@@ -349,7 +403,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       '[role="listitem"]',
     ];
 
-    const candidates = queryVisibleAll(threadRoot, selectors).filter((element) =>
+    const candidates = queryVisibleAll(root, selectors).filter((element) =>
       isLikelyMessageElement(element, composerElement),
     );
 
@@ -359,8 +413,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     );
   }
 
-  function extractMessages(threadRoot, composerElement) {
-    const messageElements = findMessageElements(threadRoot, composerElement);
+  function extractMessages(root, composerElement) {
+    const messageElements = findMessageElements(root, composerElement);
     return messageElements
       .map((element, index) => {
         const text = extractMessageText(element, composerElement);
@@ -369,6 +423,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
           author: extractAuthor(element) || undefined,
           text,
           timestamp: extractTimestamp(element) || undefined,
+          messageTs: extractMessageTs(element),
+          permalinkUrl: extractMessagePermalinkUrl(element),
           isRoot: index === 0,
         };
       })
@@ -376,7 +432,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   }
 
   function makeMessageKey(message) {
-    return [message.timestamp || "", message.author || "", message.text.slice(0, 240)].join("\u241f");
+    return [message.messageTs || "", message.timestamp || "", message.author || "", message.text.slice(0, 240)].join("\u241f");
   }
 
   function collectMessagesInto(map, messages) {
@@ -398,8 +454,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return depth;
   }
 
-  function findThreadScrollContainer(threadRoot) {
-    const candidates = [threadRoot, ...threadRoot.querySelectorAll("*")].filter((element) => {
+  function findScrollContainer(root) {
+    const candidates = [root, ...root.querySelectorAll("*")].filter((element) => {
       if (!(element instanceof HTMLElement)) return false;
       if (!isVisible(element)) return false;
       if (element.scrollHeight <= element.clientHeight + 40) return false;
@@ -438,7 +494,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
   async function harvestThreadMessages(threadRoot, composerElement) {
     const visibleMessages = extractMessages(threadRoot, composerElement);
-    const scrollContainer = findThreadScrollContainer(threadRoot);
+    const scrollContainer = findScrollContainer(threadRoot);
 
     if (!scrollContainer) {
       return {
@@ -545,6 +601,154 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
+  async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit) {
+    const scrollContainer = findScrollContainer(mainRoot);
+    const collected = new Map();
+    let started = false;
+    let reachedEnd = false;
+
+    const collectVisible = () => {
+      const visible = extractMessages(mainRoot, composerElement);
+      for (const message of visible) {
+        if (!started) {
+          if (message.messageTs === startTs) {
+            started = true;
+          } else {
+            continue;
+          }
+        }
+
+        const key = makeMessageKey(message);
+        if (!collected.has(key)) {
+          collected.set(key, message);
+        }
+
+        if (endTs && message.messageTs === endTs) {
+          reachedEnd = true;
+          break;
+        }
+        if (limit && collected.size >= limit) {
+          reachedEnd = true;
+          break;
+        }
+      }
+    };
+
+    collectVisible();
+
+    if (!scrollContainer) {
+      return {
+        messages: [...collected.values()],
+        harvestedViaScroll: false,
+        started,
+        reachedEnd,
+      };
+    }
+
+    let lastScrollTop = -1;
+    for (let step = 0; step < MAX_SCROLL_STEPS; step += 1) {
+      if (reachedEnd) break;
+      const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      const currentTop = scrollContainer.scrollTop;
+      if (currentTop >= maxScrollTop - 2) {
+        break;
+      }
+
+      const stepSize = Math.max(180, Math.floor(scrollContainer.clientHeight * 0.85));
+      const nextTop = Math.min(maxScrollTop, currentTop + stepSize);
+      if (nextTop <= currentTop + 1 || nextTop === lastScrollTop) {
+        break;
+      }
+
+      lastScrollTop = currentTop;
+      scrollContainer.scrollTop = nextTop;
+      await sleep(SCROLL_SETTLE_MS);
+      collectVisible();
+    }
+
+    return {
+      messages: [...collected.values()],
+      harvestedViaScroll: true,
+      started,
+      reachedEnd,
+    };
+  }
+
+  async function buildChannelRangeSnapshot(startUrl, endUrl, limit) {
+    const startTs = parseSlackTsFromUrl(startUrl);
+    if (!startTs) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_start_url",
+          message: "The start Slack URL could not be parsed as a message permalink.",
+        },
+      };
+    }
+
+    const endTs = endUrl ? parseSlackTsFromUrl(endUrl) : undefined;
+    if (endUrl && !endTs) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_end_url",
+          message: "The end Slack URL could not be parsed as a message permalink.",
+        },
+      };
+    }
+
+    const mainRoot = findMainRoot();
+    if (!mainRoot) {
+      return {
+        ok: false,
+        error: {
+          code: "no_channel_view",
+          message: "No visible Slack channel view is open.",
+        },
+      };
+    }
+
+    const composerElement = findComposer(mainRoot);
+    const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit);
+    if (!harvest.started) {
+      return {
+        ok: false,
+        error: {
+          code: "start_message_not_found",
+          message: "Could not find the starting Slack message in the loaded channel view.",
+        },
+      };
+    }
+
+    if (harvest.messages.length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "no_channel_messages",
+          message: "No channel messages could be extracted from the requested range.",
+        },
+      };
+    }
+
+    const documentMeta = parseDocumentTitle();
+    const channel = findChannelName() || undefined;
+
+    return {
+      ok: true,
+      payload: {
+        workspace: documentMeta.workspace,
+        channel,
+        title: documentMeta.title || channel,
+        url: window.location.href,
+        startUrl,
+        endUrl: endUrl || undefined,
+        requestedLimit: limit,
+        messages: harvest.messages,
+        harvestedViaScroll: harvest.harvestedViaScroll,
+      },
+    };
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return undefined;
 
@@ -565,6 +769,21 @@ if (!globalThis.__slackPiContentScriptLoaded) {
             ok: false,
             error: {
               code: "thread_extraction_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        });
+      return true;
+    }
+
+    if (message.type === "slack-pi:get-channel-range") {
+      void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit)
+        .then((result) => sendResponse(result))
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "channel_range_extraction_failed",
               message: error instanceof Error ? error.message : String(error),
             },
           });
