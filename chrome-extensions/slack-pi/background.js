@@ -275,7 +275,7 @@ function toErrorPayload(error) {
 }
 
 async function getSlackTabsDetailed() {
-  const tabs = await chrome.tabs.query({ url: ["https://app.slack.com/*"] });
+  const tabs = await chrome.tabs.query({ url: ["https://app.slack.com/*", "https://*.slack.com/*"] });
   const sorted = [...tabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
   const activeTab = sorted[0] ?? null;
 
@@ -389,6 +389,55 @@ async function waitForTabComplete(tabId, timeoutMs = 20_000) {
   });
 }
 
+async function waitForTabSettle(tabId, delayMs = 1_000) {
+  await sleep(delayMs);
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.status !== "complete") {
+    return await waitForTabComplete(tabId);
+  }
+  return tab;
+}
+
+async function prepareTemporarySlackTab(tabId, maxAttempts = 4) {
+  let lastPreparePayload = null;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const prepare = await sendMessageToTab(tabId, { type: "slack-pi:prepare-channel-range-page" });
+    if (!prepare || typeof prepare !== "object") {
+      return { prepared: false, lastPreparePayload };
+    }
+    if (!prepare.ok) {
+      return { prepared: false, lastPreparePayload: prepare.error ?? lastPreparePayload };
+    }
+
+    lastPreparePayload = prepare.payload ?? lastPreparePayload;
+    const state = prepare.payload?.state;
+    if (state === "ready") {
+      return { prepared: true, lastPreparePayload };
+    }
+
+    if (state === "navigate" && typeof prepare.payload?.url === "string" && prepare.payload.url) {
+      await chrome.tabs.update(tabId, { url: prepare.payload.url });
+      await waitForTabComplete(tabId);
+      continue;
+    }
+
+    if (state === "clicked") {
+      await waitForTabSettle(tabId, 1_500);
+      continue;
+    }
+
+    if (state === "unready") {
+      await waitForTabSettle(tabId, 1_000);
+      continue;
+    }
+
+    return { prepared: false, lastPreparePayload };
+  }
+
+  return { prepared: false, lastPreparePayload };
+}
+
 async function sendMessageToTemporarySlackTab(url, message) {
   if (!isSlackUrl(url)) {
     throw new BridgeActionError("invalid_slack_url", "The supplied Slack link is not a recognized Slack URL.");
@@ -400,11 +449,17 @@ async function sendMessageToTemporarySlackTab(url, message) {
   }
 
   try {
-    const loadedTab = await waitForTabComplete(tab.id);
+    await waitForTabComplete(tab.id);
+    const prepared = await prepareTemporarySlackTab(tab.id);
+    if (!prepared.prepared) {
+      console.warn("[slack-pi] temporary Slack tab was not fully prepared", prepared.lastPreparePayload);
+    }
+    const loadedTab = await chrome.tabs.get(tab.id);
     const response = await sendMessageToTab(tab.id, message);
     return {
       response,
       tempTab: serializeTab(loadedTab),
+      prepare: prepared.lastPreparePayload,
     };
   } finally {
     try {

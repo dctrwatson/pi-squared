@@ -725,6 +725,99 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
+  function getDocumentTextSnippet() {
+    return normalizeText(document.body?.innerText || "").slice(0, 800);
+  }
+
+  function findBrowserFallbackControl() {
+    const selectors = ['a[href]', 'button', '[role="button"]'];
+    const positivePatterns = [
+      /use (?:slack )?(?:in |on )?(?:your )?browser/i,
+      /use browser instead/i,
+      /continue in browser/i,
+      /open in browser/i,
+      /continue to browser/i,
+      /stay in browser/i,
+      /open slack in your browser/i,
+      /use the web app/i,
+    ];
+
+    const elements = queryVisibleAll(document, selectors);
+    for (const element of elements) {
+      const text = getElementText(element);
+      if (!text || !positivePatterns.some((pattern) => pattern.test(text))) continue;
+      if (element instanceof HTMLAnchorElement) {
+        const href = element.href || element.getAttribute("href");
+        if (href) {
+          try {
+            return { action: "navigate", url: new URL(href, window.location.href).href, text };
+          } catch {
+            return { action: "navigate", url: href, text };
+          }
+        }
+      }
+      return { action: "click", element, text };
+    }
+
+    return null;
+  }
+
+  async function prepareChannelRangePage() {
+    const mainRoot = await waitForChannelRoot(2_000);
+    if (mainRoot && countMessageLikeDescendants(mainRoot) > 0) {
+      return {
+        ok: true,
+        payload: {
+          state: "ready",
+          title: document.title,
+          url: window.location.href,
+        },
+      };
+    }
+
+    const fallback = findBrowserFallbackControl();
+    if (fallback?.action === "navigate") {
+      return {
+        ok: true,
+        payload: {
+          state: "navigate",
+          title: document.title,
+          url: fallback.url,
+          controlText: fallback.text,
+        },
+      };
+    }
+
+    if (fallback?.action === "click") {
+      setTimeout(() => {
+        try {
+          fallback.element.click();
+        } catch {
+          // ignore click failures here; caller will retry and report a better error if needed.
+        }
+      }, 0);
+      return {
+        ok: true,
+        payload: {
+          state: "clicked",
+          title: document.title,
+          url: window.location.href,
+          controlText: fallback.text,
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      payload: {
+        state: "unready",
+        title: document.title,
+        url: window.location.href,
+        textSnippet: getDocumentTextSnippet(),
+      },
+    };
+  }
+
   async function buildChannelRangeSnapshot(startUrl, endUrl, limit) {
     const startTs = parseSlackTsFromUrl(startUrl);
     if (!startTs) {
@@ -820,6 +913,21 @@ if (!globalThis.__slackPiContentScriptLoaded) {
             ok: false,
             error: {
               code: "thread_extraction_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        });
+      return true;
+    }
+
+    if (message.type === "slack-pi:prepare-channel-range-page") {
+      void prepareChannelRangePage()
+        .then((result) => sendResponse(result))
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "channel_range_prepare_failed",
               message: error instanceof Error ? error.message : String(error),
             },
           });
