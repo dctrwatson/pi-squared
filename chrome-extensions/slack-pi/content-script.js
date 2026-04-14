@@ -3,6 +3,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
   const SCROLL_SETTLE_MS = 120;
   const MAX_SCROLL_STEPS = 240;
+  const READY_POLL_MS = 250;
+  const READY_TIMEOUT_MS = 10_000;
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -21,6 +23,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     if (!(element instanceof HTMLElement)) return false;
     const style = window.getComputedStyle(element);
     if (style.display === "none" || style.visibility === "hidden") return false;
+    if (element.getAttribute("aria-hidden") === "true") return false;
+    if (document.visibilityState !== "visible") return true;
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
@@ -383,15 +387,62 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return text.length > 30;
   }
 
+  function countMessageLikeDescendants(root) {
+    if (!(root instanceof HTMLElement)) return 0;
+    return root.querySelectorAll(
+      '[data-qa="virtual-list-item"], [data-qa^="virtual-list-item"], [data-qa*="message_container"], [data-qa*="message"][data-qa*="container"], [role="listitem"]',
+    ).length;
+  }
+
   function findMainRoot() {
-    const selectors = ['[role="main"]', 'main'];
+    const selectors = [
+      '[role="main"]',
+      'main',
+      '[data-qa*="message_pane"]',
+      '[data-qa*="conversation"]',
+      '[data-qa*="client"]',
+    ];
+
     const candidates = queryVisibleAll(document, selectors);
-    for (const candidate of candidates) {
-      if (candidate.querySelector('[data-qa="virtual-list-item"], [role="listitem"]')) {
-        return candidate;
+    const scored = candidates
+      .map((candidate) => {
+        const messageCount = countMessageLikeDescendants(candidate);
+        const hasComposer = Boolean(findComposer(candidate));
+        const rect = candidate.getBoundingClientRect();
+        const area = Math.max(0, rect.width * rect.height);
+        let score = messageCount * 100;
+        if (hasComposer) score += 500;
+        if (candidate.getAttribute("role") === "main" || candidate.tagName.toLowerCase() === "main") {
+          score += 200;
+        }
+        score += Math.min(area, 50_000) / 100;
+        return { candidate, score, messageCount };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    const best = scored.find((entry) => entry.messageCount > 0);
+    if (best) return best.candidate;
+    if (scored[0]) return scored[0].candidate;
+    if (document.body && countMessageLikeDescendants(document.body) > 0) return document.body;
+    return document.body ?? null;
+  }
+
+  async function waitForChannelRoot(timeoutMs = READY_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    let lastRoot = findMainRoot();
+
+    while (Date.now() < deadline) {
+      const root = findMainRoot();
+      if (root) {
+        lastRoot = root;
+        if (countMessageLikeDescendants(root) > 0) {
+          return root;
+        }
       }
+      await sleep(READY_POLL_MS);
     }
-    return candidates[0] ?? null;
+
+    return lastRoot ?? findMainRoot();
   }
 
   function findMessageElements(root, composerElement) {
@@ -697,7 +748,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       };
     }
 
-    const mainRoot = findMainRoot();
+    const mainRoot = await waitForChannelRoot();
     if (!mainRoot) {
       return {
         ok: false,
