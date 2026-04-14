@@ -104,7 +104,7 @@ Example shape:
 
 ```sh
 slack-pi() {
-  pi --session-dir "${XDG_STATE_HOME:-$HOME/.local/state}/slack-pi/sessions" \
+  pi --session-dir "$HOME/.pi/agent/sessions/--slack-pi--" \
     -e ./manual-extensions/slack-pi/index.ts "$@"
 }
 ```
@@ -112,7 +112,7 @@ slack-pi() {
 ### Launcher responsibilities
 - load the Slack Pi extension explicitly
 - keep normal `pi` usage untouched
-- force a dedicated Slack Pi session directory so session storage does not depend on cwd
+- force a dedicated Slack Pi subdirectory inside Pi's normal session storage so session storage does not depend on cwd
 - provide a stable mental model: **Slack tools only exist in `slack-pi`**
 
 ### Singleton enforcement
@@ -564,7 +564,7 @@ Fail fast with a clear singleton message.
 - WebSocket URL: `ws://127.0.0.1:27183`
 - protocol version: `1`
 - single active Slack controller: yes
-- dedicated session directory via `--session-dir` in the launcher
+- dedicated session directory via `--session-dir "$HOME/.pi/agent/sessions/--slack-pi--"` in the launcher
 
 ## Configurable values later if needed
 - port
