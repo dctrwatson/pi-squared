@@ -184,8 +184,65 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return "";
   }
 
-  function extractMessageText(messageElement, composerElement) {
+  function filterLeafCandidates(elements) {
+    return elements.filter(
+      (element, index) =>
+        !elements.some((other, otherIndex) => otherIndex !== index && element.contains(other)),
+    );
+  }
+
+  function removeNodes(root, selectors) {
+    for (const selector of selectors) {
+      for (const element of root.querySelectorAll(selector)) {
+        element.remove();
+      }
+    }
+  }
+
+  function stripLeadingMetadata(text, author, timestamp) {
+    const lines = text
+      .split("\n")
+      .map((line) => normalizeText(line))
+      .filter(Boolean);
+
+    const metadata = [author, timestamp].filter(Boolean);
+    while (lines.length > 0) {
+      const line = lines[0];
+      if (!line) break;
+      if (metadata.some((value) => value === line)) {
+        lines.shift();
+        continue;
+      }
+      if (author && timestamp && line.includes(author) && line.includes(timestamp)) {
+        lines.shift();
+        continue;
+      }
+      break;
+    }
+
+    return normalizeText(lines.join("\n"));
+  }
+
+  function extractMessageTextFromSelectors(messageElement, composerElement) {
     const contentSelectors = [
+      '[data-qa="message-text"]',
+      '[data-qa*="message-text"]',
+      '[data-qa*="message_body"]',
+      '[data-qa*="message-body"]',
+      '[data-qa*="message_content"]',
+      '[data-qa*="message-content"]',
+      '[data-qa*="message_blocks"]',
+      '[data-qa*="message-blocks"]',
+      '[class*="message_body"]',
+      '[class*="message-body"]',
+      '[class*="message__body"]',
+      '[class*="message_content"]',
+      '[class*="message-content"]',
+      '[class*="message_blocks"]',
+      '[class*="message-blocks"]',
+      '[class*="p-rich_text"]',
+      '[class*="rich_text"]',
+      '[class*="rich-text"]',
       '[data-stringify-type="paragraph"]',
       '[data-stringify-type="blockquote"]',
       '[data-stringify-type="pre"]',
@@ -196,27 +253,61 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       'code',
     ];
 
+    const candidates = filterLeafCandidates(
+      queryVisibleAll(messageElement, contentSelectors).filter((element) => {
+        if (composerElement && composerElement.contains(element)) return false;
+        return true;
+      }),
+    );
+
     const parts = [];
     const seen = new Set();
-    for (const selector of contentSelectors) {
-      const elements = messageElement.querySelectorAll(selector);
-      for (const element of elements) {
-        if (!(element instanceof HTMLElement)) continue;
-        if (!isVisible(element)) continue;
-        if (composerElement && composerElement.contains(element)) continue;
-        const text = getElementText(element);
-        if (!text || seen.has(text)) continue;
-        seen.add(text);
-        parts.push(text);
+    for (const element of candidates) {
+      const text = getElementText(element);
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      parts.push(text);
+    }
+
+    return normalizeText(parts.join("\n"));
+  }
+
+  function extractMessageTextFallback(messageElement, composerElement) {
+    const author = extractAuthor(messageElement);
+    const timestamp = extractTimestamp(messageElement);
+    const clone = messageElement.cloneNode(true);
+    if (!(clone instanceof HTMLElement)) return "";
+
+    removeNodes(clone, [
+      '[data-qa="message_sender_name"]',
+      '[data-qa*="message_sender"]',
+      '[data-qa*="sender_name"]',
+      '[data-qa*="message_author"]',
+      'button',
+      'time',
+      'svg',
+      'img',
+      '[aria-hidden="true"]',
+      '[role="toolbar"]',
+      '[data-qa*="reaction"]',
+      '[data-qa*="metadata"]',
+    ]);
+
+    if (composerElement) {
+      const composerText = getElementText(composerElement);
+      if (composerText) {
+        const cloneText = getElementText(clone).replace(composerText, "");
+        return stripLeadingMetadata(cloneText, author, timestamp);
       }
     }
 
-    let text = normalizeText(parts.join("\n"));
-    if (!text) {
-      text = getElementText(messageElement);
-    }
+    return stripLeadingMetadata(getElementText(clone), author, timestamp);
+  }
 
-    return text;
+  function extractMessageText(messageElement, composerElement) {
+    const direct = extractMessageTextFromSelectors(messageElement, composerElement);
+    if (direct) return direct;
+    return extractMessageTextFallback(messageElement, composerElement);
   }
 
   function isLikelyMessageElement(element, composerElement) {
