@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Slack Pi</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 12px;
+        width: 320px;
+        color: #222;
+      }
+      h1 {
+        font-size: 16px;
+        margin: 0 0 10px;
+      }
+      .section {
+        margin-bottom: 12px;
+      }
+      .label {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .status {
+        background: #f5f5f5;
+        border-radius: 6px;
+        padding: 8px;
+        font-size: 12px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      button {
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Slack Pi</h1>
+
+    <div class="section">
+      <div class="label">Status</div>
+      <div id="status" class="status">Loading…</div>
+    </div>
+
+    <div class="section">
+      <div class="label">Shared secret</div>
+      <input id="token" type="password" placeholder="Paste the Slack Pi secret" />
+      <div class="actions">
+        <button id="save-token">Save token</button>
+        <button id="reset-token" type="button">Reset</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="label">Connection test</div>
+      <div class="actions">
+        <button id="test-connection" type="button">Test</button>
+      </div>
+      <div id="test-result" class="muted"></div>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Slack Pi (Scaffold)",
+  "version": "0.0.1",
+  "description": "Scaffold for the local Slack Pi Chrome bridge.",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://app.slack.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://app.slack.com/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Slack Pi",
+    "default_popup": "popup.html"
+  }
+}

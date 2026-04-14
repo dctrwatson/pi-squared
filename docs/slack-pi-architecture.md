@@ -78,10 +78,10 @@ pi-squared/
   chrome-extensions/
     slack-pi/
       manifest.json
-      background.ts
-      content-script.ts
+      background.js
+      content-script.js
       popup.html
-      popup.ts
+      popup.js
 ```
 
 ### Why this layout
