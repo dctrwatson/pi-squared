@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 const HOST = "127.0.0.1";
@@ -86,6 +87,24 @@ interface BridgeState {
 	lastPingRoundTripMs?: number;
 }
 
+interface SlackThreadMessage {
+	author?: string;
+	text: string;
+	timestamp?: string;
+	isRoot?: boolean;
+}
+
+interface SlackThreadSnapshot {
+	workspace?: string;
+	channel?: string;
+	title?: string;
+	url: string;
+	isThread: boolean;
+	rootMessage?: SlackThreadMessage;
+	messages: SlackThreadMessage[];
+	composerDraftText?: string;
+}
+
 const state: BridgeState = {
 	lifecycle: "stopped",
 	host: HOST,
@@ -142,6 +161,31 @@ function isResponseMessage(value: unknown): value is ResponseMessage {
 	return value.type === "response" && typeof value.id === "string" && typeof value.ok === "boolean";
 }
 
+function isSlackThreadMessage(value: unknown): value is SlackThreadMessage {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.text === "string" &&
+		(value.author === undefined || typeof value.author === "string") &&
+		(value.timestamp === undefined || typeof value.timestamp === "string") &&
+		(value.isRoot === undefined || typeof value.isRoot === "boolean")
+	);
+}
+
+function isSlackThreadSnapshot(value: unknown): value is SlackThreadSnapshot {
+	if (!isRecord(value)) return false;
+	return (
+		typeof value.url === "string" &&
+		typeof value.isThread === "boolean" &&
+		(value.workspace === undefined || typeof value.workspace === "string") &&
+		(value.channel === undefined || typeof value.channel === "string") &&
+		(value.title === undefined || typeof value.title === "string") &&
+		(value.composerDraftText === undefined || typeof value.composerDraftText === "string") &&
+		Array.isArray(value.messages) &&
+		value.messages.every(isSlackThreadMessage) &&
+		(value.rootMessage === undefined || isSlackThreadMessage(value.rootMessage))
+	);
+}
+
 function rawDataToString(data: RawData): string {
 	if (typeof data === "string") return data;
 	if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
@@ -187,6 +231,62 @@ function formatStatus(showToken: boolean): string {
 
 	if (state.startupError) {
 		lines.push(`Startup error: ${state.startupError}`);
+	}
+
+	return lines.join("\n");
+}
+
+function truncateText(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	return `${text.slice(0, maxChars - 1)}…`;
+}
+
+function selectMessagesForModel(messages: SlackThreadMessage[], maxMessages = 40): {
+	messages: SlackThreadMessage[];
+	omittedCount: number;
+} {
+	if (messages.length <= maxMessages) {
+		return { messages, omittedCount: 0 };
+	}
+
+	const first = messages[0];
+	if (!first) return { messages: [], omittedCount: 0 };
+
+	const tail = messages.slice(-(maxMessages - 1));
+	return {
+		messages: [first, ...tail],
+		omittedCount: messages.length - (1 + tail.length),
+	};
+}
+
+function formatSlackThreadForModel(snapshot: SlackThreadSnapshot): string {
+	const lines = ["Slack thread"];
+	if (snapshot.workspace) lines.push(`Workspace: ${snapshot.workspace}`);
+	if (snapshot.channel) lines.push(`Channel: ${snapshot.channel}`);
+	if (snapshot.title) lines.push(`Title: ${snapshot.title}`);
+	lines.push(`URL: ${snapshot.url}`);
+
+	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages);
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (!message) continue;
+		const number = index + 1;
+		let header = `${number}. ${message.author ?? "Unknown"}`;
+		if (message.timestamp) {
+			header += ` (${message.timestamp})`;
+		}
+		if (message.isRoot) {
+			header += " [root]";
+		}
+		lines.push("", header, truncateText(message.text, 1_200));
+	}
+
+	if (omittedCount > 0) {
+		lines.push("", `[${omittedCount} earlier thread message(s) omitted]`);
+	}
+
+	if (snapshot.composerDraftText?.trim()) {
+		lines.push("", "Current composer draft:", truncateText(snapshot.composerDraftText.trim(), 2_000));
 	}
 
 	return lines.join("\n");
@@ -524,6 +624,39 @@ export default function slackPi(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		await stopBridge();
+	});
+
+	pi.registerTool({
+		name: "slack_get_current_thread",
+		label: "Slack Current Thread",
+		description:
+			"Read the currently open Slack thread from the active Chrome Slack tab, including any existing draft text in the reply composer.",
+		promptSnippet:
+			"Read the currently open Slack thread from Chrome Slack, including any existing draft text in the reply composer.",
+		promptGuidelines: [
+			"Use this tool when the user asks about the currently open Slack thread or wants Pi to refine text already typed into the Slack reply box.",
+		],
+		parameters: Type.Object({}),
+		async execute(_toolCallId, _params) {
+			await ensureBridgeStarted();
+			const response = await requestChrome("getCurrentThread");
+			if (!isSlackThreadSnapshot(response.payload)) {
+				throw new Error("Chrome returned an invalid Slack thread payload.");
+			}
+			if (response.payload.messages.length === 0) {
+				throw new Error("Chrome returned an empty Slack thread.");
+			}
+
+			const thread = response.payload;
+			return {
+				content: [{ type: "text", text: formatSlackThreadForModel(thread) }],
+				details: {
+					thread,
+					messageCount: thread.messages.length,
+					composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+				},
+			};
+		},
 	});
 
 	pi.registerCommand("slack-status", {

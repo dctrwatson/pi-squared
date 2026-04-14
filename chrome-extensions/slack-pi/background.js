@@ -71,30 +71,171 @@ function sendJson(socket, message) {
   socket.send(JSON.stringify(message));
 }
 
-function handleRequestMessage(socket, message) {
-  if (message.action === "ping") {
-    state.lastPingAt = Date.now();
-    sendJson(socket, {
-      id: message.id,
-      type: "response",
-      ok: true,
-      payload: {
-        now: new Date().toISOString(),
-      },
-    });
-    state.lastPongAt = Date.now();
-    return;
+class BridgeActionError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = "BridgeActionError";
+    this.code = code;
+  }
+}
+
+function sendSocketResponse(socket, id, response) {
+  sendJson(socket, {
+    id,
+    type: "response",
+    ...response,
+  });
+}
+
+function serializeTab(tab) {
+  return tab
+    ? {
+        id: tab.id ?? null,
+        title: tab.title ?? "",
+        url: tab.url ?? "",
+      }
+    : null;
+}
+
+function toErrorPayload(error) {
+  if (error instanceof BridgeActionError) {
+    return { code: error.code, message: error.message };
   }
 
-  sendJson(socket, {
-    id: message.id,
-    type: "response",
-    ok: false,
-    error: {
-      code: "unsupported_action",
-      message: `Unsupported action: ${String(message.action)}`,
-    },
-  });
+  if (error instanceof Error) {
+    return { code: "bridge_error", message: error.message };
+  }
+
+  return { code: "bridge_error", message: String(error) };
+}
+
+async function getSlackTabsDetailed() {
+  const tabs = await chrome.tabs.query({ url: ["https://app.slack.com/*"] });
+  const sorted = [...tabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+  const activeTab = sorted[0] ?? null;
+
+  return {
+    tabs,
+    activeTab,
+    count: tabs.length,
+    selectionRule: tabs.length <= 1 ? "single_tab" : "most_recently_focused",
+  };
+}
+
+async function getSlackTabs() {
+  const details = await getSlackTabsDetailed();
+  return {
+    count: details.count,
+    activeTab: serializeTab(details.activeTab),
+    selectionRule: details.selectionRule,
+  };
+}
+
+async function resolveActiveSlackTab() {
+  const details = await getSlackTabsDetailed();
+  const tab = details.activeTab;
+
+  if (!tab) {
+    throw new BridgeActionError(
+      "no_active_slack_tab",
+      "No Slack tab is available. Open Slack in Chrome and try again.",
+    );
+  }
+
+  if (typeof tab.id !== "number") {
+    throw new BridgeActionError("invalid_tab", "The active Slack tab does not have a usable tab id.");
+  }
+
+  return {
+    tab,
+    selectionRule: details.selectionRule,
+    tabCount: details.count,
+  };
+}
+
+async function sendMessageToActiveSlackTab(message) {
+  const { tab, selectionRule, tabCount } = await resolveActiveSlackTab();
+
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tab.id, message);
+  } catch (error) {
+    throw new BridgeActionError(
+      "content_script_unavailable",
+      error instanceof Error
+        ? error.message
+        : "The Slack Pi content script is not available in the active Slack tab.",
+    );
+  }
+
+  if (!response || typeof response !== "object") {
+    throw new BridgeActionError(
+      "content_script_invalid_response",
+      "The Slack Pi content script returned an invalid response.",
+    );
+  }
+
+  return {
+    response,
+    activeTab: serializeTab(tab),
+    selectionRule,
+    tabCount,
+  };
+}
+
+async function handleRequestMessage(socket, message) {
+  try {
+    if (message.action === "ping") {
+      state.lastPingAt = Date.now();
+      sendSocketResponse(socket, message.id, {
+        ok: true,
+        payload: {
+          now: new Date().toISOString(),
+        },
+      });
+      state.lastPongAt = Date.now();
+      return;
+    }
+
+    if (message.action === "getCurrentThread") {
+      const result = await sendMessageToActiveSlackTab({ type: "slack-pi:get-current-thread" });
+      if (!result.response.ok) {
+        sendSocketResponse(socket, message.id, {
+          ok: false,
+          error: result.response.error ?? {
+            code: "thread_read_failed",
+            message: "The Slack content script failed to read the current thread.",
+          },
+        });
+        return;
+      }
+
+      sendSocketResponse(socket, message.id, {
+        ok: true,
+        payload: {
+          ...result.response.payload,
+          activeTab: result.activeTab,
+          selectionRule: result.selectionRule,
+          slackTabCount: result.tabCount,
+        },
+      });
+      return;
+    }
+
+    sendSocketResponse(socket, message.id, {
+      ok: false,
+      error: {
+        code: "unsupported_action",
+        message: `Unsupported action: ${String(message.action)}`,
+      },
+    });
+  } catch (error) {
+    state.lastError = error instanceof Error ? error.message : String(error);
+    sendSocketResponse(socket, message.id, {
+      ok: false,
+      error: toErrorPayload(error),
+    });
+  }
 }
 
 function handleSocketMessage(socket, event) {
@@ -184,23 +325,6 @@ async function ensureConnected() {
   });
 
   return false;
-}
-
-async function getSlackTabs() {
-  const tabs = await chrome.tabs.query({ url: ["https://app.slack.com/*"] });
-  const sorted = [...tabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
-  const activeTab = sorted[0] ?? null;
-
-  return {
-    count: tabs.length,
-    activeTab: activeTab
-      ? {
-          id: activeTab.id ?? null,
-          title: activeTab.title ?? "",
-          url: activeTab.url ?? "",
-        }
-      : null,
-  };
 }
 
 async function getStatus() {
