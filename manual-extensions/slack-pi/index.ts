@@ -226,6 +226,7 @@ function formatStatus(showToken: boolean): string {
 		`Token file: ${state.tokenFile}`,
 		`Token: ${showToken ? state.token : maskToken(state.token)}`,
 		`Chrome: ${connectionSummary()}`,
+		`Mode: read-only Slack assistant`,
 	];
 
 	if (state.activeChrome) {
@@ -250,6 +251,35 @@ function formatStatus(showToken: boolean): string {
 	}
 
 	return lines.join("\n");
+}
+
+function buildSlackSystemPrompt(): string {
+	return [
+		"You are Slack Pi, a communications assistant for a distinguished SRE / BOFH.",
+		"",
+		"Role:",
+		"- This is not a coding session.",
+		"- Do not assume the user wants code, shell commands, file edits, repo work, or implementation plans unless they explicitly ask for them.",
+		"- Your job is to help the user read the active Slack thread and draft concise, accurate Slack-ready replies.",
+		"",
+		"Style:",
+		"- Be concise, direct, and technically precise.",
+		"- Prefer short replies unless the user asks for more detail.",
+		"- Avoid fluff, filler, and generic corporate tone.",
+		"- Preserve correctness and operational nuance.",
+		"- A slightly dry BOFH-adjacent tone is fine if it fits the user's intent, but clarity and accuracy come first.",
+		"",
+		"Workflow:",
+		"- When the user refers to the current Slack thread, use slack_get_current_thread if you need context.",
+		"- Treat any existing composer draft text in the Slack thread result as the user's rough draft or intent.",
+		"- The browser integration is read-only. Produce replies for manual copy/paste into Slack.",
+		"- Never claim to have sent, inserted, or modified a Slack message.",
+		"- Ask clarifying questions only when necessary to avoid an incorrect reply.",
+		"",
+		"Output:",
+		"- By default, provide a single Slack-ready reply with no preamble.",
+		"- If the user asks for alternatives, provide 2-3 concise options.",
+	].join("\n");
 }
 
 function truncateText(text: string, maxChars: number): string {
@@ -698,6 +728,12 @@ function writeStatus(message: string): void {
 }
 
 export default function slackPi(pi: ExtensionAPI) {
+	pi.on("before_agent_start", async () => {
+		return {
+			systemPrompt: buildSlackSystemPrompt(),
+		};
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await ensureBridgeStarted();
@@ -711,6 +747,8 @@ export default function slackPi(pi: ExtensionAPI) {
 			ctx.shutdown();
 			return;
 		}
+
+		pi.setActiveTools(["slack_get_current_thread"]);
 
 		if (!ctx.hasUI) return;
 

@@ -32,6 +32,8 @@ Implemented so far:
 - singleton localhost WebSocket server on `ws://127.0.0.1:27183`
 - local shared-secret creation/loading
 - Chrome hello/ack handshake support
+- Slack-specific non-coding system prompt override
+- active tools restricted to `slack_get_current_thread`
 - `/slack-status` command
 - `/slack-ping` command
 - `slack_get_current_thread` tool
@@ -48,5 +50,9 @@ Not implemented yet:
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read` — read the active Slack thread and add it to the session as a visible message
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
+
+## Prompt behavior
+
+When launched via `slack-pi`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for concise, accurate SRE/BOFH-style communication.
 
 See `docs/slack-pi-architecture.md` for the implementation plan.
