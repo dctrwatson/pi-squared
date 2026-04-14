@@ -85,18 +85,28 @@ function makeIconImageData(size, color) {
   ctx.clearRect(0, 0, size, size);
 
   const center = size / 2;
-  const outerRadius = Math.max(3, size * 0.42);
-  const innerRadius = Math.max(2, size * 0.3);
-
-  ctx.fillStyle = "rgba(15, 23, 42, 0.95)";
-  ctx.beginPath();
-  ctx.arc(center, center, outerRadius, 0, Math.PI * 2);
-  ctx.fill();
+  const radius = Math.max(3, size * 0.42);
+  const fontSize = Math.max(10, Math.floor(size * 0.82));
 
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.arc(center, center, innerRadius, 0, Math.PI * 2);
+  ctx.arc(center, center, radius, 0, Math.PI * 2);
   ctx.fill();
+
+  ctx.fillStyle = "rgba(15, 23, 42, 0.18)";
+  ctx.beginPath();
+  ctx.arc(center, center, Math.max(2, radius - Math.max(1, size * 0.08)), 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = `700 ${fontSize}px "SF Pro Display", "Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols", sans-serif`;
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(1, size * 0.08);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.55)";
+  ctx.strokeText("π", center, center + size * 0.02);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText("π", center, center + size * 0.02);
 
   return ctx.getImageData(0, 0, size, size);
 }
