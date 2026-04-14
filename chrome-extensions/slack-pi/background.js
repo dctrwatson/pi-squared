@@ -253,6 +253,21 @@ function normalizeSlackTs(ts) {
   return trimmed.replace(/[^\d.]/g, "");
 }
 
+function parseSlackWorkspaceHostFromUrl(url) {
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    if (/^[^.]+\.slack\.com$/i.test(parsed.hostname) && parsed.hostname.toLowerCase() !== "app.slack.com") {
+      return parsed.hostname;
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
 function parseSlackTeamIdFromUrl(url) {
   if (!url) return undefined;
 
@@ -277,6 +292,7 @@ function parseSlackMessageLink(url) {
       parseSlackTeamIdFromUrl(url) ||
       parsed.searchParams.get("team") ||
       undefined;
+    const workspaceHost = parseSlackWorkspaceHostFromUrl(url);
 
     let channelId = parsed.searchParams.get("cid") || undefined;
     let messageTs = normalizeSlackTs(parsed.searchParams.get("message_ts") || "");
@@ -287,6 +303,14 @@ function parseSlackMessageLink(url) {
       channelId ||= archiveMatch[1];
       if (!messageTs) {
         messageTs = normalizeSlackTs(archiveMatch[2]);
+      }
+    }
+
+    const messagesMatch = pathname.match(/\/messages\/([A-Z0-9]+)\/p(\d{16})/i);
+    if (messagesMatch?.[1]) {
+      channelId ||= messagesMatch[1];
+      if (!messageTs) {
+        messageTs = normalizeSlackTs(messagesMatch[2]);
       }
     }
 
@@ -312,6 +336,7 @@ function parseSlackMessageLink(url) {
 
     return {
       teamId,
+      workspaceHost,
       channelId,
       messageTs,
       threadTs: threadTs || undefined,
@@ -319,6 +344,15 @@ function parseSlackMessageLink(url) {
   } catch {
     return null;
   }
+}
+
+function slackTsToPathDigits(ts) {
+  return normalizeSlackTs(ts).replace(/\D/g, "");
+}
+
+function buildSlackWorkspaceMessageUrl(workspaceHost, channelId, messageTs) {
+  const pathTs = slackTsToPathDigits(messageTs);
+  return `https://${workspaceHost}/messages/${channelId}/p${pathTs}`;
 }
 
 function buildSlackWebClientMessageUrl(teamId, channelId, messageTs, threadTs) {
