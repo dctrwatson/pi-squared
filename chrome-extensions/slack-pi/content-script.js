@@ -231,7 +231,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   }
 
   function extractMessageTextFromSelectors(messageElement, composerElement) {
-    const contentSelectors = [
+    const preferredSelectors = [
       '[data-qa="message-text"]',
       '[data-qa*="message-text"]',
       '[data-qa*="message_body"]',
@@ -253,19 +253,25 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       '[data-stringify-type="paragraph"]',
       '[data-stringify-type="blockquote"]',
       '[data-stringify-type="pre"]',
-      '[data-stringify-type="code"]',
-      '[data-stringify-type]',
       'blockquote',
       'pre',
+    ];
+
+    const fallbackSelectors = [
+      '[data-stringify-type="code"]',
+      '[data-stringify-type]',
       'code',
     ];
 
-    const candidates = filterLeafCandidates(
-      queryVisibleAll(messageElement, contentSelectors).filter((element) => {
+    const filterCandidates = (elements) =>
+      elements.filter((element) => {
         if (composerElement && composerElement.contains(element)) return false;
         return true;
-      }),
-    );
+      });
+
+    const preferredCandidates = filterLeafCandidates(filterCandidates(queryVisibleAll(messageElement, preferredSelectors)));
+    const fallbackCandidates = filterLeafCandidates(filterCandidates(queryVisibleAll(messageElement, fallbackSelectors)));
+    const candidates = preferredCandidates.length > 0 ? preferredCandidates : fallbackCandidates;
 
     const parts = [];
     const seen = new Set();
@@ -276,7 +282,9 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       parts.push(text);
     }
 
-    return normalizeText(parts.join("\n"));
+    const author = extractAuthor(messageElement);
+    const timestamp = extractTimestamp(messageElement);
+    return stripLeadingMetadata(normalizeText(parts.join("\n")), author, timestamp);
   }
 
   function extractMessageTextFallback(messageElement, composerElement) {
