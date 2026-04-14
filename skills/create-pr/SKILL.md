@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Creates a GitHub pull request by summarizing the current branch's changes, squashing `pi:` auto-commits into a clean commit, and following repo-specific PR templates. Use when the user wants to create, draft, or open a PR.
+description: Creates a GitHub pull request by summarizing the current branch's changes, squashing `pi:` auto-commits while preserving non-`pi:` commits when possible, and following repo-specific PR templates. Use when the user wants to create, draft, or open a PR.
 ---
 
 # Create Pull Request
@@ -52,10 +52,10 @@ Only if none of the above files exist, use this fallback structure:
 
 ## 3. Clean up `pi:` auto-commits
 
-If any commit subject in `COMMITS` starts with `pi:`, rewrite the branch into one clean commit before pushing.
+If any commit subject in `COMMITS` starts with `pi:`, rewrite only the `pi:` commit run into one clean commit before pushing, while preserving non-`pi:` commits.
 
-- Reuse the generated PR title as the final commit subject.
-- Write a short commit body (1 short paragraph or 2-4 bullets) that accurately summarizes the key changes. Do **not** paste the PR template or checkbox lists into the commit message.
+- Reuse the generated PR title as the cleaned-up commit subject.
+- Write a short commit body (1 short paragraph or 2-4 bullets) that accurately summarizes the changes represented by the squashed `pi:` commit(s). Do **not** paste the PR template or checkbox lists into the commit message.
 - Create a temporary commit message file and run:
 
 ```bash
@@ -70,7 +70,9 @@ rm -f "$tmp"
 ```
 
 - If the script prints `NO_PI_COMMITS`, leave the existing commit history alone.
+- If the script prints `REWROTE_PI_COMMITS`, continue with the updated history.
 - If the script errors because the working tree is dirty, stop and ask the user whether to commit or stash the extra changes first.
+- If the script errors because there are multiple separate `pi:` commit groups or merge commits, stop and ask the user how they want to clean up the history; preserving non-`pi:` commits would require a more manual rewrite.
 - If the script prints a `PUSH:` command, use that exact command in the next step.
 
 ## 4. Push and create
