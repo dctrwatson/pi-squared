@@ -287,6 +287,35 @@ function truncateText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars - 1)}…`;
 }
 
+function singleLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+function buildSessionNameFromThread(thread: SlackThreadSnapshot): string {
+	const parts = ["Slack"];
+
+	if (thread.workspace) {
+		parts.push(truncateText(singleLine(thread.workspace), 18));
+	}
+
+	const scope = thread.channel || thread.title;
+	if (scope) {
+		parts.push(truncateText(singleLine(scope), 24));
+	}
+
+	const previewSource = thread.rootMessage?.text || thread.composerDraftText || thread.title || "Thread";
+	const preview = truncateText(singleLine(previewSource), 56);
+	if (preview) {
+		parts.push(preview);
+	}
+
+	return truncateText(parts.join(" · "), 96);
+}
+
+function updateSessionNameFromThread(pi: ExtensionAPI, thread: SlackThreadSnapshot): void {
+	pi.setSessionName(buildSessionNameFromThread(thread));
+}
+
 function estimateMessageChars(message: SlackThreadMessage): number {
 	return (
 		(message.author?.length ?? 0) +
@@ -749,6 +778,9 @@ export default function slackPi(pi: ExtensionAPI) {
 		}
 
 		pi.setActiveTools(["slack_get_current_thread"]);
+		if (!pi.getSessionName()) {
+			pi.setSessionName("Slack Pi");
+		}
 
 		if (!ctx.hasUI) return;
 
@@ -789,6 +821,7 @@ export default function slackPi(pi: ExtensionAPI) {
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const thread = await readCurrentSlackThread();
+			updateSessionNameFromThread(pi, thread);
 			const charBudget = getThreadCharBudget(ctx);
 			return {
 				content: [{ type: "text", text: formatSlackThreadForModel(thread, charBudget) }],
@@ -808,6 +841,7 @@ export default function slackPi(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			try {
 				const thread = await readCurrentSlackThread();
+				updateSessionNameFromThread(pi, thread);
 				const charBudget = getThreadCharBudget(ctx);
 				const content = formatSlackThreadForModel(thread, charBudget);
 				pi.sendMessage({

@@ -46,6 +46,7 @@ Implemented so far:
 - Chrome hello/ack handshake support
 - Slack-specific non-coding system prompt override
 - active tools restricted to `slack_get_current_thread`
+- automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
 - `/slack-ping` command
 - `slack_get_current_thread` tool
