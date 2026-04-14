@@ -79,8 +79,8 @@ pi-squared/
       manifest.json
       background.ts
       content-script.ts
-      popup.html            # optional
-      popup.ts              # optional
+      popup.html
+      popup.ts
 ```
 
 ### Why this layout
@@ -114,9 +114,9 @@ The Slack Pi extension should bind a **fixed localhost port**, for example:
 
 If the port is already in use:
 - report that `slack-pi` is already running
-- either exit immediately or disable Slack tools
+- fail fast and exit
 
-**Recommendation:** fail fast and exit, so there is exactly one Slack controller.
+This is a deliberate design choice so there is exactly one Slack controller.
 
 ---
 
@@ -184,6 +184,8 @@ Read the currently open Slack thread from the active Slack tab.
 
 **Behavior:**
 - request thread data from Chrome
+- only operate on the currently open thread pane in the MVP
+- fail clearly if no thread pane is open
 - normalize it into compact text for the model
 - include structured details for rendering/debugging
 
@@ -191,8 +193,10 @@ Read the currently open Slack thread from the active Slack tab.
 Insert supplied text into the active Slack composer without sending.
 
 **Behavior:**
-- ask Chrome to focus the thread or channel composer
-- replace or fill the composer text
+- ask Chrome to focus the active composer
+- replace the current composer contents in the MVP
+- require confirmation before replacing a non-empty composer
+- do not support append mode in the MVP
 - return success/failure
 
 #### `slack_send_reply`
@@ -200,7 +204,7 @@ Send the current reply in Slack.
 
 **Behavior:**
 - optionally accept `text` and insert first
-- require an explicit confirmation step before sending
+- always require an explicit Pi-side confirmation step before sending
 - ask Chrome to click/send via the composer
 
 #### Optional later tool: `slack_get_selection`
@@ -222,13 +226,17 @@ Expected host permission:
 Expected extension pieces:
 - **content script** on Slack pages
 - **background service worker** for WebSocket lifecycle and routing
-- optional popup for status/debugging
+- **minimal popup** for status, token setup/reset, and connection testing
 
 ### Background service worker responsibilities
 - connect to the Pi WebSocket server
 - reconnect when Pi starts/stops
 - route requests between Pi and the Slack tab
 - track which Slack tab is considered active
+- apply the MVP active-tab rule:
+  - if exactly one Slack tab exists, use it
+  - if multiple Slack tabs exist, use the most recently focused one
+  - if no Slack tab exists, report that no active Slack tab is available
 - expose simple connection state for the popup
 
 ### Content script responsibilities
@@ -237,6 +245,11 @@ Expected extension pieces:
 - locate and manipulate the message composer
 - perform insert and send actions
 - report whether the page is in a supported state
+
+### MVP page scope
+- read operations are limited to the currently open thread pane
+- if no thread pane is open, read requests fail clearly
+- top-level channel reads are out of scope for the MVP
 
 ---
 
@@ -490,14 +503,18 @@ For long threads:
 8. Optionally Pi calls `slack_send_reply`
 
 ## Recommended safety model
-- insertion is low risk and can be tool-driven directly
-- sending is higher risk and should require confirmation
+- insertion is low risk, but replacing a non-empty composer should require confirmation
+- sending is higher risk and always requires confirmation
 
 ### Confirmation recommendation
 Before `slack_send_reply` executes:
 - show the text to be sent
 - ask the user to confirm in Pi UI
-- then trigger Chrome send action
+- only then trigger the Chrome send action
+
+Before `slack_insert_reply` replaces a non-empty composer:
+- ask the user to confirm replacement
+- do not support append mode in the MVP
 
 ---
 
@@ -512,8 +529,9 @@ Use a long-lived shared secret stored locally.
 
 ### Proposed setup
 - secret stored outside the repo, for example in a user config file
-- Pi extension reads it at startup
-- Chrome extension stores the same value in extension local storage or options
+- `slack-pi` reads it at startup and creates it on first run if missing
+- Chrome extension gets the value once through the popup setup flow
+- Chrome extension stores the same value in extension local storage/options after setup
 
 ## Browser restrictions
 - only run content script on `https://app.slack.com/*`
@@ -622,7 +640,7 @@ Repo structure exists and does not auto-load the Slack extension.
 - implement background service worker
 - open WebSocket to Pi with reconnect logic
 - register content script on Slack pages
-- surface simple connection status in popup or console
+- surface connection status, token setup/reset, and a test action in the minimal popup
 
 ### Acceptance criteria
 - background worker reconnects automatically
@@ -655,11 +673,13 @@ Repo structure exists and does not auto-load the Slack extension.
 - implement composer detection in content script
 - implement `insertReply` action
 - implement Pi tool `slack_insert_reply`
-- verify text insertion works for thread and channel composer states
+- verify text insertion works for visible thread and channel composer states
+- require confirmation before replacing a non-empty composer
 
 ### Acceptance criteria
 - Pi can insert generated text into the visible Slack composer
 - insertion does not send automatically
+- replacement of a non-empty composer requires confirmation
 - failure messages are actionable
 
 ---
@@ -704,6 +724,7 @@ The MVP should include only:
 - `slack-pi` launcher
 - fixed-port singleton WebSocket server
 - Chrome extension with reconnect logic
+- minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
 - `slack_insert_reply`
 - `slack_send_reply` with confirmation
@@ -749,24 +770,37 @@ Everything else is optional.
 
 ---
 
-## Open questions
-
-These do not block the architecture, but should be decided during implementation.
+## Resolved MVP decisions
 
 1. **Active tab selection**
-   - Use the most recently focused Slack tab, or only the pinned one?
+   - If exactly one `app.slack.com` tab exists, use it.
+   - If multiple Slack tabs exist, use the most recently focused one.
+   - If no Slack tab exists, fail clearly.
 
 2. **Composer behavior**
-   - Replace existing text or append to it?
+   - Replace composer contents in the MVP.
+   - If the composer is non-empty, require confirmation before replacing it.
+   - Do not support append mode in the MVP.
 
 3. **Thread extraction scope**
-   - Only currently open thread pane, or also top-level channel composer context?
+   - Read only the currently open thread pane in the MVP.
+   - If no thread pane is open, fail clearly.
+   - Top-level channel reads can be added later as a separate tool.
 
-4. **Token storage UX**
-   - Manual copy once, or generate a setup helper command?
+4. **Token/setup UX**
+   - Use a one-time setup flow.
+   - `slack-pi` creates or reads a local shared secret.
+   - The Chrome popup accepts that secret once and stores it locally.
 
 5. **Popup UI**
-   - Needed for status/debugging, or keep Chrome side invisible at first?
+   - Include a minimal popup in v1.
+   - It should show connection status, active Slack tab state, token entry/reset, and a simple test action.
+
+6. **Send safety**
+   - `slack_send_reply` always requires Pi-side confirmation before sending.
+
+7. **Singleton behavior**
+   - If the fixed port is already in use, the second `slack-pi` instance fails fast and exits.
 
 ---
 
