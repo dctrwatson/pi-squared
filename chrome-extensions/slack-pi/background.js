@@ -76,29 +76,49 @@ function makeIconImageData(size, color) {
 
   ctx.clearRect(0, 0, size, size);
 
+  const inset = Math.max(0.5, size * 0.05);
+  const width = size - inset * 2;
+  const height = width;
+  const radius = Math.max(2, size * 0.2);
   const center = size / 2;
-  const radius = Math.max(3, size * 0.42);
-  const fontSize = Math.max(10, Math.floor(size * 0.82));
+  const fontSize = Math.max(11, Math.floor(size * 0.9));
+
+  const roundedRect = (x, y, w, h, r) => {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  };
 
   ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(center, center, radius, 0, Math.PI * 2);
+  roundedRect(inset, inset, width, height, radius);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(15, 23, 42, 0.18)";
-  ctx.beginPath();
-  ctx.arc(center, center, Math.max(2, radius - Math.max(1, size * 0.08)), 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.35)";
+  ctx.lineWidth = Math.max(1, size * 0.04);
+  roundedRect(inset, inset, width, height, radius);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(15, 23, 42, 0.12)";
+  roundedRect(inset + size * 0.03, inset + size * 0.03, width - size * 0.06, height - size * 0.06, Math.max(2, radius - size * 0.04));
   ctx.fill();
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.font = `700 ${fontSize}px "SF Pro Display", "Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols", sans-serif`;
   ctx.lineJoin = "round";
-  ctx.lineWidth = Math.max(1, size * 0.08);
-  ctx.strokeStyle = "rgba(15, 23, 42, 0.55)";
-  ctx.strokeText("π", center, center + size * 0.02);
+  ctx.lineWidth = Math.max(1, size * 0.07);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.45)";
+  ctx.strokeText("π", center, center + size * 0.03);
   ctx.fillStyle = "#ffffff";
-  ctx.fillText("π", center, center + size * 0.02);
+  ctx.fillText("π", center, center + size * 0.03);
 
   return ctx.getImageData(0, 0, size, size);
 }
