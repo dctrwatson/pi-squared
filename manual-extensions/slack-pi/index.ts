@@ -110,6 +110,8 @@ interface SlackThreadSnapshot {
 	rootMessage?: SlackThreadMessage;
 	messages: SlackThreadMessage[];
 	composerDraftText?: string;
+	reportedMessageCount?: number;
+	harvestedViaScroll?: boolean;
 }
 
 const state: BridgeState = {
@@ -192,6 +194,8 @@ function isSlackThreadSnapshot(value: unknown): value is SlackThreadSnapshot {
 		(value.channel === undefined || typeof value.channel === "string") &&
 		(value.title === undefined || typeof value.title === "string") &&
 		(value.composerDraftText === undefined || typeof value.composerDraftText === "string") &&
+		(value.reportedMessageCount === undefined || typeof value.reportedMessageCount === "number") &&
+		(value.harvestedViaScroll === undefined || typeof value.harvestedViaScroll === "boolean") &&
 		Array.isArray(value.messages) &&
 		value.messages.every(isSlackThreadMessage) &&
 		(value.rootMessage === undefined || isSlackThreadMessage(value.rootMessage))
@@ -253,32 +257,91 @@ function truncateText(text: string, maxChars: number): string {
 	return `${text.slice(0, maxChars - 1)}…`;
 }
 
-function selectMessagesForModel(messages: SlackThreadMessage[], maxMessages = 40): {
+function estimateMessageChars(message: SlackThreadMessage): number {
+	return (
+		(message.author?.length ?? 0) +
+		(message.timestamp?.length ?? 0) +
+		message.text.length +
+		32
+	);
+}
+
+function getThreadCharBudget(ctx: { model?: { contextWindow: number } | undefined; getContextUsage(): { tokens: number } | undefined }): number {
+	const contextWindow = ctx.model?.contextWindow;
+	const usedTokens = ctx.getContextUsage()?.tokens ?? 0;
+	if (!contextWindow || contextWindow <= 0) {
+		return 24_000;
+	}
+
+	const remainingTokens = Math.max(0, contextWindow - usedTokens);
+	const budgetTokens = Math.max(1_500, Math.min(12_000, Math.floor(remainingTokens * 0.3)));
+	return Math.max(6_000, Math.min(40_000, budgetTokens * 4));
+}
+
+function selectMessagesForModel(messages: SlackThreadMessage[], charBudget: number): {
 	messages: SlackThreadMessage[];
 	omittedCount: number;
 } {
-	if (messages.length <= maxMessages) {
-		return { messages, omittedCount: 0 };
+	if (messages.length === 0) {
+		return { messages: [], omittedCount: 0 };
 	}
 
-	const first = messages[0];
-	if (!first) return { messages: [], omittedCount: 0 };
+	const selected: SlackThreadMessage[] = [];
+	const usedIndexes = new Set<number>();
+	let usedChars = 0;
 
-	const tail = messages.slice(-(maxMessages - 1));
+	const takeIndex = (index: number): boolean => {
+		const message = messages[index];
+		if (!message || usedIndexes.has(index)) return false;
+		const estimated = estimateMessageChars(message);
+		if (selected.length > 0 && usedChars + estimated > charBudget) {
+			return false;
+		}
+		selected.push(message);
+		usedIndexes.add(index);
+		usedChars += estimated;
+		return true;
+	};
+
+	// Always keep the root message.
+	takeIndex(0);
+
+	// Preserve the opening context of the thread.
+	for (let index = 1; index < Math.min(messages.length, 6); index++) {
+		takeIndex(index);
+	}
+
+	// Then preserve recent context from the tail.
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (usedIndexes.has(index)) continue;
+		if (!takeIndex(index)) break;
+	}
+
+	const ordered = selected
+		.map((message) => ({ message, index: messages.indexOf(message) }))
+		.sort((a, b) => a.index - b.index)
+		.map((entry) => entry.message);
+
 	return {
-		messages: [first, ...tail],
-		omittedCount: messages.length - (1 + tail.length),
+		messages: ordered,
+		omittedCount: Math.max(0, messages.length - ordered.length),
 	};
 }
 
-function formatSlackThreadForModel(snapshot: SlackThreadSnapshot): string {
+function formatSlackThreadForModel(snapshot: SlackThreadSnapshot, charBudget: number): string {
 	const lines = ["Slack thread"];
 	if (snapshot.workspace) lines.push(`Workspace: ${snapshot.workspace}`);
 	if (snapshot.channel) lines.push(`Channel: ${snapshot.channel}`);
 	if (snapshot.title) lines.push(`Title: ${snapshot.title}`);
 	lines.push(`URL: ${snapshot.url}`);
+	if (snapshot.reportedMessageCount !== undefined) {
+		lines.push(`Reported messages: ${snapshot.reportedMessageCount}`);
+	}
+	if (snapshot.harvestedViaScroll) {
+		lines.push("Capture: harvested by scrolling the virtualized thread pane");
+	}
 
-	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages);
+	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (!message) continue;
@@ -294,7 +357,7 @@ function formatSlackThreadForModel(snapshot: SlackThreadSnapshot): string {
 	}
 
 	if (omittedCount > 0) {
-		lines.push("", `[${omittedCount} earlier thread message(s) omitted]`);
+		lines.push("", `[${omittedCount} middle or tail thread message(s) omitted to fit context]`);
 	}
 
 	if (snapshot.composerDraftText?.trim()) {
