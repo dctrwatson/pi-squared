@@ -21,6 +21,19 @@ You can symlink that into a directory on your `PATH`, for example:
 ln -sf "$(pwd)/bin/slack-pi" "$HOME/bin/slack-pi"
 ```
 
+The launcher forces a dedicated session directory so Slack Pi sessions do not depend on the current working directory:
+
+```sh
+$XDG_STATE_HOME/slack-pi/sessions
+# or $HOME/.local/state/slack-pi/sessions if XDG_STATE_HOME is unset
+```
+
+Override it with:
+
+```sh
+SLACK_PI_SESSION_DIR=/path/to/sessions slack-pi
+```
+
 ## Current state
 
 Phase 1 is implemented.
@@ -54,5 +67,7 @@ Not implemented yet:
 ## Prompt behavior
 
 When launched via `slack-pi`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for concise, accurate SRE/BOFH-style communication.
+
+The launcher also pins session storage to a dedicated Slack Pi session directory, so normal project cwd-based session partitioning does not apply.
 
 See `docs/slack-pi-architecture.md` for the implementation plan.
