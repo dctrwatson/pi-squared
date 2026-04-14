@@ -103,7 +103,7 @@ Example shape:
 
 ```sh
 slack-pi() {
-  pi -e /Users/johnw/Projects/pi-squared/manual-extensions/slack-pi/index.ts "$@"
+  pi -e ./manual-extensions/slack-pi/index.ts "$@"
 }
 ```
 

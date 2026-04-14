@@ -12,13 +12,13 @@ It is meant to be launched explicitly.
 Recommended launcher script:
 
 ```sh
-/Users/johnw/Projects/pi-squared/bin/slack-pi
+./bin/slack-pi
 ```
 
 You can symlink that into a directory on your `PATH`, for example:
 
 ```sh
-ln -sf /Users/johnw/Projects/pi-squared/bin/slack-pi ~/bin/slack-pi
+ln -sf "$(pwd)/bin/slack-pi" "$HOME/bin/slack-pi"
 ```
 
 ## Current state
