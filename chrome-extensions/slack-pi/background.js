@@ -41,8 +41,6 @@ function getAppearanceState() {
   if (state.authenticated && state.connected) {
     return {
       color: "#22c55e",
-      badgeText: "ON",
-      badgeColor: "#166534",
       title: "Slack Pi: connected",
     };
   }
@@ -50,8 +48,6 @@ function getAppearanceState() {
   if (state.socketState === "connecting" || state.socketState === "open") {
     return {
       color: "#f59e0b",
-      badgeText: "…",
-      badgeColor: "#92400e",
       title: "Slack Pi: connecting",
     };
   }
@@ -59,16 +55,12 @@ function getAppearanceState() {
   if (state.lastError) {
     return {
       color: "#ef4444",
-      badgeText: "!",
-      badgeColor: "#991b1b",
       title: `Slack Pi: ${state.lastError}`,
     };
   }
 
   return {
     color: "#6b7280",
-    badgeText: "",
-    badgeColor: "#374151",
     title: "Slack Pi: idle",
   };
 }
@@ -116,8 +108,7 @@ async function updateActionAppearance() {
 
   try {
     await chrome.action.setTitle({ title: appearance.title });
-    await chrome.action.setBadgeBackgroundColor({ color: appearance.badgeColor });
-    await chrome.action.setBadgeText({ text: appearance.badgeText });
+    await chrome.action.setBadgeText({ text: "" });
 
     const imageData = {};
     let hasImageData = false;
