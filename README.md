@@ -4,7 +4,7 @@ Repository for maintaining skills and extensions that I use with [Pi](https://bu
 
 ## Skills
 
-- [**create-pr**](skills/create-pr/SKILL.md) — Creates or drafts a GitHub pull request from the current branch, cleans up `pi:` auto-commits, and follows repo PR templates.
+- [**create-pr**](skills/create-pr/SKILL.md) — Creates or drafts a GitHub pull request from the current branch, analyzes changes, cleans up `pi:` auto-commits, and follows repo PR templates.
 
 ## Extensions
 
