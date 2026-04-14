@@ -46,6 +46,7 @@ Not implemented yet:
 - `/slack-status` — show bridge status
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
+- `/slack-read` — read the active Slack thread and add it to the session as a visible message
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
 
 See `docs/slack-pi-architecture.md` for the implementation plan.

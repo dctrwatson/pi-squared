@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
@@ -607,6 +608,18 @@ async function ensureBridgeStarted(): Promise<void> {
 	return await startupPromise;
 }
 
+async function readCurrentSlackThread(): Promise<SlackThreadSnapshot> {
+	await ensureBridgeStarted();
+	const response = await requestChrome("getCurrentThread");
+	if (!isSlackThreadSnapshot(response.payload)) {
+		throw new Error("Chrome returned an invalid Slack thread payload.");
+	}
+	if (response.payload.messages.length === 0) {
+		throw new Error("Chrome returned an empty Slack thread.");
+	}
+	return response.payload;
+}
+
 function startupFailureMessage(): string {
 	if (state.startupError?.includes("EADDRINUSE")) {
 		return `Slack Pi could not start because ${state.wsUrl} is already in use. Another slack-pi instance is probably running.`;
@@ -645,6 +658,20 @@ export default function slackPi(pi: ExtensionAPI) {
 		await stopBridge();
 	});
 
+	pi.registerMessageRenderer("slack-read", (message, options, theme) => {
+		const content = typeof message.content === "string" ? message.content : String(message.content ?? "");
+		const lines = content.split("\n");
+		const body = options.expanded ? content : lines.slice(0, 18).join("\n");
+		const truncated = !options.expanded && lines.length > 18;
+
+		let text = theme.fg("toolTitle", theme.bold("slack-read"));
+		text += `\n${body}`;
+		if (truncated) {
+			text += `\n${theme.fg("muted", "... expand to view the full Slack thread")}`;
+		}
+		return new Text(text, 0, 0);
+	});
+
 	pi.registerTool({
 		name: "slack_get_current_thread",
 		label: "Slack Current Thread",
@@ -657,16 +684,7 @@ export default function slackPi(pi: ExtensionAPI) {
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params) {
-			await ensureBridgeStarted();
-			const response = await requestChrome("getCurrentThread");
-			if (!isSlackThreadSnapshot(response.payload)) {
-				throw new Error("Chrome returned an invalid Slack thread payload.");
-			}
-			if (response.payload.messages.length === 0) {
-				throw new Error("Chrome returned an empty Slack thread.");
-			}
-
-			const thread = response.payload;
+			const thread = await readCurrentSlackThread();
 			return {
 				content: [{ type: "text", text: formatSlackThreadForModel(thread) }],
 				details: {
@@ -675,6 +693,38 @@ export default function slackPi(pi: ExtensionAPI) {
 					composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
 				},
 			};
+		},
+	});
+
+	pi.registerCommand("slack-read", {
+		description: "Read the current Slack thread and inject it into the session as a visible Slack message",
+		handler: async (_args, ctx) => {
+			try {
+				const thread = await readCurrentSlackThread();
+				const content = formatSlackThreadForModel(thread);
+				pi.sendMessage({
+					customType: "slack-read",
+					content,
+					display: true,
+					details: {
+						thread,
+						messageCount: thread.messages.length,
+						composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+					},
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify("Current Slack thread added to the session.", "info");
+				} else {
+					writeStatus(content);
+				}
+			} catch (error) {
+				const message = `Slack read failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
+			}
 		},
 	});
 
