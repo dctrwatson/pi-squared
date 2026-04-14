@@ -266,7 +266,10 @@ function estimateMessageChars(message: SlackThreadMessage): number {
 	);
 }
 
-function getThreadCharBudget(ctx: { model?: { contextWindow: number } | undefined; getContextUsage(): { tokens: number } | undefined }): number {
+function getThreadCharBudget(ctx: {
+	model?: { contextWindow: number } | undefined;
+	getContextUsage(): { tokens: number | null } | undefined;
+}): number {
 	const contextWindow = ctx.model?.contextWindow;
 	const usedTokens = ctx.getContextUsage()?.tokens ?? 0;
 	if (!contextWindow || contextWindow <= 0) {
@@ -746,14 +749,17 @@ export default function slackPi(pi: ExtensionAPI) {
 			"Use this tool when the user asks about the currently open Slack thread or wants Pi to refine text already typed into the Slack reply box.",
 		],
 		parameters: Type.Object({}),
-		async execute(_toolCallId, _params) {
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			const thread = await readCurrentSlackThread();
+			const charBudget = getThreadCharBudget(ctx);
 			return {
-				content: [{ type: "text", text: formatSlackThreadForModel(thread) }],
+				content: [{ type: "text", text: formatSlackThreadForModel(thread, charBudget) }],
 				details: {
 					thread,
 					messageCount: thread.messages.length,
+					reportedMessageCount: thread.reportedMessageCount,
 					composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+					charBudget,
 				},
 			};
 		},
@@ -764,7 +770,8 @@ export default function slackPi(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			try {
 				const thread = await readCurrentSlackThread();
-				const content = formatSlackThreadForModel(thread);
+				const charBudget = getThreadCharBudget(ctx);
+				const content = formatSlackThreadForModel(thread, charBudget);
 				pi.sendMessage({
 					customType: "slack-read",
 					content,
@@ -772,7 +779,9 @@ export default function slackPi(pi: ExtensionAPI) {
 					details: {
 						thread,
 						messageCount: thread.messages.length,
+						reportedMessageCount: thread.reportedMessageCount,
 						composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+						charBudget,
 					},
 				});
 				if (ctx.hasUI) {

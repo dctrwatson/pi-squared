@@ -1,6 +1,13 @@
 if (!globalThis.__slackPiContentScriptLoaded) {
   globalThis.__slackPiContentScriptLoaded = true;
 
+  const SCROLL_SETTLE_MS = 120;
+  const MAX_SCROLL_STEPS = 240;
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   function normalizeText(value) {
     return String(value ?? "")
       .replace(/\u200B|\u200C|\u200D|\uFEFF/g, "")
@@ -344,7 +351,145 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     );
   }
 
-  function buildThreadSnapshot() {
+  function extractMessages(threadRoot, composerElement) {
+    const messageElements = findMessageElements(threadRoot, composerElement);
+    return messageElements
+      .map((element, index) => {
+        const text = extractMessageText(element, composerElement);
+        if (!text) return null;
+        return {
+          author: extractAuthor(element) || undefined,
+          text,
+          timestamp: extractTimestamp(element) || undefined,
+          isRoot: index === 0,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function makeMessageKey(message) {
+    return [message.timestamp || "", message.author || "", message.text.slice(0, 240)].join("\u241f");
+  }
+
+  function collectMessagesInto(map, messages) {
+    for (const message of messages) {
+      const key = makeMessageKey(message);
+      if (!map.has(key)) {
+        map.set(key, message);
+      }
+    }
+  }
+
+  function getElementDepth(element) {
+    let depth = 0;
+    let current = element;
+    while (current.parentElement) {
+      depth += 1;
+      current = current.parentElement;
+    }
+    return depth;
+  }
+
+  function findThreadScrollContainer(threadRoot) {
+    const candidates = [threadRoot, ...threadRoot.querySelectorAll("*")].filter((element) => {
+      if (!(element instanceof HTMLElement)) return false;
+      if (!isVisible(element)) return false;
+      if (element.scrollHeight <= element.clientHeight + 40) return false;
+      const style = window.getComputedStyle(element);
+      if (!["auto", "scroll", "overlay"].includes(style.overflowY)) return false;
+      return true;
+    });
+
+    const scored = candidates
+      .map((element) => {
+        const qa = (element.getAttribute("data-qa") || "").toLowerCase();
+        const hasListItems = Boolean(element.querySelector('[data-qa="virtual-list-item"], [role="listitem"]'));
+        const hasComposer = Boolean(findComposer(element));
+        const overflow = Math.min(600, element.scrollHeight - element.clientHeight);
+        const depth = getElementDepth(element);
+        let score = overflow + depth;
+        if (hasListItems) score += 2_000;
+        if (qa.includes("virtual") || qa.includes("scroll")) score += 400;
+        if (hasComposer) score += 100;
+        return { element, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    return scored[0]?.element ?? null;
+  }
+
+  function findReportedMessageCount(threadRoot) {
+    const text = getElementText(threadRoot);
+    const matches = [...text.matchAll(/\b(\d{1,5})\s+repl(?:y|ies)\b/gi)];
+    if (matches.length === 0) return undefined;
+    const last = matches[matches.length - 1];
+    if (!last || !last[1]) return undefined;
+    const value = Number.parseInt(last[1], 10);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  async function harvestThreadMessages(threadRoot, composerElement) {
+    const visibleMessages = extractMessages(threadRoot, composerElement);
+    const scrollContainer = findThreadScrollContainer(threadRoot);
+
+    if (!scrollContainer) {
+      return {
+        messages: visibleMessages,
+        harvestedViaScroll: false,
+      };
+    }
+
+    const originalScrollTop = scrollContainer.scrollTop;
+    const originalScrollBehavior = scrollContainer.style.scrollBehavior;
+    const collected = new Map();
+
+    try {
+      scrollContainer.style.scrollBehavior = "auto";
+      scrollContainer.scrollTop = 0;
+      await sleep(SCROLL_SETTLE_MS);
+      collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+
+      let lastScrollTop = -1;
+      for (let step = 0; step < MAX_SCROLL_STEPS; step += 1) {
+        const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+        const currentTop = scrollContainer.scrollTop;
+        collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+
+        if (currentTop >= maxScrollTop - 2) {
+          break;
+        }
+
+        const stepSize = Math.max(160, Math.floor(scrollContainer.clientHeight * 0.8));
+        const nextTop = Math.min(maxScrollTop, currentTop + stepSize);
+        if (nextTop <= currentTop + 1 || nextTop === lastScrollTop) {
+          break;
+        }
+
+        lastScrollTop = currentTop;
+        scrollContainer.scrollTop = nextTop;
+        await sleep(SCROLL_SETTLE_MS);
+      }
+
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      await sleep(SCROLL_SETTLE_MS);
+      collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+    } finally {
+      scrollContainer.scrollTop = originalScrollTop;
+      scrollContainer.style.scrollBehavior = originalScrollBehavior;
+    }
+
+    const messages = [...collected.values()];
+    messages.forEach((message, index) => {
+      message.isRoot = index === 0;
+    });
+
+    return {
+      messages,
+      harvestedViaScroll: true,
+    };
+  }
+
+  async function buildThreadSnapshot() {
     const threadRoot = findThreadRoot();
     if (!threadRoot) {
       return {
@@ -358,19 +503,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
     const composerElement = findComposer(threadRoot);
     const composerDraftText = composerElement ? getElementText(composerElement) : "";
-    const messageElements = findMessageElements(threadRoot, composerElement);
-    const messages = messageElements
-      .map((element, index) => {
-        const text = extractMessageText(element, composerElement);
-        if (!text) return null;
-        return {
-          author: extractAuthor(element) || undefined,
-          text,
-          timestamp: extractTimestamp(element) || undefined,
-          isRoot: index === 0,
-        };
-      })
-      .filter(Boolean);
+    const harvest = await harvestThreadMessages(threadRoot, composerElement);
+    const messages = harvest.messages;
 
     if (messages.length === 0) {
       return {
@@ -384,6 +518,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
     const documentMeta = parseDocumentTitle();
     const channel = findChannelName() || undefined;
+    const reportedMessageCount = findReportedMessageCount(threadRoot);
 
     return {
       ok: true,
@@ -396,6 +531,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         rootMessage: messages[0],
         messages,
         composerDraftText: composerDraftText || undefined,
+        reportedMessageCount,
+        harvestedViaScroll: harvest.harvestedViaScroll,
       },
     };
   }
@@ -413,18 +550,18 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     if (message.type === "slack-pi:get-current-thread") {
-      try {
-        sendResponse(buildThreadSnapshot());
-      } catch (error) {
-        sendResponse({
-          ok: false,
-          error: {
-            code: "thread_extraction_failed",
-            message: error instanceof Error ? error.message : String(error),
-          },
+      void buildThreadSnapshot()
+        .then((result) => sendResponse(result))
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "thread_extraction_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
         });
-      }
-      return undefined;
+      return true;
     }
 
     return undefined;
