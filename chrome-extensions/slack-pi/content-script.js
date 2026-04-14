@@ -186,7 +186,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         return messageTs.replace(/[^\d.]/g, "");
       }
 
-      const archiveMatch = parsed.pathname.match(/\/archives\/[^/]+\/p(\d{16})/i);
+      const archiveMatch = parsed.pathname.match(/\/(?:archives|messages)\/[^/]+\/p(\d{16})/i);
       if (archiveMatch && archiveMatch[1]) {
         const digits = archiveMatch[1];
         return `${digits.slice(0, 10)}.${digits.slice(10)}`;
@@ -220,6 +220,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   function extractMessagePermalinkUrl(messageElement) {
     const selectors = [
       'a[href*="/archives/"][href*="/p"]',
+      'a[href*="/messages/"][href*="/p"]',
       'a[href*="message_ts="]',
     ];
 

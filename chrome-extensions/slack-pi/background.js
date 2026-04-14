@@ -372,6 +372,17 @@ async function resolveSlackWebMessageUrl(url) {
     return { url, rewritten: false, reason: "unrecognized_message_link" };
   }
 
+  if (parsed.workspaceHost) {
+    return {
+      url: buildSlackWorkspaceMessageUrl(parsed.workspaceHost, parsed.channelId, parsed.messageTs),
+      rewritten: true,
+      reason: "from_workspace_host",
+      workspaceHost: parsed.workspaceHost,
+      channelId: parsed.channelId,
+      messageTs: parsed.messageTs,
+    };
+  }
+
   let teamId = parsed.teamId;
   if (!teamId) {
     const details = await getSlackTabsDetailed();
