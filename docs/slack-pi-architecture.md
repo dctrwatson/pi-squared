@@ -13,7 +13,7 @@ This design intentionally avoids:
 It assumes the primary workflow is:
 1. Slack is open in a pinned Chrome tab
 2. `slack-pi` is launched when Slack assistance is needed
-3. Pi uses tool calls to read the current thread, draft a reply, insert it into Slack, and optionally send it
+3. Pi uses tool calls to read the current thread, incorporate any existing Slack composer draft as context, and insert a revised reply back into Slack for manual sending in the UI
 
 ---
 
@@ -23,8 +23,8 @@ It assumes the primary workflow is:
 - Read the **currently open Slack thread** from Chrome
 - Let Pi use the thread as context during a normal tool-calling workflow
 - Accept a short or long user draft/note and turn it into a polished Slack reply
-- Insert the reply into the Slack composer
-- Optionally send the reply after explicit confirmation
+- If the Slack composer already contains text, use that draft as additional reply context
+- Insert the revised reply into the Slack composer
 - Keep the integration **opt-in** via a dedicated `slack-pi` launcher
 
 ### Secondary goals
@@ -39,6 +39,7 @@ It assumes the primary workflow is:
 - No support for autonomous bot behavior
 - No attempt to read messages outside the currently accessible Slack web UI
 - No multi-controller coordination between several Pi instances
+- No Pi-driven final send action; the user always clicks send in Slack manually
 
 ---
 
@@ -166,7 +167,7 @@ This is a deliberate design choice so there is exactly one Slack controller.
 - expose Slack-oriented tools to the LLM
 - expose a few slash commands for status/debugging
 - normalize Chrome-returned Slack data into clean LLM context
-- enforce safe send behavior
+- enforce safe insertion behavior and the manual-send policy
 
 ### Proposed slash commands
 - `/slack-status`
@@ -186,6 +187,7 @@ Read the currently open Slack thread from the active Slack tab.
 - request thread data from Chrome
 - only operate on the currently open thread pane in the MVP
 - fail clearly if no thread pane is open
+- include current Slack composer contents as additional context when non-empty
 - normalize it into compact text for the model
 - include structured details for rendering/debugging
 
@@ -198,14 +200,6 @@ Insert supplied text into the active Slack composer without sending.
 - require confirmation before replacing a non-empty composer
 - do not support append mode in the MVP
 - return success/failure
-
-#### `slack_send_reply`
-Send the current reply in Slack.
-
-**Behavior:**
-- optionally accept `text` and insert first
-- always require an explicit Pi-side confirmation step before sending
-- ask Chrome to click/send via the composer
 
 #### Optional later tool: `slack_get_selection`
 Read only the currently selected message or visible root message rather than the full thread.
@@ -241,9 +235,10 @@ Expected extension pieces:
 
 ### Content script responsibilities
 - read visible Slack message/thread DOM
+- read current Slack composer contents when present
 - normalize DOM fragments into structured data
 - locate and manipulate the message composer
-- perform insert and send actions
+- perform insert actions
 - report whether the page is in a supported state
 
 ### MVP page scope
@@ -267,9 +262,9 @@ The browser side should isolate Slack DOM handling into a small adapter instead 
   - replies
   - author labels
   - timestamps if available
+  - current composer draft text if present
 - normalize message text
 - insert text into the correct composer
-- send only when explicitly requested
 
 ### Design principle
 Expect selectors to break eventually. Keep them centralized and easy to update.
@@ -400,7 +395,8 @@ Ask Chrome for the current Slack thread.
         "timestamp": "2026-04-14T10:18:00Z",
         "isRoot": false
       }
-    ]
+    ],
+    "composerDraftText": "I can take the review this afternoon if that helps."
   }
 }
 ```
@@ -416,21 +412,6 @@ Insert text into the active Slack composer.
   "action": "insertReply",
   "payload": {
     "text": "Draft reply text"
-  }
-}
-```
-
-### `sendReply`
-Send the current message in the composer.
-
-#### Request
-```json
-{
-  "id": "req_3",
-  "type": "request",
-  "action": "sendReply",
-  "payload": {
-    "confirmLabel": "Send Slack reply"
   }
 }
 ```
@@ -471,6 +452,9 @@ Blocked on final review.
 
 3. Carol (2026-04-14 10:21)
 If review lands by noon, yes.
+
+Current composer draft:
+I can take the review this afternoon if that helps.
 ```
 
 ## Normalization rules
@@ -478,6 +462,8 @@ If review lands by noon, yes.
 - strip visual-only UI text
 - keep author and timestamp when available
 - keep line breaks inside message bodies
+- if the Slack composer already has text, include it as a separate draft-context section
+- treat composer draft text as user intent/context, not as the final reply
 - truncate long threads safely if needed
 - return structured `details` alongside the text form
 
@@ -494,27 +480,27 @@ For long threads:
 ## Typical user flow
 1. Launch `slack-pi`
 2. Open or focus the Slack thread in Chrome
-3. Ask Pi something like:
-   - `Read the current Slack thread and draft a reply saying I can review this afternoon.`
-4. Pi calls `slack_get_current_thread`
-5. Pi drafts a reply
-6. Pi asks for approval if needed
-7. Pi calls `slack_insert_reply`
-8. Optionally Pi calls `slack_send_reply`
+3. Optionally start a rough draft in the Slack composer
+4. Ask Pi something like:
+   - `Read the current Slack thread and refine my draft into a concise reply.`
+5. Pi calls `slack_get_current_thread`
+6. Pi sees both the thread and any existing composer draft text
+7. Pi drafts or refines a reply
+8. Pi calls `slack_insert_reply`
+9. You review it and press send manually in the Slack UI
 
 ## Recommended safety model
 - insertion is low risk, but replacing a non-empty composer should require confirmation
-- sending is higher risk and always requires confirmation
+- final sending always happens manually in Slack UI
 
 ### Confirmation recommendation
-Before `slack_send_reply` executes:
-- show the text to be sent
-- ask the user to confirm in Pi UI
-- only then trigger the Chrome send action
-
 Before `slack_insert_reply` replaces a non-empty composer:
 - ask the user to confirm replacement
 - do not support append mode in the MVP
+
+### Final-send policy
+- Pi never triggers Slack send in the MVP
+- the user always reviews and clicks send manually in Slack
 
 ---
 
@@ -537,9 +523,9 @@ Use a long-lived shared secret stored locally.
 - only run content script on `https://app.slack.com/*`
 - background worker should reject actions unless a matching Slack tab exists
 
-## Send safety
-- require explicit confirmation before sending
-- do not silently send messages without a user-visible approval step
+## Final send policy
+- Pi does not send Slack messages in the MVP
+- the final send action always happens manually in the Slack UI
 
 ---
 
@@ -568,7 +554,7 @@ Prompt the user to open the target thread or channel and retry.
 
 ## Broken Slack selectors after UI changes
 ### Symptom
-Read/insert/send tools begin failing.
+Read/insert tools begin failing.
 
 ### Recovery
 Update the centralized DOM adapter selectors in the Chrome extension.
@@ -592,7 +578,7 @@ Fail fast with a clear singleton message.
 ## Configurable values later if needed
 - port
 - reconnect backoff
-- send confirmation policy
+- composer replacement policy
 - preferred active Slack tab behavior
 
 ---
@@ -649,11 +635,12 @@ Repo structure exists and does not auto-load the Slack extension.
 
 ---
 
-## Phase 3: Read current thread
+## Phase 3: Read current thread and existing draft
 **Goal:** support `slack_get_current_thread` end to end.
 
 ### Tasks
 - implement Slack DOM adapter for thread extraction
+- extract current composer draft text when present
 - define normalized thread payload shape
 - implement Pi tool `slack_get_current_thread`
 - normalize tool output for LLM consumption
@@ -662,6 +649,7 @@ Repo structure exists and does not auto-load the Slack extension.
 ### Acceptance criteria
 - Pi can read the currently open Slack thread
 - output includes workspace/channel/url when available
+- existing composer text is included as separate context when present
 - errors are clear when no thread is open or selectors fail
 
 ---
@@ -684,23 +672,7 @@ Repo structure exists and does not auto-load the Slack extension.
 
 ---
 
-## Phase 5: Send reply with confirmation
-**Goal:** support fully assisted posting.
-
-### Tasks
-- implement `sendReply` action in content script
-- add Pi-side confirmation UI before send
-- implement Pi tool `slack_send_reply`
-- ensure send only targets the active composer
-
-### Acceptance criteria
-- Pi can send only after explicit confirmation
-- accidental sends are prevented by design
-- send failures are surfaced cleanly
-
----
-
-## Phase 6: polish and hardening
+## Phase 5: polish and hardening
 **Goal:** make the integration pleasant and resilient.
 
 ### Tasks
@@ -727,7 +699,6 @@ The MVP should include only:
 - minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
 - `slack_insert_reply`
-- `slack_send_reply` with confirmation
 - `/slack-status`
 
 Everything else is optional.
@@ -749,6 +720,7 @@ Everything else is optional.
 - open thread in Slack
 - ask Pi to read it
 - verify author/text ordering
+- verify existing composer text is included when present
 - test on DM and channel thread if possible
 - test with no thread open
 
@@ -756,11 +728,7 @@ Everything else is optional.
 - ask Pi to insert a generated draft
 - verify text appears in correct composer
 - verify no send occurs
-
-### Send reply
-- confirm in Pi UI
-- verify message is sent once
-- verify cancellation path does not send
+- verify replacement confirmation appears when the composer already has text
 
 ### Error handling
 - disconnect Chrome
@@ -796,10 +764,15 @@ Everything else is optional.
    - Include a minimal popup in v1.
    - It should show connection status, active Slack tab state, token entry/reset, and a simple test action.
 
-6. **Send safety**
-   - `slack_send_reply` always requires Pi-side confirmation before sending.
+6. **Existing composer draft context**
+   - If the Slack composer already contains text, include it in read results as additional draft context.
+   - Pi should treat that text as user intent/context, not as the final message.
 
-7. **Singleton behavior**
+7. **Final send behavior**
+   - Pi never sends the Slack message.
+   - The user always presses send manually in the Slack UI.
+
+8. **Singleton behavior**
    - If the fixed port is already in use, the second `slack-pi` instance fails fast and exits.
 
 ---
@@ -811,6 +784,6 @@ Everything else is optional.
    - `chrome-extensions/slack-pi/`
 2. Implement **Phase 1** and **Phase 2** only
 3. Prove the WebSocket handshake and singleton behavior
-4. Then build `slack_get_current_thread` before any write/send action
+4. Then build `slack_get_current_thread` before any write action
 
 That order gives the best feedback loop with the least risk.
