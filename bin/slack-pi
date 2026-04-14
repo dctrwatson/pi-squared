@@ -16,8 +16,8 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 EXTENSION_PATH="$REPO_ROOT/manual-extensions/slack-pi/index.ts"
 EXTENSION_PACKAGE_DIR="$REPO_ROOT/manual-extensions/slack-pi"
-XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
-SESSION_DIR="${SLACK_PI_SESSION_DIR:-$XDG_STATE_HOME/slack-pi/sessions}"
+PI_AGENT_DIR_DEFAULT="$HOME/.pi/agent"
+SESSION_DIR="${SLACK_PI_SESSION_DIR:-$PI_AGENT_DIR_DEFAULT/sessions/--slack-pi--}"
 
 if ! command -v pi >/dev/null 2>&1; then
   echo "slack-pi: 'pi' is not installed or not on PATH" >&2
