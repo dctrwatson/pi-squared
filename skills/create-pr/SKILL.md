@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Creates a GitHub pull request by summarizing the current branch's changes. Detects and follows repo-specific PR templates. Use when the user wants to create, draft, or open a PR.
+description: Creates a GitHub pull request by summarizing the current branch's changes, squashing `pi:` auto-commits into a clean commit, and following repo-specific PR templates. Use when the user wants to create, draft, or open a PR.
 ---
 
 # Create Pull Request
@@ -50,10 +50,40 @@ Only if none of the above files exist, use this fallback structure:
 
 **Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies.
 
-## 3. Push and create
+## 3. Clean up `pi:` auto-commits
+
+If any commit subject in `COMMITS` starts with `pi:`, rewrite the branch into one clean commit before pushing.
+
+- Reuse the generated PR title as the final commit subject.
+- Write a short commit body (1 short paragraph or 2-4 bullets) that accurately summarizes the key changes. Do **not** paste the PR template or checkbox lists into the commit message.
+- Create a temporary commit message file and run:
+
+```bash
+tmp=$(mktemp)
+cat > "$tmp" <<'EOF'
+<title>
+
+<commit summary>
+EOF
+bash <skill_dir>/squash-pi-commits.sh <base> "$tmp"
+rm -f "$tmp"
+```
+
+- If the script prints `NO_PI_COMMITS`, leave the existing commit history alone.
+- If the script errors because the working tree is dirty, stop and ask the user whether to commit or stash the extra changes first.
+- If the script prints a `PUSH:` command, use that exact command in the next step.
+
+## 4. Push and create
+
+If step 3 did not print a `PUSH:` command, use:
 
 ```bash
 git push -u origin HEAD
+```
+
+Then create the PR:
+
+```bash
 gh pr create --base <base> --title "<title>" --body "<body>"
 ```
 
