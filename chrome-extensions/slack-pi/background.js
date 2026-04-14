@@ -76,12 +76,12 @@ function makeIconImageData(size, color) {
 
   ctx.clearRect(0, 0, size, size);
 
-  const inset = Math.max(0.25, size * 0.015);
-  const width = size - inset * 2;
-  const height = width;
-  const radius = Math.max(2, size * 0.16);
+  const inset = 0;
+  const width = size;
+  const height = size;
+  const radius = Math.max(2, size * 0.14);
   const center = size / 2;
-  const fontSize = Math.max(12, Math.floor(size * 1.02));
+  const fontSize = Math.max(13, Math.floor(size * 1.12));
 
   const roundedRect = (x, y, w, h, r) => {
     ctx.beginPath();
@@ -101,8 +101,8 @@ function makeIconImageData(size, color) {
   roundedRect(inset, inset, width, height, radius);
   ctx.fill();
 
-  ctx.strokeStyle = "rgba(15, 23, 42, 0.28)";
-  ctx.lineWidth = Math.max(0.75, size * 0.035);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.2)";
+  ctx.lineWidth = Math.max(0.5, size * 0.025);
   roundedRect(inset, inset, width, height, radius);
   ctx.stroke();
 
@@ -110,11 +110,11 @@ function makeIconImageData(size, color) {
   ctx.textBaseline = "middle";
   ctx.font = `700 ${fontSize}px "SF Pro Display", "Segoe UI Symbol", "Noto Sans Symbols 2", "Noto Sans Symbols", sans-serif`;
   ctx.lineJoin = "round";
-  ctx.lineWidth = Math.max(1, size * 0.06);
-  ctx.strokeStyle = "rgba(15, 23, 42, 0.4)";
-  ctx.strokeText("π", center, center + size * 0.045);
+  ctx.lineWidth = Math.max(1, size * 0.055);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.34)";
+  ctx.strokeText("π", center, center + size * 0.055);
   ctx.fillStyle = "#ffffff";
-  ctx.fillText("π", center, center + size * 0.045);
+  ctx.fillText("π", center, center + size * 0.055);
 
   return ctx.getImageData(0, 0, size, size);
 }
