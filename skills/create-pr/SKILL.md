@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Creates or updates a GitHub pull request from the current branch. Use when the user asks to open, raise, file, draft, or update a PR; write a PR title/body; or clean up `pi:` auto-commits before pushing. Follows repo PR templates and recent PR conventions.
+description: Creates or updates a GitHub pull request from the current branch. Use when the user asks to open, draft, file, or update a PR, or to write a PR title/body based on the branch changes.
 compatibility: Requires git, GitHub CLI (`gh`), push access to the repo, and a GitHub checkout.
 ---
 
