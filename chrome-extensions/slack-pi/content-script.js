@@ -653,20 +653,31 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
-  async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit) {
+  async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs) {
     const scrollContainer = findScrollContainer(mainRoot);
     const collected = new Map();
     let started = false;
     let reachedEnd = false;
+    let hitLimit = false;
 
     const collectVisible = () => {
       const visible = extractMessages(mainRoot, composerElement);
       for (const message of visible) {
         if (!started) {
-          if (message.messageTs === startTs) {
-            started = true;
+          if (cursorTs) {
+            // Exclusive start: collect from the first message strictly after the cursor.
+            if (message.messageTs && message.messageTs > cursorTs) {
+              started = true;
+            } else {
+              continue;
+            }
           } else {
-            continue;
+            // Inclusive start: begin at the message matching startTs.
+            if (message.messageTs === startTs) {
+              started = true;
+            } else {
+              continue;
+            }
           }
         }
 
@@ -680,6 +691,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
           break;
         }
         if (limit && collected.size >= limit) {
+          hitLimit = true;
           reachedEnd = true;
           break;
         }
@@ -694,6 +706,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         harvestedViaScroll: false,
         started,
         reachedEnd,
+        hitLimit,
       };
     }
 
@@ -723,6 +736,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       harvestedViaScroll: true,
       started,
       reachedEnd,
+      hitLimit,
     };
   }
 
@@ -819,7 +833,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
-  async function buildChannelRangeSnapshot(startUrl, endUrl, limit) {
+  async function buildChannelRangeSnapshot(startUrl, endUrl, limit, cursor) {
     const startTs = parseSlackTsFromUrl(startUrl);
     if (!startTs) {
       return {
@@ -853,14 +867,17 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       };
     }
 
+    const cursorTs = typeof cursor === "string" && cursor ? cursor : undefined;
     const composerElement = findComposer(mainRoot);
-    const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit);
+    const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs);
     if (!harvest.started) {
       return {
         ok: false,
         error: {
-          code: "start_message_not_found",
-          message: "Could not find the starting Slack message in the loaded channel view.",
+          code: cursorTs ? "no_channel_messages" : "start_message_not_found",
+          message: cursorTs
+            ? "No channel messages found after the pagination cursor."
+            : "Could not find the starting Slack message in the loaded channel view.",
         },
       };
     }
@@ -878,6 +895,10 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     const documentMeta = parseDocumentTitle();
     const channel = findChannelName() || undefined;
 
+    const lastMessage = harvest.messages[harvest.messages.length - 1];
+    const nextCursor = harvest.hitLimit && lastMessage?.messageTs ? lastMessage.messageTs : undefined;
+    const nextStartUrl = harvest.hitLimit && lastMessage?.permalinkUrl ? lastMessage.permalinkUrl : undefined;
+
     return {
       ok: true,
       payload: {
@@ -890,6 +911,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         requestedLimit: limit,
         messages: harvest.messages,
         harvestedViaScroll: harvest.harvestedViaScroll,
+        nextCursor,
+        nextStartUrl,
       },
     };
   }
@@ -937,7 +960,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     if (message.type === "slack-pi:get-channel-range") {
-      void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit)
+      void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit, message.cursor)
         .then((result) => sendResponse(result))
         .catch((error) => {
           sendResponse({

@@ -697,6 +697,7 @@ async function handleRequestMessage(socket, message) {
       const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "";
       const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : undefined;
       const limit = Number.isInteger(message.payload?.limit) ? message.payload.limit : undefined;
+      const cursor = typeof message.payload?.cursor === "string" ? message.payload.cursor : undefined;
       if (!startUrl) {
         throw new BridgeActionError("invalid_request", "getChannelRange requires startUrl.");
       }
@@ -706,6 +707,7 @@ async function handleRequestMessage(socket, message) {
         startUrl,
         endUrl,
         limit,
+        cursor,
       });
       if (!result.response.ok) {
         sendSocketResponse(socket, message.id, {

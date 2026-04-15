@@ -127,6 +127,7 @@ interface SlackChannelRangeSnapshot {
 	messages: SlackThreadMessage[];
 	harvestedViaScroll?: boolean;
 	nextCursor?: string;
+	nextStartUrl?: string;
 }
 
 const state: BridgeState = {
@@ -229,6 +230,7 @@ function isSlackChannelRangeSnapshot(value: unknown): value is SlackChannelRange
 		(value.title === undefined || typeof value.title === "string") &&
 		(value.harvestedViaScroll === undefined || typeof value.harvestedViaScroll === "boolean") &&
 		(value.nextCursor === undefined || typeof value.nextCursor === "string") &&
+		(value.nextStartUrl === undefined || typeof value.nextStartUrl === "string") &&
 		Array.isArray(value.messages) &&
 		value.messages.every(isSlackThreadMessage)
 	);
@@ -996,12 +998,15 @@ async function readSlackChannelRangeAll(
 ): Promise<SlackChannelRangeSnapshot> {
 	const allMessages: SlackThreadMessage[] = [];
 	let cursor: string | undefined;
+	let nextStartUrl: string | undefined;
 	let firstRange: SlackChannelRangeSnapshot | undefined;
 
 	while (allMessages.length < maxMessages) {
 		let range: SlackChannelRangeSnapshot;
 		try {
-			range = await readSlackChannelRange(startUrl, endUrl, undefined, cursor);
+			// Use nextStartUrl for tab navigation on subsequent pages so Chrome
+			// opens the tab near the cursor position rather than back at startUrl.
+			range = await readSlackChannelRange(nextStartUrl ?? startUrl, endUrl, undefined, cursor);
 		} catch (error) {
 			if (allMessages.length > 0 && cursor) {
 				// A subsequent page returned empty — treat as end of channel.
@@ -1013,6 +1018,7 @@ async function readSlackChannelRangeAll(
 		allMessages.push(...range.messages);
 		if (!range.nextCursor) break;
 		cursor = range.nextCursor;
+		nextStartUrl = range.nextStartUrl;
 	}
 
 	if (!firstRange) throw new Error("No messages returned.");
