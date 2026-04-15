@@ -101,22 +101,27 @@ build_number="<build-number>"
 job_id="<job-id-if-known>"
 
 "$BK_CLI" build view "$build_number" -p "$pipeline_ref" --json > /tmp/buildkite-build.json
+python3 <skill_dir>/scripts/select_buildkite_job.py /tmp/buildkite-build.json ${job_id:+--job-id-hint "$job_id"} > /tmp/buildkite-job-selection.json
 ```
 
-Then inspect `/tmp/buildkite-build.json` to identify:
+Use `select_buildkite_job.py` as the default way to choose which job to inspect. It prefers:
 
-- overall build state
-- failed, broken, canceled, running, or scheduled jobs
-- the human-readable label/name for each relevant job
-- the UUID to use with `bk job log`
+- the exact job referenced by the Buildkite URL, when present
+- failed or broken command-like jobs
+- otherwise the most relevant running or pending job
 
-If you already know the job UUID, fetch its logs directly:
+Then read `/tmp/buildkite-job-selection.json` and use its `selected_job.id` with:
 
 ```bash
 "$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > /tmp/buildkite-job.log
 ```
 
-If the GitHub link points only to the build, choose the failed or currently running job from the build JSON before pulling logs.
+Handling the selection result:
+
+- If `status` is `failed_job_selected` or `pending_job_selected`, continue with that job.
+- If `status` is `multiple_failed_jobs`, inspect `selected_job` first, but mention the other failed jobs in your response.
+- If `status` is `job_hint_not_found`, mention that the URL-specific job was not present and that you fell back to the most relevant job still attached to the build.
+- If `status` is `no_jobs_found`, fall back to `bk api` or tell the user the build JSON did not include jobs.
 
 Guidance:
 
@@ -171,3 +176,4 @@ Keep the answer grounded in evidence:
 
 - `scripts/pr_checks.py` — collect PR metadata and GitHub checks as JSON
 - `scripts/extract_buildkite_target.py` — parse a Buildkite URL into structured identifiers
+- `scripts/select_buildkite_job.py` — choose the most relevant failed or pending Buildkite job from `bk build view --json`
