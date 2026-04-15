@@ -21,10 +21,20 @@ fi
 # --- Existing PR ---
 echo ""
 echo "=== EXISTING PR ==="
-if pr_info=$(gh pr view --json number,title,url,state 2>/dev/null) && echo "$pr_info" | grep -q '"state":"OPEN"'; then
-  echo "$pr_info"
+if pr_state=$(gh pr view --json state --jq '.state' 2>/dev/null); then
+  if [ "$pr_state" = "OPEN" ]; then
+    gh pr view --json number,title,url,state,baseRefName
+  else
+    echo "none"
+  fi
 else
   echo "none"
+fi
+
+if [ "$(git rev-list --count "$base"..HEAD)" -eq 0 ]; then
+  echo ""
+  echo "ERROR: No commits between $base and HEAD. Cannot create PR."
+  exit 1
 fi
 
 # --- Commits ---

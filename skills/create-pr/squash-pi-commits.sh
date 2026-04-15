@@ -64,7 +64,6 @@ if [ "${#commits[@]}" -eq 0 ]; then
 fi
 
 pi_group_count=0
-current_group_start=-1
 current_group_end=-1
 selected_group_start=-1
 selected_group_end=-1
@@ -76,7 +75,6 @@ for i in "${!commits[@]}"; do
   if [[ "$subject" == pi:* ]]; then
     if [ "$in_pi_group" -eq 0 ]; then
       in_pi_group=1
-      current_group_start=$i
       current_group_end=$i
       pi_group_count=$((pi_group_count + 1))
       if [ "$pi_group_count" -eq 1 ]; then
