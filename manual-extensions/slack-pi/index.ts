@@ -14,6 +14,7 @@ const HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const THREAD_REQUEST_TIMEOUT_MS = 20_000;
 const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000;
+const CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS = 180_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "slack-pi", "token");
 
@@ -717,6 +718,8 @@ function getChromeRequestTimeoutMs(action: string): number {
 			return THREAD_REQUEST_TIMEOUT_MS;
 		case "getChannelRange":
 			return CHANNEL_RANGE_REQUEST_TIMEOUT_MS;
+		case "getChannelRangeAll":
+			return CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS;
 		default:
 			return DEFAULT_REQUEST_TIMEOUT_MS;
 	}
@@ -997,41 +1000,20 @@ async function readSlackChannelRangeAll(
 	endUrl?: string,
 	maxMessages = 500,
 ): Promise<SlackChannelRangeSnapshot> {
-	const allMessages: SlackThreadMessage[] = [];
-	let cursor: string | undefined;
-	let nextStartUrl: string | undefined;
-	let firstRange: SlackChannelRangeSnapshot | undefined;
-
-	while (allMessages.length < maxMessages) {
-		const pageLimit = Math.min(CHANNEL_RANGE_PAGE_SIZE, maxMessages - allMessages.length);
-		let range: SlackChannelRangeSnapshot;
-		try {
-			// Auto-pagination must request a bounded page so Chrome can return a
-			// nextCursor/nextStartUrl for the following batch.
-			//
-			// Use nextStartUrl for tab navigation on subsequent pages so Chrome
-			// opens the tab near the cursor position rather than back at startUrl.
-			range = await readSlackChannelRange(nextStartUrl ?? startUrl, endUrl, pageLimit, cursor);
-		} catch (error) {
-			if (allMessages.length > 0 && cursor) {
-				// A subsequent page returned empty — treat as end of channel.
-				break;
-			}
-			throw error;
-		}
-		if (!firstRange) firstRange = range;
-		allMessages.push(...range.messages);
-		if (!range.nextCursor) break;
-		cursor = range.nextCursor;
-		nextStartUrl = range.nextStartUrl;
+	await ensureBridgeStarted();
+	const response = await requestChrome("getChannelRangeAll", {
+		startUrl,
+		...(endUrl ? { endUrl } : {}),
+		maxMessages,
+		pageSize: CHANNEL_RANGE_PAGE_SIZE,
+	});
+	if (!isSlackChannelRangeSnapshot(response.payload)) {
+		throw new Error("Chrome returned an invalid Slack channel range payload.");
 	}
-
-	if (!firstRange) throw new Error("No messages returned.");
-
-	return {
-		...firstRange,
-		messages: allMessages.slice(0, maxMessages),
-	};
+	if (response.payload.messages.length === 0) {
+		throw new Error("Chrome returned an empty Slack channel range.");
+	}
+	return response.payload;
 }
 
 function startupFailureMessage(): string {

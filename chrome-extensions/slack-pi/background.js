@@ -4,6 +4,7 @@ const TOKEN_KEY = "slackPiToken";
 const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
+const CHANNEL_RANGE_PAGE_SIZE = 16;
 const ICON_SIZES = [16, 32, 48, 128];
 
 const state = {
@@ -607,7 +608,7 @@ async function prepareTemporarySlackTab(tabId, maxAttempts = 4) {
   return { prepared: false, lastPreparePayload };
 }
 
-async function sendMessageToTemporarySlackTab(url, message) {
+async function resolveTemporarySlackTabUrl(url) {
   if (!isSlackUrl(url)) {
     throw new BridgeActionError("invalid_slack_url", "The supplied Slack link is not a recognized Slack URL.");
   }
@@ -623,22 +624,48 @@ async function sendMessageToTemporarySlackTab(url, message) {
     }
   }
 
+  return resolvedUrl;
+}
+
+async function createTemporarySlackTab(url) {
+  const resolvedUrl = await resolveTemporarySlackTabUrl(url);
   const tab = await chrome.tabs.create({ url: resolvedUrl.url, active: false });
   if (typeof tab.id !== "number") {
     throw new BridgeActionError("invalid_tab", "Could not create a temporary Slack tab.");
   }
 
+  return { tabId: tab.id, resolvedUrl };
+}
+
+async function navigateTemporarySlackTab(tabId, url) {
+  const resolvedUrl = await resolveTemporarySlackTabUrl(url);
+  await chrome.tabs.update(tabId, { url: resolvedUrl.url });
+  await waitForTabComplete(tabId);
+  const prepared = await prepareTemporarySlackTab(tabId);
+  if (!prepared.prepared) {
+    console.warn("[slack-pi] temporary Slack tab was not fully prepared", {
+      prepare: prepared.lastPreparePayload,
+      resolvedUrl,
+    });
+  }
+
+  return { prepared, resolvedUrl };
+}
+
+async function sendMessageToTemporarySlackTab(url, message) {
+  const { tabId, resolvedUrl } = await createTemporarySlackTab(url);
+
   try {
-    await waitForTabComplete(tab.id);
-    const prepared = await prepareTemporarySlackTab(tab.id);
+    await waitForTabComplete(tabId);
+    const prepared = await prepareTemporarySlackTab(tabId);
     if (!prepared.prepared) {
       console.warn("[slack-pi] temporary Slack tab was not fully prepared", {
         prepare: prepared.lastPreparePayload,
         resolvedUrl,
       });
     }
-    const loadedTab = await chrome.tabs.get(tab.id);
-    const response = await sendMessageToTab(tab.id, message);
+    const loadedTab = await chrome.tabs.get(tabId);
+    const response = await sendMessageToTab(tabId, message);
     return {
       response,
       tempTab: serializeTab(loadedTab),
@@ -647,7 +674,86 @@ async function sendMessageToTemporarySlackTab(url, message) {
     };
   } finally {
     try {
-      await chrome.tabs.remove(tab.id);
+      await chrome.tabs.remove(tabId);
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+}
+
+async function readChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages = 500, pageSize = CHANNEL_RANGE_PAGE_SIZE) {
+  const { tabId } = await createTemporarySlackTab(startUrl);
+  let firstPayload = null;
+  let lastTempTab = null;
+  const allMessages = [];
+  let cursor;
+  let currentStartUrl = startUrl;
+
+  try {
+    await waitForTabComplete(tabId);
+    let prepared = await prepareTemporarySlackTab(tabId);
+    if (!prepared.prepared) {
+      console.warn("[slack-pi] temporary Slack tab was not fully prepared", {
+        prepare: prepared.lastPreparePayload,
+        startUrl,
+      });
+    }
+
+    while (allMessages.length < maxMessages) {
+      const limit = Math.min(pageSize, maxMessages - allMessages.length);
+      const page = await sendMessageToTab(tabId, {
+        type: "slack-pi:get-channel-range",
+        startUrl: currentStartUrl,
+        endUrl,
+        limit,
+        cursor,
+      });
+
+      if (!page.ok) {
+        const code = page.error?.code;
+        if (allMessages.length > 0 && cursor && code === "no_channel_messages") {
+          break;
+        }
+        throw new BridgeActionError(
+          code || "channel_range_read_failed",
+          page.error?.message || "The Slack content script failed to read the requested channel range.",
+        );
+      }
+
+      const payload = page.payload;
+      if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages) || payload.messages.length === 0) {
+        if (allMessages.length > 0 && cursor) break;
+        throw new BridgeActionError("channel_range_read_failed", "Chrome returned an empty Slack channel range.");
+      }
+
+      if (!firstPayload) firstPayload = payload;
+      allMessages.push(...payload.messages);
+      lastTempTab = serializeTab(await chrome.tabs.get(tabId));
+
+      if (!payload.nextCursor) break;
+      cursor = payload.nextCursor;
+
+      if (typeof payload.nextStartUrl === "string" && payload.nextStartUrl) {
+        currentStartUrl = payload.nextStartUrl;
+        prepared = (await navigateTemporarySlackTab(tabId, currentStartUrl)).prepared;
+        if (!prepared.prepared) {
+          break;
+        }
+      }
+    }
+
+    if (!firstPayload) {
+      throw new BridgeActionError("channel_range_read_failed", "No messages returned.");
+    }
+
+    return {
+      ...firstPayload,
+      messages: allMessages.slice(0, maxMessages),
+      tempTab: lastTempTab,
+    };
+  } finally {
+    try {
+      await chrome.tabs.remove(tabId);
     } catch {
       // ignore cleanup errors
     }
@@ -726,6 +832,23 @@ async function handleRequestMessage(socket, message) {
           ...result.response.payload,
           tempTab: result.tempTab,
         },
+      });
+      return;
+    }
+
+    if (message.action === "getChannelRangeAll") {
+      const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "";
+      const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : undefined;
+      const maxMessages = Number.isInteger(message.payload?.maxMessages) ? message.payload.maxMessages : 500;
+      const pageSize = Number.isInteger(message.payload?.pageSize) ? message.payload.pageSize : CHANNEL_RANGE_PAGE_SIZE;
+      if (!startUrl) {
+        throw new BridgeActionError("invalid_request", "getChannelRangeAll requires startUrl.");
+      }
+
+      const payload = await readChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize);
+      sendSocketResponse(socket, message.id, {
+        ok: true,
+        payload,
       });
       return;
     }
