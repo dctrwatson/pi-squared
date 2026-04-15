@@ -1,6 +1,6 @@
 ---
 name: buildkite-pr-check-review
-description: Investigates GitHub pull request status checks that map to Buildkite builds or jobs, fetches the relevant Buildkite logs with the Buildkite CLI, and summarizes what failed. Use whenever the user asks to review, debug, explain, or fetch logs for a GitHub PR status check, required check, CI failure, or Buildkite result on a PR—even if they only say things like “what failed on this PR?”, “look at the red check”, or “check the Buildkite logs”.
+description: Reviews GitHub PR status checks backed by Buildkite, fetches the relevant Buildkite logs with `bk`, and explains what failed. Use whenever the user asks what failed on a PR, mentions a red CI/status check, wants Buildkite logs, or asks to inspect the checks for the current branch PR.
 compatibility: Requires git, GitHub CLI (`gh`), Python 3, and a Buildkite CLI command available as `bk` or `buildkite`, with authentication for the target GitHub repo and Buildkite org.
 ---
 
