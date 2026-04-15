@@ -57,7 +57,7 @@ If multiple Buildkite checks are still plausible, show a short numbered list and
 Once you have the chosen check's `link`, parse it with:
 
 ```bash
-python3 <skill_dir>/scripts/extract_buildkite_target.py "<check_link>"
+python3 -B <skill_dir>/scripts/extract_buildkite_target.py "<check_link>"
 ```
 
 This extracts the organization, pipeline, build number, optional job hint, and normalized Buildkite URL.
@@ -79,7 +79,7 @@ build_number="<build-number>"
 job_id="<job-id-if-known>"
 
 bk build view "$build_number" -p "$pipeline_ref" --json > "$workdir/buildkite-build.json"
-python3 <skill_dir>/scripts/select_buildkite_job.py "$workdir/buildkite-build.json" ${job_id:+--job-id-hint "$job_id"} > "$workdir/buildkite-job-selection.json"
+python3 -B <skill_dir>/scripts/select_buildkite_job.py "$workdir/buildkite-build.json" ${job_id:+--job-id-hint "$job_id"} > "$workdir/buildkite-job-selection.json"
 
 # Fetch annotations — often contain structured test failure summaries
 bk api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/annotations" 2>/dev/null > "$workdir/buildkite-annotations.json" || true
