@@ -1,0 +1,23 @@
+{
+  "skill_name": "buildkite-pr-check-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review PR #142's failing `unit-tests` status check. Use GitHub to find the check, pull the matching Buildkite logs with the CLI, and tell me the most likely root cause.",
+      "expected_output": "Finds the PR check, resolves the Buildkite build or job, cites log evidence, and gives a grounded failure summary.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "CI is red on https://github.com/acme/widgets/pull/481. Please inspect the failed required check in Buildkite and summarize what failed versus what is just noise in the logs.",
+      "expected_output": "Selects the relevant failed Buildkite-backed check, uses Buildkite CLI output rather than guesswork, and separates likely root cause from incidental errors.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Can you look at the `deploy-staging` check on the PR for my current branch? If it's still pending, tell me what job is running; if it failed, show me the relevant Buildkite log excerpt.",
+      "expected_output": "Handles both pending and failed outcomes, reports the active or failed job clearly, and includes only the most relevant log lines.",
+      "files": []
+    }
+  ]
+}
