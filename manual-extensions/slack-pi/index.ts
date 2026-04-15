@@ -14,6 +14,7 @@ const HELLO_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const THREAD_REQUEST_TIMEOUT_MS = 20_000;
 const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000;
+const CHANNEL_RANGE_PAGE_SIZE = 16;
 const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "slack-pi", "token");
 
 type BridgeLifecycle = "stopped" | "starting" | "listening" | "error";
@@ -1002,11 +1003,15 @@ async function readSlackChannelRangeAll(
 	let firstRange: SlackChannelRangeSnapshot | undefined;
 
 	while (allMessages.length < maxMessages) {
+		const pageLimit = Math.min(CHANNEL_RANGE_PAGE_SIZE, maxMessages - allMessages.length);
 		let range: SlackChannelRangeSnapshot;
 		try {
+			// Auto-pagination must request a bounded page so Chrome can return a
+			// nextCursor/nextStartUrl for the following batch.
+			//
 			// Use nextStartUrl for tab navigation on subsequent pages so Chrome
 			// opens the tab near the cursor position rather than back at startUrl.
-			range = await readSlackChannelRange(nextStartUrl ?? startUrl, endUrl, undefined, cursor);
+			range = await readSlackChannelRange(nextStartUrl ?? startUrl, endUrl, pageLimit, cursor);
 		} catch (error) {
 			if (allMessages.length > 0 && cursor) {
 				// A subsequent page returned empty — treat as end of channel.
