@@ -5,9 +5,9 @@ const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
-const CHANNEL_SUMMARY_THREAD_LIMIT = 12;
-const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 20;
-const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 80;
+const CHANNEL_SUMMARY_THREAD_LIMIT = 50;
+const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 100;
+const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 2_000;
 const ICON_SIZES = [16, 32, 48, 128];
 
 const state = {
@@ -788,18 +788,31 @@ function limitThreadMessagesForSummary(thread, maxMessages) {
 
   const root = thread.messages[0];
   const replies = thread.messages.slice(1);
-  const headReplyCount = Math.min(4, Math.max(0, maxMessages - 1));
-  const headReplies = replies.slice(0, headReplyCount);
-  const tailSlots = Math.max(0, maxMessages - 1 - headReplies.length);
-  const tailReplies = tailSlots > 0 ? replies.slice(-tailSlots) : [];
+  const replySlots = Math.max(0, maxMessages - 1);
   const selected = [];
   const seen = new Set();
 
-  for (const message of [root, ...headReplies, ...tailReplies].filter(Boolean)) {
-    const key = makeMessageKey(message);
+  if (root) {
+    selected.push(root);
+    seen.add(makeMessageKey(root));
+  }
+
+  if (replySlots <= 0 || replies.length === 0) {
+    return {
+      ...thread,
+      messages: selected,
+    };
+  }
+
+  const denominator = Math.max(1, replySlots - 1);
+  for (let slot = 0; slot < replySlots; slot += 1) {
+    const index = Math.round((slot * (replies.length - 1)) / denominator);
+    const reply = replies[index];
+    if (!reply) continue;
+    const key = makeMessageKey(reply);
     if (seen.has(key)) continue;
     seen.add(key);
-    selected.push(message);
+    selected.push(reply);
   }
 
   return {

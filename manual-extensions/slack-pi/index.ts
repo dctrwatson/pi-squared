@@ -414,6 +414,21 @@ function getThreadCharBudget(ctx: {
 	return Math.max(6_000, Math.min(40_000, budgetTokens * 4));
 }
 
+function getSummaryCharBudget(ctx: {
+	model?: { contextWindow: number } | undefined;
+	getContextUsage(): { tokens: number | null } | undefined;
+}): number {
+	const contextWindow = ctx.model?.contextWindow;
+	const usedTokens = ctx.getContextUsage()?.tokens ?? 0;
+	if (!contextWindow || contextWindow <= 0) {
+		return 80_000;
+	}
+
+	const remainingTokens = Math.max(0, contextWindow - usedTokens);
+	const budgetTokens = Math.max(4_000, Math.min(40_000, Math.floor(remainingTokens * 0.6)));
+	return Math.max(16_000, Math.min(160_000, budgetTokens * 4));
+}
+
 function selectMessagesForModel(messages: SlackThreadMessage[], charBudget: number): {
 	messages: SlackThreadMessage[];
 	omittedCount: number;
@@ -1262,7 +1277,7 @@ export default function slackPi(pi: ExtensionAPI) {
 				params.includeThreads !== false,
 			);
 			updateSessionNameFromChannelRange(pi, snapshot);
-			const charBudget = getThreadCharBudget(ctx);
+			const charBudget = getSummaryCharBudget(ctx);
 			return {
 				content: [{ type: "text", text: formatAllMessagesForSummary(snapshot, charBudget) }],
 				details: {
@@ -1362,7 +1377,7 @@ export default function slackPi(pi: ExtensionAPI) {
 					parsed.includeThreads,
 				);
 				updateSessionNameFromChannelRange(pi, snapshot);
-				const charBudget = getThreadCharBudget(ctx);
+				const charBudget = getSummaryCharBudget(ctx);
 				const content = formatAllMessagesForSummary(snapshot, charBudget);
 				pi.sendMessage({
 					customType: "slack-read",
