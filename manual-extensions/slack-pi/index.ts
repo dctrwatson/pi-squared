@@ -103,6 +103,10 @@ interface SlackThreadMessage {
 	text: string;
 	timestamp?: string;
 	isRoot?: boolean;
+	messageTs?: string;
+	permalinkUrl?: string;
+	replyCount?: number;
+	thread?: SlackThreadSnapshot;
 }
 
 interface SlackThreadSnapshot {
@@ -130,6 +134,10 @@ interface SlackChannelRangeSnapshot {
 	harvestedViaScroll?: boolean;
 	nextCursor?: string;
 	nextStartUrl?: string;
+	threadSummariesIncluded?: boolean;
+	expandedThreadCount?: number;
+	omittedThreadCount?: number;
+	failedThreadCount?: number;
 }
 
 const state: BridgeState = {
@@ -199,7 +207,11 @@ function isSlackThreadMessage(value: unknown): value is SlackThreadMessage {
 		typeof value.text === "string" &&
 		(value.author === undefined || typeof value.author === "string") &&
 		(value.timestamp === undefined || typeof value.timestamp === "string") &&
-		(value.isRoot === undefined || typeof value.isRoot === "boolean")
+		(value.isRoot === undefined || typeof value.isRoot === "boolean") &&
+		(value.messageTs === undefined || typeof value.messageTs === "string") &&
+		(value.permalinkUrl === undefined || typeof value.permalinkUrl === "string") &&
+		(value.replyCount === undefined || typeof value.replyCount === "number") &&
+		(value.thread === undefined || isSlackThreadSnapshot(value.thread))
 	);
 }
 
@@ -233,6 +245,10 @@ function isSlackChannelRangeSnapshot(value: unknown): value is SlackChannelRange
 		(value.harvestedViaScroll === undefined || typeof value.harvestedViaScroll === "boolean") &&
 		(value.nextCursor === undefined || typeof value.nextCursor === "string") &&
 		(value.nextStartUrl === undefined || typeof value.nextStartUrl === "string") &&
+		(value.threadSummariesIncluded === undefined || typeof value.threadSummariesIncluded === "boolean") &&
+		(value.expandedThreadCount === undefined || typeof value.expandedThreadCount === "number") &&
+		(value.omittedThreadCount === undefined || typeof value.omittedThreadCount === "number") &&
+		(value.failedThreadCount === undefined || typeof value.failedThreadCount === "number") &&
 		Array.isArray(value.messages) &&
 		value.messages.every(isSlackThreadMessage)
 	);
@@ -448,19 +464,68 @@ function selectMessagesForModel(messages: SlackThreadMessage[], charBudget: numb
 	};
 }
 
+function formatSlackMessageHeader(number: string | number, message: SlackThreadMessage, includeRootFlag = true): string {
+	let header = `${number}. ${message.author ?? "Unknown"}`;
+	if (message.timestamp) {
+		header += ` (${message.timestamp})`;
+	}
+	if (includeRootFlag && message.isRoot) {
+		header += " [root]";
+	}
+	return header;
+}
+
+function indentMultilineText(text: string, prefix: string): string {
+	return text
+		.split("\n")
+		.map((line) => `${prefix}${line}`)
+		.join("\n");
+}
+
+function getExpandedThreadReplies(message: SlackThreadMessage): SlackThreadMessage[] {
+	const threadMessages = message.thread?.messages ?? [];
+	if (threadMessages.length <= 1) return [];
+	return threadMessages.slice(1);
+}
+
+function estimateSummaryMessageChars(message: SlackThreadMessage): number {
+	let total = estimateMessageChars(message) + (message.replyCount ? 32 : 0);
+	for (const reply of getExpandedThreadReplies(message)) {
+		total += estimateMessageChars(reply) + 48;
+	}
+	return total;
+}
+
+function formatExpandedThreadReplies(
+	lines: string[],
+	parentNumber: number,
+	message: SlackThreadMessage,
+	maxReplyChars: number,
+): void {
+	const replies = getExpandedThreadReplies(message);
+	if (replies.length === 0) return;
+
+	const totalReplies = message.replyCount ?? replies.length;
+	const shownNote = totalReplies !== replies.length ? `; showing ${replies.length}` : "";
+	lines.push(`  Thread replies: ${totalReplies}${shownNote}`);
+
+	for (let index = 0; index < replies.length; index++) {
+		const reply = replies[index];
+		if (!reply) continue;
+		const label = `${parentNumber}.${index + 1}`;
+		lines.push(
+			`  ${formatSlackMessageHeader(label, reply, false)}`,
+			indentMultilineText(truncateText(reply.text, maxReplyChars), "    "),
+		);
+	}
+}
+
 function formatSlackMessages(lines: string[], messages: SlackThreadMessage[], omittedCount: number): void {
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
 		if (!message) continue;
 		const number = index + 1;
-		let header = `${number}. ${message.author ?? "Unknown"}`;
-		if (message.timestamp) {
-			header += ` (${message.timestamp})`;
-		}
-		if (message.isRoot) {
-			header += " [root]";
-		}
-		lines.push("", header, truncateText(message.text, 1_200));
+		lines.push("", formatSlackMessageHeader(number, message), truncateText(message.text, 1_200));
 	}
 
 	if (omittedCount > 0) {
@@ -523,22 +588,39 @@ function formatAllMessagesForSummary(snapshot: SlackChannelRangeSnapshot, charBu
 	if (snapshot.harvestedViaScroll) {
 		lines.push("Capture: harvested by scrolling the virtualized channel pane");
 	}
+	if (snapshot.threadSummariesIncluded) {
+		lines.push(`Expanded threads: ${snapshot.expandedThreadCount ?? 0}`);
+		if (snapshot.omittedThreadCount) {
+			lines.push(`Threads not expanded: ${snapshot.omittedThreadCount}`);
+		}
+		if (snapshot.failedThreadCount) {
+			lines.push(`Thread expansions failed: ${snapshot.failedThreadCount}`);
+		}
+	}
 
 	const msgs = snapshot.messages;
-	const totalEstimated = msgs.reduce((sum, m) => sum + estimateMessageChars(m), 0);
+	const totalEstimated = msgs.reduce((sum, m) => sum + estimateSummaryMessageChars(m), 0);
+	const condensed = totalEstimated > charBudget;
+	const ratio = condensed ? charBudget / totalEstimated : 1;
+	const maxPerMessage = condensed ? Math.max(80, Math.floor(1_200 * ratio)) : 1_200;
+	const maxPerReply = condensed ? Math.max(60, Math.floor(900 * ratio)) : 900;
 
-	if (totalEstimated <= charBudget) {
-		formatSlackMessages(lines, msgs, 0);
-	} else {
-		const ratio = charBudget / totalEstimated;
-		const maxPerMessage = Math.max(80, Math.floor(1_200 * ratio));
-		for (let i = 0; i < msgs.length; i++) {
-			const m = msgs[i]!;
-			let msgHeader = `${i + 1}. ${m.author ?? "Unknown"}`;
-			if (m.timestamp) msgHeader += ` (${m.timestamp})`;
-			lines.push("", msgHeader, truncateText(m.text, maxPerMessage));
+	for (let index = 0; index < msgs.length; index++) {
+		const message = msgs[index];
+		if (!message) continue;
+
+		let header = formatSlackMessageHeader(index + 1, message, false);
+		if (message.replyCount) {
+			const replyLabel = `${message.replyCount} repl${message.replyCount === 1 ? "y" : "ies"}`;
+			header += getExpandedThreadReplies(message).length > 0 ? ` [thread: ${replyLabel}]` : ` [thread: ${replyLabel}; not expanded]`;
 		}
-		lines.push("", `[Condensed: each message truncated to ~${maxPerMessage} chars to fit context]`);
+
+		lines.push("", header, truncateText(message.text, maxPerMessage));
+		formatExpandedThreadReplies(lines, index + 1, message, maxPerReply);
+	}
+
+	if (condensed) {
+		lines.push("", "[Condensed: channel messages and expanded thread replies truncated to fit context]");
 	}
 
 	return lines.join("\n");
@@ -596,10 +678,10 @@ function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: s
 	return { startUrl, endUrl, limit };
 }
 
-function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: string; maxMessages?: number } {
+function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: string; maxMessages?: number; includeThreads: boolean } {
 	const trimmed = args.trim();
 	if (!trimmed) {
-		throw new Error("Usage: /slack-summarize <start-url> [--until <end-url>] [--max <n>]");
+		throw new Error("Usage: /slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]");
 	}
 
 	const tokens = trimmed.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
@@ -607,6 +689,7 @@ function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: str
 	let startUrl: string | undefined;
 	let endUrl: string | undefined;
 	let maxMessages: number | undefined;
+	let includeThreads = true;
 
 	for (let index = 0; index < tokens.length; index++) {
 		const token = tokens[index];
@@ -633,6 +716,16 @@ function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: str
 			continue;
 		}
 
+		if (token === "--no-threads") {
+			includeThreads = false;
+			continue;
+		}
+
+		if (token === "--threads") {
+			includeThreads = true;
+			continue;
+		}
+
 		if (!startUrl) {
 			startUrl = unquote(token);
 			continue;
@@ -645,7 +738,7 @@ function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: str
 		throw new Error("A start Slack message URL is required.");
 	}
 
-	return { startUrl, endUrl, maxMessages };
+	return { startUrl, endUrl, maxMessages, includeThreads };
 }
 
 function createToken(): string {
@@ -999,12 +1092,14 @@ async function readSlackChannelRangeAll(
 	startUrl: string,
 	endUrl?: string,
 	maxMessages = 500,
+	includeThreads = true,
 ): Promise<SlackChannelRangeSnapshot> {
 	await ensureBridgeStarted();
 	const response = await requestChrome("getChannelRangeAll", {
 		startUrl,
 		...(endUrl ? { endUrl } : {}),
 		maxMessages,
+		includeThreads,
 		pageSize: CHANNEL_RANGE_PAGE_SIZE,
 	});
 	if (!isSlackChannelRangeSnapshot(response.payload)) {
@@ -1144,21 +1239,28 @@ export default function slackPi(pi: ExtensionAPI) {
 		name: "slack_summarize_channel_from",
 		label: "Slack Summarize Channel",
 		description:
-			"Fetch all channel messages from a Slack message link to the present, paginating automatically, and return them for summarization.",
+			"Fetch all channel messages from a Slack message link to the present, paginating automatically, and optionally expand threaded replies for summarization.",
 		promptSnippet:
-			"Fetch all channel messages from a Slack message link to the present, paginating automatically.",
+			"Fetch all channel messages from a Slack message link to the present, paginating automatically, including thread replies unless disabled.",
 		promptGuidelines: [
 			"Use this tool when the user wants to summarize all or many messages in a channel starting from a Slack message link.",
 			"Do not call slack_get_channel_range separately — this tool paginates internally.",
+			"Leave includeThreads enabled unless the user wants a faster, channel-only summary.",
 			"After receiving the messages, produce a concise summary organized by topic or timeline.",
 		],
 		parameters: Type.Object({
 			startUrl: Type.String({ description: "Slack message permalink to start from" }),
 			endUrl: Type.Optional(Type.String({ description: "Optional Slack message permalink to stop at, inclusive" })),
 			maxMessages: Type.Optional(Type.Integer({ minimum: 1, description: "Safety cap on total messages fetched (default 500)" })),
+			includeThreads: Type.Optional(Type.Boolean({ description: "Whether to expand threaded replies while summarizing (default true)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const snapshot = await readSlackChannelRangeAll(params.startUrl, params.endUrl, params.maxMessages);
+			const snapshot = await readSlackChannelRangeAll(
+				params.startUrl,
+				params.endUrl,
+				params.maxMessages,
+				params.includeThreads !== false,
+			);
 			updateSessionNameFromChannelRange(pi, snapshot);
 			const charBudget = getThreadCharBudget(ctx);
 			return {
@@ -1166,6 +1268,10 @@ export default function slackPi(pi: ExtensionAPI) {
 				details: {
 					messageCount: snapshot.messages.length,
 					capped: params.maxMessages !== undefined && snapshot.messages.length >= params.maxMessages,
+					threadSummariesIncluded: snapshot.threadSummariesIncluded,
+					expandedThreadCount: snapshot.expandedThreadCount,
+					omittedThreadCount: snapshot.omittedThreadCount,
+					failedThreadCount: snapshot.failedThreadCount,
 					charBudget,
 				},
 			};
@@ -1245,11 +1351,16 @@ export default function slackPi(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-summarize", {
-		description: "Fetch all channel messages from a Slack permalink and summarize them: /slack-summarize <start-url> [--until <end-url>] [--max <n>]",
+		description: "Fetch all channel messages from a Slack permalink and summarize them: /slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]",
 		handler: async (args, ctx) => {
 			try {
 				const parsed = parseSlackSummarizeArgs(args);
-				const snapshot = await readSlackChannelRangeAll(parsed.startUrl, parsed.endUrl, parsed.maxMessages);
+				const snapshot = await readSlackChannelRangeAll(
+					parsed.startUrl,
+					parsed.endUrl,
+					parsed.maxMessages,
+					parsed.includeThreads,
+				);
 				updateSessionNameFromChannelRange(pi, snapshot);
 				const charBudget = getThreadCharBudget(ctx);
 				const content = formatAllMessagesForSummary(snapshot, charBudget);
@@ -1259,11 +1370,18 @@ export default function slackPi(pi: ExtensionAPI) {
 					display: true,
 					details: {
 						messageCount: snapshot.messages.length,
+						threadSummariesIncluded: snapshot.threadSummariesIncluded,
+						expandedThreadCount: snapshot.expandedThreadCount,
+						omittedThreadCount: snapshot.omittedThreadCount,
+						failedThreadCount: snapshot.failedThreadCount,
 						charBudget,
 					},
 				});
 				if (ctx.hasUI) {
-					ctx.ui.notify(`${snapshot.messages.length} messages fetched. Ask Pi to summarize.`, "info");
+					const threadNote = snapshot.threadSummariesIncluded
+						? `, ${snapshot.expandedThreadCount ?? 0} thread(s) expanded`
+						: "";
+					ctx.ui.notify(`${snapshot.messages.length} messages fetched${threadNote}. Ask Pi to summarize.`, "info");
 				} else {
 					writeStatus(content);
 				}

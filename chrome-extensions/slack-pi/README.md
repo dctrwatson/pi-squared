@@ -15,9 +15,11 @@ Implemented so far:
 - ping response handling for the Pi bridge
 - active Slack tab routing for current-thread reads
 - temporary Slack tab routing for channel-range reads from permalinks
+- temporary Slack tab reuse for expanding thread replies during channel summarization
 - action icon state coloring (green connected, red error, gray otherwise)
 - Slack content script with current thread extraction
 - Slack content script with channel-range extraction from message permalinks
+- reply-count detection on channel messages so threaded discussions can be expanded for summaries
 - composer draft extraction for reply-context capture
 - minimal popup for status, token storage, and test action
 

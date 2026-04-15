@@ -5,6 +5,9 @@ const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
+const CHANNEL_SUMMARY_THREAD_LIMIT = 12;
+const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 20;
+const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 80;
 const ICON_SIZES = [16, 32, 48, 128];
 
 const state = {
@@ -351,9 +354,15 @@ function slackTsToPathDigits(ts) {
   return normalizeSlackTs(ts).replace(/\D/g, "");
 }
 
-function buildSlackWorkspaceMessageUrl(workspaceHost, channelId, messageTs) {
+function buildSlackWorkspaceMessageUrl(workspaceHost, channelId, messageTs, threadTs) {
   const pathTs = slackTsToPathDigits(messageTs);
-  return `https://${workspaceHost}/messages/${channelId}/p${pathTs}`;
+  const url = new URL(`https://${workspaceHost}/messages/${channelId}/p${pathTs}`);
+  if (threadTs) {
+    url.searchParams.set("cid", channelId);
+    url.searchParams.set("message_ts", messageTs);
+    url.searchParams.set("thread_ts", threadTs);
+  }
+  return url.href;
 }
 
 function buildSlackWebClientMessageUrl(teamId, channelId, messageTs, threadTs) {
@@ -375,12 +384,13 @@ async function resolveSlackWebMessageUrl(url) {
 
   if (parsed.workspaceHost) {
     return {
-      url: buildSlackWorkspaceMessageUrl(parsed.workspaceHost, parsed.channelId, parsed.messageTs),
+      url: buildSlackWorkspaceMessageUrl(parsed.workspaceHost, parsed.channelId, parsed.messageTs, parsed.threadTs),
       rewritten: true,
       reason: "from_workspace_host",
       workspaceHost: parsed.workspaceHost,
       channelId: parsed.channelId,
       messageTs: parsed.messageTs,
+      threadTs: parsed.threadTs,
     };
   }
 
@@ -408,6 +418,7 @@ async function resolveSlackWebMessageUrl(url) {
     teamId,
     channelId: parsed.channelId,
     messageTs: parsed.messageTs,
+    threadTs: parsed.threadTs,
   };
 }
 
@@ -746,7 +757,133 @@ async function getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cur
   }, { foreground: true });
 }
 
-async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages = 500, pageSize = CHANNEL_RANGE_PAGE_SIZE) {
+function makeMessageKey(message) {
+  return [
+    normalizeSlackTs(typeof message?.messageTs === "string" ? message.messageTs : ""),
+    typeof message?.permalinkUrl === "string" ? message.permalinkUrl : "",
+    typeof message?.timestamp === "string" ? message.timestamp : "",
+    typeof message?.text === "string" ? message.text.slice(0, 240) : "",
+  ].join("\u241f");
+}
+
+function buildThreadUrlFromMessage(message) {
+  const messageTs = normalizeSlackTs(typeof message?.messageTs === "string" ? message.messageTs : "");
+  const permalinkUrl = typeof message?.permalinkUrl === "string" ? message.permalinkUrl : "";
+  if (!messageTs || !permalinkUrl) return null;
+
+  try {
+    const url = new URL(permalinkUrl);
+    url.searchParams.set("message_ts", messageTs);
+    url.searchParams.set("thread_ts", messageTs);
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function limitThreadMessagesForSummary(thread, maxMessages) {
+  if (!thread || typeof thread !== "object" || !Array.isArray(thread.messages) || thread.messages.length <= maxMessages) {
+    return thread;
+  }
+
+  const root = thread.messages[0];
+  const replies = thread.messages.slice(1);
+  const headReplyCount = Math.min(4, Math.max(0, maxMessages - 1));
+  const headReplies = replies.slice(0, headReplyCount);
+  const tailSlots = Math.max(0, maxMessages - 1 - headReplies.length);
+  const tailReplies = tailSlots > 0 ? replies.slice(-tailSlots) : [];
+  const selected = [];
+  const seen = new Set();
+
+  for (const message of [root, ...headReplies, ...tailReplies].filter(Boolean)) {
+    const key = makeMessageKey(message);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push(message);
+  }
+
+  return {
+    ...thread,
+    messages: selected,
+  };
+}
+
+async function readThreadSnapshotFromTemporarySlackTab(tabId, threadUrl) {
+  const resolvedUrl = await resolveTemporarySlackTabUrl(threadUrl);
+  await chrome.tabs.update(tabId, { url: resolvedUrl.url });
+  await waitForTabComplete(tabId);
+
+  const thread = await sendMessageToTab(tabId, { type: "slack-pi:get-current-thread" });
+  if (!thread.ok) {
+    throw new BridgeActionError(
+      thread.error?.code || "thread_read_failed",
+      thread.error?.message || "The Slack content script failed to read the requested thread.",
+    );
+  }
+
+  const payload = thread.payload;
+  if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages) || payload.messages.length === 0) {
+    throw new BridgeActionError("thread_read_failed", "Chrome returned an empty Slack thread.");
+  }
+
+  return payload;
+}
+
+async function expandThreadsOnChannelMessages(tabId, messages, options = {}) {
+  const maxThreadRoots = Number.isInteger(options.maxThreadRoots) ? options.maxThreadRoots : CHANNEL_SUMMARY_THREAD_LIMIT;
+  const maxThreadMessages = Number.isInteger(options.maxThreadMessages) ? options.maxThreadMessages : CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT;
+  let remainingReplies = Number.isInteger(options.maxThreadReplies) ? options.maxThreadReplies : CHANNEL_SUMMARY_THREAD_REPLY_LIMIT;
+  let expandedThreadCount = 0;
+  let omittedThreadCount = 0;
+  let failedThreadCount = 0;
+
+  for (const message of messages) {
+    const replyCount = Number.isInteger(message?.replyCount) ? message.replyCount : 0;
+    if (!replyCount) continue;
+
+    const threadUrl = buildThreadUrlFromMessage(message);
+    if (!threadUrl) {
+      omittedThreadCount += 1;
+      continue;
+    }
+
+    if (expandedThreadCount >= maxThreadRoots || remainingReplies <= 0) {
+      omittedThreadCount += 1;
+      continue;
+    }
+
+    try {
+      const maxMessagesForThisThread = Math.max(2, Math.min(maxThreadMessages, remainingReplies + 1));
+      const thread = await readThreadSnapshotFromTemporarySlackTab(tabId, threadUrl);
+      const limitedThread = limitThreadMessagesForSummary(thread, maxMessagesForThisThread);
+      const capturedReplies = Math.max(0, (limitedThread.messages?.length ?? 1) - 1);
+      message.thread = limitedThread;
+      remainingReplies = Math.max(0, remainingReplies - capturedReplies);
+      expandedThreadCount += 1;
+    } catch (error) {
+      console.warn("[slack-pi] failed to expand thread while summarizing channel", {
+        error: error instanceof Error ? error.message : String(error),
+        threadUrl,
+      });
+      failedThreadCount += 1;
+    }
+  }
+
+  return {
+    messages,
+    expandedThreadCount,
+    omittedThreadCount,
+    failedThreadCount,
+  };
+}
+
+async function getChannelRangeAllFromTemporarySlackTab(
+  startUrl,
+  endUrl,
+  maxMessages = 500,
+  pageSize = CHANNEL_RANGE_PAGE_SIZE,
+  includeThreads = false,
+) {
   return await withTemporarySlackTab(startUrl, async ({ tabId, getCurrentTab }) => {
     let firstPayload = null;
     const allMessages = [];
@@ -788,9 +925,16 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
       throw new BridgeActionError("channel_range_read_failed", "No messages returned.");
     }
 
+    const messages = allMessages.slice(0, maxMessages);
+    const threadExpansion = includeThreads
+      ? await expandThreadsOnChannelMessages(tabId, messages)
+      : { expandedThreadCount: 0, omittedThreadCount: 0, failedThreadCount: 0 };
+
     return {
       ...firstPayload,
-      messages: allMessages.slice(0, maxMessages),
+      messages,
+      threadSummariesIncluded: includeThreads,
+      ...(includeThreads ? threadExpansion : {}),
       tempTab: await getCurrentTab(),
     };
   }, { foreground: true });
@@ -857,11 +1001,12 @@ async function handleRequestMessage(socket, message) {
       const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : undefined;
       const maxMessages = Number.isInteger(message.payload?.maxMessages) ? message.payload.maxMessages : 500;
       const pageSize = Number.isInteger(message.payload?.pageSize) ? message.payload.pageSize : CHANNEL_RANGE_PAGE_SIZE;
+      const includeThreads = message.payload?.includeThreads !== false;
       if (!startUrl) {
         throw new BridgeActionError("invalid_request", "getChannelRangeAll requires startUrl.");
       }
 
-      const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize);
+      const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads);
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload,

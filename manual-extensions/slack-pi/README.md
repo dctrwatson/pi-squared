@@ -43,7 +43,7 @@ Implemented so far:
 - local shared-secret creation/loading
 - Chrome hello/ack handshake support
 - Slack-specific non-coding system prompt override
-- active tools restricted to `slack_get_current_thread` and `slack_get_channel_range`
+- active tools restricted to `slack_get_current_thread`, `slack_get_channel_range`, and `slack_summarize_channel_from`
 - automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
 - `/slack-ping` command
@@ -51,12 +51,13 @@ Implemented so far:
 - `/slack-channel-read` command for channel ranges by permalink
 - `slack_get_current_thread` tool
 - `slack_get_channel_range` tool
+- `slack_summarize_channel_from` tool
 - Slack thread and channel-range normalization for model context
+- channel summarization with automatic pagination and optional thread expansion
 
 Not implemented yet:
 - any browser-side write-back tooling
 - Slack DOM hardening beyond the current heuristic extractor
-- Chrome-side implementation of `nextCursor` in `getChannelRange` responses (required for multi-page summarization to work)
 
 ## Useful commands
 
@@ -65,10 +66,10 @@ Not implemented yet:
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read` — read the active Slack thread and add it to the session as a visible message
 - `/slack-channel-read <start-url> [--next N] [--until <end-url>]` — read a bounded channel range starting from a Slack message link
-- `/slack-summarize <start-url> [--until <end-url>] [--max <n>]` — fetch all channel messages from a link (auto-paginating) and inject them for summarization
+- `/slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]` — fetch all channel messages from a link (auto-paginating), expanding thread replies by default, and inject them for summarization
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
 - ask Pi to use `slack_get_channel_range` — read a bounded range of channel messages from a Slack permalink
-- ask Pi to use `slack_summarize_channel_from` — fetch all channel messages from a permalink and summarize them
+- ask Pi to use `slack_summarize_channel_from` — fetch all channel messages from a permalink, including threaded replies by default, and summarize them
 
 ## Prompt behavior
 

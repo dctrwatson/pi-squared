@@ -240,6 +240,36 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return parseSlackTsFromUrl(permalinkUrl);
   }
 
+  function parseReplyCountFromText(text) {
+    const matches = [...normalizeText(text).matchAll(/\b(\d{1,5})\s+repl(?:y|ies)\b/gi)];
+    if (matches.length === 0) return undefined;
+    const last = matches[matches.length - 1];
+    if (!last || !last[1]) return undefined;
+    const value = Number.parseInt(last[1], 10);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  function extractReplyCount(messageElement) {
+    const selectors = [
+      '[data-qa*="reply"]',
+      '[aria-label*="reply" i]',
+      'a[href*="thread_ts="]',
+      'a[href*="/thread/"]',
+      'button',
+      '[role="button"]',
+    ];
+
+    for (const selector of selectors) {
+      const elements = queryVisibleAll(messageElement, [selector]);
+      for (const element of elements) {
+        const replyCount = parseReplyCountFromText(getElementText(element));
+        if (replyCount !== undefined) return replyCount;
+      }
+    }
+
+    return parseReplyCountFromText(getElementText(messageElement));
+  }
+
   function filterLeafCandidates(elements) {
     return elements.filter(
       (element, index) =>
@@ -447,6 +477,24 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return lastRoot ?? findMainRoot();
   }
 
+  async function waitForThreadRoot(timeoutMs = READY_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    let lastRoot = findThreadRoot();
+
+    while (Date.now() < deadline) {
+      const root = findThreadRoot();
+      if (root) {
+        lastRoot = root;
+        if (countMessageLikeDescendants(root) > 0) {
+          return root;
+        }
+      }
+      await sleep(READY_POLL_MS);
+    }
+
+    return lastRoot ?? findThreadRoot();
+  }
+
   function findMessageElements(root, composerElement) {
     const selectors = [
       '[data-qa="virtual-list-item"]',
@@ -502,6 +550,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
           timestamp: extractTimestamp(element) || undefined,
           messageTs: extractMessageTs(element),
           permalinkUrl: extractMessagePermalinkUrl(element),
+          replyCount: extractReplyCount(element),
           isRoot: index === 0,
         };
       })
@@ -523,10 +572,18 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         continue;
       }
 
-      if (!existing.author && message.author) {
+      if (
+        (!existing.author && message.author) ||
+        (!existing.permalinkUrl && message.permalinkUrl) ||
+        (!existing.messageTs && message.messageTs) ||
+        (!existing.replyCount && message.replyCount)
+      ) {
         map.set(key, {
           ...existing,
-          author: message.author,
+          ...(message.author ? { author: message.author } : {}),
+          ...(message.permalinkUrl ? { permalinkUrl: message.permalinkUrl } : {}),
+          ...(message.messageTs ? { messageTs: message.messageTs } : {}),
+          ...(message.replyCount ? { replyCount: message.replyCount } : {}),
         });
       }
     }
@@ -642,7 +699,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   }
 
   async function buildThreadSnapshot() {
-    const threadRoot = findThreadRoot();
+    const threadRoot = await waitForThreadRoot();
     if (!threadRoot) {
       return {
         ok: false,
