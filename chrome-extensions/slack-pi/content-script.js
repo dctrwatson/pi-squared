@@ -465,9 +465,33 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     );
   }
 
+  function backfillMissingAuthors(messages) {
+    let currentAuthor;
+
+    return messages.map((message) => {
+      if (!message) return message;
+      if (message.author) {
+        currentAuthor = message.author;
+        return message;
+      }
+
+      // In Slack's compact theme, grouped follow-up messages often omit the
+      // visible sender name. Reuse the most recent explicit author for normal
+      // message rows that still have a permalink/timestamp identity.
+      if (currentAuthor && (message.messageTs || message.permalinkUrl || message.timestamp)) {
+        return {
+          ...message,
+          author: currentAuthor,
+        };
+      }
+
+      return message;
+    });
+  }
+
   function extractMessages(root, composerElement) {
     const messageElements = findMessageElements(root, composerElement);
-    return messageElements
+    const messages = messageElements
       .map((element, index) => {
         const text = extractMessageText(element, composerElement);
         if (!text) return null;
@@ -481,6 +505,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         };
       })
       .filter(Boolean);
+
+    return backfillMissingAuthors(messages);
   }
 
   function makeMessageKey(message) {
