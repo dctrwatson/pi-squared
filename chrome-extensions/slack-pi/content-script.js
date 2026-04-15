@@ -679,10 +679,6 @@ if (!globalThis.__slackPiContentScriptLoaded) {
               continue;
             }
           }
-        } else if (message.messageTs) {
-          // Guard against virtual-list DOM nodes from before the start boundary
-          // that Slack hasn't recycled yet re-appearing on subsequent scroll steps.
-          if (cursorTs ? message.messageTs <= cursorTs : message.messageTs < startTs) continue;
         }
 
         const key = makeMessageKey(message);
@@ -704,9 +700,13 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
     collectVisible();
 
+    // Strip DOM virtualization artifacts: pre-start nodes that Slack hadn't
+    // recycled yet and were collected after started=true.
+    const withinBounds = (m) => !m.messageTs || (cursorTs ? m.messageTs > cursorTs : m.messageTs >= startTs);
+
     if (!scrollContainer) {
       return {
-        messages: [...collected.values()],
+        messages: [...collected.values()].filter(withinBounds),
         harvestedViaScroll: false,
         started,
         reachedEnd,
@@ -736,7 +736,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     return {
-      messages: [...collected.values()],
+      messages: [...collected.values()].filter(withinBounds),
       harvestedViaScroll: true,
       started,
       reachedEnd,
