@@ -1,27 +1,20 @@
 ---
 name: buildkite-pr-check-review
 description: Reviews GitHub PR status checks backed by Buildkite, fetches the relevant Buildkite logs with `bk`, and explains what failed. Use whenever the user asks what failed on a PR, mentions a red CI/status check, wants Buildkite logs, or asks to inspect the checks for the current branch PR.
-compatibility: Requires git, GitHub CLI (`gh`), Python 3, and a Buildkite CLI command available as `bk` or `buildkite`, with authentication for the target GitHub repo and Buildkite org.
+compatibility: Requires GitHub CLI (`gh`), Python 3, and a Buildkite CLI command available as `bk` or `buildkite`, with auth for the target GitHub repo and Buildkite org.
 ---
 
 # Buildkite PR Check Review
 
 Turn a GitHub PR status check into the relevant Buildkite logs, then give the user a concise diagnosis.
 
-## 1. Confirm the environment first
+## 1. Verify the environment
 
-This skill assumes the target check lives on GitHub and the backing CI system is Buildkite.
-
-Before doing anything else:
-
-1. Make sure you are in the right GitHub checkout, or that `GH_REPO` / `gh -R owner/repo` will point at the correct repo.
-2. Verify GitHub auth works:
+Use the current repo by default. Before doing anything else, make sure GitHub and Buildkite access work:
 
 ```bash
 gh auth status
 ```
-
-3. Find the Buildkite CLI command:
 
 ```bash
 if command -v bk >/dev/null 2>&1; then
@@ -34,41 +27,36 @@ else
 fi
 ```
 
-4. Confirm the Buildkite CLI is callable and authenticated:
-
 ```bash
-"$BK_CLI" --help
 "$BK_CLI" auth status
 ```
 
-If any of those fail, stop and tell the user exactly what is missing or unauthenticated.
+If any of these fail, stop and tell the user exactly what is missing or unauthenticated.
 
-## 2. Resolve the PR and the relevant check
+## 2. Resolve the PR and choose the check
 
-For the common case, default to the PR for the current branch in the current repo.
-
-Resolve the PR metadata directly with GitHub CLI:
+For the common case, inspect the PR for the current branch in the current repo.
 
 ```bash
 gh pr view [pr_selector] [--repo owner/repo] --json number,title,url,headRefName,headRefOid > /tmp/pr.json
 gh pr checks [pr_selector] [--repo owner/repo] --json name,state,bucket,link,description,workflow,startedAt,completedAt > /tmp/pr-checks.json
 ```
 
-- Omit `pr_selector` to use the PR for the current branch.
-- `pr_selector` can be a PR number, PR URL, or branch name when the user gives one explicitly.
+- Omit `pr_selector` to use the current branch PR.
+- `pr_selector` can be a PR number, PR URL, or branch name when the user gives one.
 - Treat a check as Buildkite-backed when its `link` points at Buildkite.
 
-Choose the check agentically from the prompt plus the GitHub check list:
+Choose the check from the GitHub results plus the user's wording:
 
-- If the user named a specific check, prefer an exact name match, then workflow match, then a case-insensitive substring match.
-- If the prompt is vague and there is exactly one failing Buildkite-backed check, inspect it immediately.
-- If the prompt is vague and there is exactly one Buildkite-backed check overall, inspect it immediately.
-- If multiple Buildkite checks plausibly match the prompt, show a short numbered list and ask the user which one they mean.
-- If there are no Buildkite-backed checks, say so clearly instead of pretending this skill applies.
+1. Exact check-name match
+2. Workflow match
+3. Case-insensitive substring match
+4. If the prompt is vague, the only failing Buildkite-backed check
+5. If still vague, the only Buildkite-backed check overall
 
-This step does not need a helper script; the check choice is usually best made by reading the GitHub checks in context with the user's wording.
+If multiple Buildkite checks are still plausible, show a short numbered list and ask the user which one they mean. If there are no Buildkite-backed checks, say so clearly.
 
-## 3. Turn the GitHub check link into a Buildkite target
+## 3. Parse the Buildkite target
 
 Once you have the chosen check's `link`, parse it with:
 
@@ -76,28 +64,16 @@ Once you have the chosen check's `link`, parse it with:
 python3 <skill_dir>/scripts/extract_buildkite_target.py "<check_link>"
 ```
 
-The parser extracts the common Buildkite URL pieces:
+This extracts the organization, pipeline, build number, optional job hint, and normalized Buildkite URL.
 
-- organization
-- pipeline
-- build number
-- job id hint, when present
-- normalized web URL
+If the parser cannot recognize the URL, ask the user for the direct Buildkite build URL or identifier.
 
-If the parser cannot recognize a Buildkite URL, ask the user for the direct Buildkite build URL or build identifier.
+## 4. Fetch the build and choose the job
 
-## 4. Use the Buildkite CLI to fetch the right logs
-
-The installed CLI uses these concrete commands:
+Use the installed CLI shape directly:
 
 - `bk build view <build-number> -p <org>/<pipeline> --json`
 - `bk job log <job-id> -p <org>/<pipeline> -b <build-number> --no-timestamps`
-
-Use the parsed Buildkite target to fetch, in this order:
-
-1. build summary / state
-2. embedded jobs from the build JSON
-3. logs for the failed or non-passing job(s)
 
 Suggested workflow:
 
@@ -110,37 +86,36 @@ job_id="<job-id-if-known>"
 python3 <skill_dir>/scripts/select_buildkite_job.py /tmp/buildkite-build.json ${job_id:+--job-id-hint "$job_id"} > /tmp/buildkite-job-selection.json
 ```
 
-Use `select_buildkite_job.py` as the default way to choose which job to inspect. It prefers:
+`select_buildkite_job.py` is the default way to choose the job to inspect. It prefers:
 
 - the exact job referenced by the Buildkite URL, when present
 - failed or broken command-like jobs
 - otherwise the most relevant running or pending job
 
-Then read `/tmp/buildkite-job-selection.json` and use its `selected_job.id` with:
+Then fetch logs for the selected job:
 
 ```bash
 "$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > /tmp/buildkite-job.log
 ```
 
-Handling the selection result:
+Interpret `select_buildkite_job.py` like this:
 
-- If `status` is `failed_job_selected` or `pending_job_selected`, continue with that job.
-- If `status` is `multiple_failed_jobs`, inspect `selected_job` first, but mention the other failed jobs in your response.
-- If `status` is `job_hint_not_found`, mention that the URL-specific job was not present and that you fell back to the most relevant job still attached to the build.
-- If `status` is `no_jobs_found`, fall back to `bk api` or tell the user the build JSON did not include jobs.
+- `failed_job_selected` or `pending_job_selected`: continue with that job
+- `multiple_failed_jobs`: inspect `selected_job` first, but mention the others
+- `job_hint_not_found`: mention that you fell back from the URL-specific job to the closest live job on the build
+- `no_jobs_found`: fall back to `bk api` or tell the user the build JSON did not include jobs
 
-Guidance:
+When reading logs:
 
-- Prefer job-specific logs over whole-build output whenever the check link points to a specific job.
-- If several jobs failed, summarize each one briefly but spend most attention on the first real root cause.
-- If logs are large, save raw CLI output to a temp file, then search and inspect around meaningful failures rather than pasting huge blobs into the response.
-- Search for signals like `error`, `failed`, `exception`, `traceback`, `panic`, `AssertionError`, `Caused by:`, or tool-specific failure markers, but always read surrounding context before concluding.
-- If the check is still running, summarize what is pending or currently executing instead of claiming failure.
-- If `bk build view --json` is missing a field you need, fall back to `bk api` against the relevant Buildkite REST endpoint rather than guessing.
+- Prefer job logs over whole-build output.
+- If logs are large, save them and search around meaningful failures instead of pasting everything.
+- Look for signals like `error`, `failed`, `exception`, `traceback`, `panic`, `AssertionError`, or `Caused by:`, but always read surrounding context before concluding.
+- If the check is still running, summarize what is active or blocked instead of claiming failure.
+- If `bk build view --json` is missing a field you need, use `bk api` instead of guessing.
 
-## 5. What to return to the user
+## 5. What to return
 
-Default response structure:
+Use this structure by default:
 
 ~~~markdown
 ## PR check review
@@ -162,21 +137,20 @@ Default response structure:
 - <specific next action>
 ~~~
 
-Keep the answer grounded in evidence:
+Keep the response evidence-based:
 
-- Quote a few relevant lines from the logs.
-- Distinguish clearly between observed failure, likely cause, and uncertainty.
-- If the logs show only a symptom, say that instead of overstating confidence.
-- If everything passed, say so plainly.
+- Quote the most relevant log lines.
+- Separate observed failure from likely cause.
+- Say plainly when the build passed or when the evidence is inconclusive.
 
 ## 6. Edge cases
 
-- **Missing Buildkite CLI or auth**: stop and tell the user what to install or authenticate.
-- **Non-Buildkite check**: explain that the selected check is not backed by Buildkite and avoid fake Buildkite commands.
-- **Canceled checks**: say whether the job was canceled by a user, superseded, or appears infrastructure-related if the logs indicate that.
-- **Pending checks**: summarize queue / running state and name any long-running step if visible.
-- **Permission errors**: surface the exact CLI error; do not paraphrase away important auth details.
-- **Direct Buildkite URL from the user**: you may skip the GitHub lookup and go straight to parsing plus Buildkite CLI inspection.
+- **Missing Buildkite CLI or auth**: stop and explain what to install or authenticate.
+- **Non-Buildkite check**: say the selected check is not backed by Buildkite.
+- **Canceled checks**: say whether the job appears user-canceled, superseded, or infra-related if the logs show it.
+- **Pending checks**: summarize queue / running state and name the relevant job if visible.
+- **Permission errors**: surface the exact CLI error.
+- **Direct Buildkite URL from the user**: skip GitHub lookup and go straight to parsing plus Buildkite inspection.
 
 ## Helper files
 
