@@ -510,14 +510,23 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   }
 
   function makeMessageKey(message) {
-    return [message.messageTs || "", message.timestamp || "", message.author || "", message.text.slice(0, 240)].join("\u241f");
+    return [message.messageTs || "", message.permalinkUrl || "", message.timestamp || "", message.text.slice(0, 240)].join("\u241f");
   }
 
   function collectMessagesInto(map, messages) {
     for (const message of messages) {
       const key = makeMessageKey(message);
-      if (!map.has(key)) {
+      const existing = map.get(key);
+      if (!existing) {
         map.set(key, message);
+        continue;
+      }
+
+      if (!existing.author && message.author) {
+        map.set(key, {
+          ...existing,
+          author: message.author,
+        });
       }
     }
   }
@@ -620,7 +629,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       scrollContainer.style.scrollBehavior = originalScrollBehavior;
     }
 
-    const messages = [...collected.values()];
+    const messages = backfillMissingAuthors([...collected.values()]);
     messages.forEach((message, index) => {
       message.isRoot = index === 0;
     });
@@ -732,7 +741,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
     if (!scrollContainer) {
       return {
-        messages: [...collected.values()].filter(withinBounds),
+        messages: backfillMissingAuthors([...collected.values()].filter(withinBounds)),
         harvestedViaScroll: false,
         started,
         reachedEnd,
@@ -762,7 +771,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     return {
-      messages: [...collected.values()].filter(withinBounds),
+      messages: backfillMissingAuthors([...collected.values()].filter(withinBounds)),
       harvestedViaScroll: true,
       started,
       reachedEnd,
