@@ -89,10 +89,16 @@ If step 3 did not print a `PUSH:` command, use:
 git push -u origin HEAD
 ```
 
-Write the PR body to a temporary file so multi-line markdown and quotes are preserved safely:
+Use the helper script so title/body markdown is passed safely and the final output is structured.
+
+Write the title and PR body to temporary files:
 
 ```bash
+title_file=$(mktemp)
 body_file=$(mktemp)
+cat > "$title_file" <<'EOF'
+<title>
+EOF
 cat > "$body_file" <<'EOF'
 <body>
 EOF
@@ -101,13 +107,13 @@ EOF
 If the user chose to update an existing PR, run:
 
 ```bash
-gh pr edit <number> --title "<title>" --body-file "$body_file"
+bash <skill_dir>/create-or-edit-pr.sh --pr-number <number> --title-file "$title_file" --body-file "$body_file"
 ```
 
 Otherwise create the PR:
 
 ```bash
-gh pr create --base <base> --title "<title>" --body-file "$body_file"
+bash <skill_dir>/create-or-edit-pr.sh --base <base> --title-file "$title_file" --body-file "$body_file"
 ```
 
-Add `--draft` only when creating a PR and the user requested a draft. Remove the temp file afterward. Show the PR URL when done.
+Add `--draft` only when creating a PR and the user requested a draft. Remove the temp files afterward. The helper prints `ACTION:`, `NUMBER:`, and `URL:` lines; show the PR URL to the user when done.
