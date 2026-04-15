@@ -689,13 +689,13 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
-  async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs) {
+  async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs, seedAuthor) {
     const scrollContainer = findScrollContainer(mainRoot);
     const collected = new Map();
     let started = false;
     let reachedEnd = false;
     let hitLimit = false;
-    let authorBeforeStart;
+    let authorBeforeStart = typeof seedAuthor === "string" && seedAuthor ? seedAuthor : undefined;
 
     const isStartBoundary = (message) => {
       if (cursorTs) {
@@ -749,7 +749,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       }
     };
 
-    if (scrollContainer) {
+    if (scrollContainer && !authorBeforeStart) {
       const originalScrollTop = scrollContainer.scrollTop;
       let lastContextScrollTop = -1;
       for (let step = 0; step < PRE_CONTEXT_SCROLL_STEPS; step += 1) {
@@ -913,7 +913,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
   }
 
-  async function buildChannelRangeSnapshot(startUrl, endUrl, limit, cursor) {
+  async function buildChannelRangeSnapshot(startUrl, endUrl, limit, cursor, seedAuthor) {
     const startTs = parseSlackTsFromUrl(startUrl);
     if (!startTs) {
       return {
@@ -948,8 +948,9 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     const cursorTs = typeof cursor === "string" && cursor ? cursor : undefined;
+    const initialAuthor = typeof seedAuthor === "string" && seedAuthor ? seedAuthor : undefined;
     const composerElement = findComposer(mainRoot);
-    const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs);
+    const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs, initialAuthor);
     if (!harvest.started) {
       return {
         ok: false,
@@ -1040,7 +1041,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     if (message.type === "slack-pi:get-channel-range") {
-      void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit, message.cursor)
+      void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit, message.cursor, message.seedAuthor)
         .then((result) => sendResponse(result))
         .catch((error) => {
           sendResponse({

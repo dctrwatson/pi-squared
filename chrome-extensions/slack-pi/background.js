@@ -705,13 +705,14 @@ async function withTemporarySlackTab(url, handler, options = {}) {
   }
 }
 
-async function readChannelRangePageFromTemporarySlackTab(tabId, { startUrl, endUrl, limit, cursor }) {
+async function readChannelRangePageFromTemporarySlackTab(tabId, { startUrl, endUrl, limit, cursor, seedAuthor }) {
   const page = await sendMessageToTab(tabId, {
     type: "slack-pi:get-channel-range",
     startUrl,
     endUrl,
     limit,
     cursor,
+    seedAuthor,
   });
 
   if (!page.ok) {
@@ -750,6 +751,7 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
     let firstPayload = null;
     const allMessages = [];
     let cursor;
+    let seedAuthor;
 
     while (allMessages.length < maxMessages) {
       const limit = Math.min(pageSize, maxMessages - allMessages.length);
@@ -761,6 +763,7 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
           endUrl,
           limit,
           cursor,
+          seedAuthor,
         });
       } catch (error) {
         if (allMessages.length > 0 && cursor && error instanceof BridgeActionError && error.code === "no_channel_messages") {
@@ -771,6 +774,11 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
 
       if (!firstPayload) firstPayload = payload;
       allMessages.push(...payload.messages);
+
+      const lastAuthor = [...payload.messages].reverse().find((message) => typeof message?.author === "string" && message.author)?.author;
+      if (lastAuthor) {
+        seedAuthor = lastAuthor;
+      }
 
       if (!payload.nextCursor) break;
       cursor = payload.nextCursor;
