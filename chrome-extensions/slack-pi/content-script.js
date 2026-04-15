@@ -750,6 +750,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     };
 
     if (scrollContainer) {
+      const originalScrollTop = scrollContainer.scrollTop;
       let lastContextScrollTop = -1;
       for (let step = 0; step < PRE_CONTEXT_SCROLL_STEPS; step += 1) {
         const boundaryVisible = observeVisibleContext();
@@ -764,6 +765,11 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
         lastContextScrollTop = currentTop;
         scrollContainer.scrollTop = nextTop;
+        await sleep(SCROLL_SETTLE_MS);
+      }
+
+      if (Math.abs(scrollContainer.scrollTop - originalScrollTop) > 1) {
+        scrollContainer.scrollTop = originalScrollTop;
         await sleep(SCROLL_SETTLE_MS);
       }
     }
