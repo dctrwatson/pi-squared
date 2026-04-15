@@ -45,33 +45,28 @@ If any of those fail, stop and tell the user exactly what is missing or unauthen
 
 ## 2. Resolve the PR and the relevant check
 
-For the common case, default to the PR for the current branch in the current repo. Use the helper that combines PR lookup, check listing, and prompt-based check selection:
+For the common case, default to the PR for the current branch in the current repo.
+
+Resolve the PR metadata directly with GitHub CLI:
 
 ```bash
-python3 <skill_dir>/scripts/select_buildkite_check.py --prompt "<user prompt>" [--repo owner/repo] [pr_selector] > /tmp/buildkite-check-selection.json
+gh pr view [pr_selector] [--repo owner/repo] --json number,title,url,headRefName,headRefOid > /tmp/pr.json
+gh pr checks [pr_selector] [--repo owner/repo] --json name,state,bucket,link,description,workflow,startedAt,completedAt > /tmp/pr-checks.json
 ```
 
 - Omit `pr_selector` to use the PR for the current branch.
-- `pr_selector` can still be a PR number, PR URL, or branch name when the user gives one explicitly.
-- The helper uses GitHub CLI to load the PR and its checks, filters to Buildkite-backed checks, and tries to infer the intended check from the user's wording.
+- `pr_selector` can be a PR number, PR URL, or branch name when the user gives one explicitly.
+- Treat a check as Buildkite-backed when its `link` points at Buildkite.
 
-Interpret the result like this:
+Choose the check agentically from the prompt plus the GitHub check list:
 
-- If `status` is `selected`, continue with `selected_check`.
-- If `status` is `ambiguous`, show the top candidate checks and ask the user which one they want.
-- If `status` is `no_buildkite_checks`, say so clearly instead of pretending this skill applies.
+- If the user named a specific check, prefer an exact name match, then workflow match, then a case-insensitive substring match.
+- If the prompt is vague and there is exactly one failing Buildkite-backed check, inspect it immediately.
+- If the prompt is vague and there is exactly one Buildkite-backed check overall, inspect it immediately.
+- If multiple Buildkite checks plausibly match the prompt, show a short numbered list and ask the user which one they mean.
+- If there are no Buildkite-backed checks, say so clearly instead of pretending this skill applies.
 
-The helper prefers, in order:
-
-- the only Buildkite-backed check, if there is just one
-- the only failing Buildkite-backed check, when the prompt is vague
-- an exact or strong prompt match on check name / workflow / description
-
-If you need raw PR metadata or all checks for debugging, you can still use:
-
-```bash
-python3 <skill_dir>/scripts/pr_checks.py [--repo owner/repo] [pr_selector] > /tmp/pr_checks.json
-```
+This step does not need a helper script; the check choice is usually best made by reading the GitHub checks in context with the user's wording.
 
 ## 3. Turn the GitHub check link into a Buildkite target
 
@@ -185,7 +180,5 @@ Keep the answer grounded in evidence:
 
 ## Helper files
 
-- `scripts/select_buildkite_check.py` — resolve the current repo PR and infer the intended Buildkite-backed check from the user's prompt
-- `scripts/pr_checks.py` — collect PR metadata and GitHub checks as JSON
 - `scripts/extract_buildkite_target.py` — parse a Buildkite URL into structured identifiers
 - `scripts/select_buildkite_job.py` — choose the most relevant failed or pending Buildkite job from `bk build view --json`
