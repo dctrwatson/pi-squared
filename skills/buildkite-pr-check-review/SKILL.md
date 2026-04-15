@@ -34,10 +34,11 @@ else
 fi
 ```
 
-4. Confirm the Buildkite CLI is callable:
+4. Confirm the Buildkite CLI is callable and authenticated:
 
 ```bash
 "$BK_CLI" --help
+"$BK_CLI" auth status
 ```
 
 If any of those fail, stop and tell the user exactly what is missing or unauthenticated.
@@ -81,29 +82,50 @@ If the parser cannot recognize a Buildkite URL, ask the user for the direct Buil
 
 ## 4. Use the Buildkite CLI to fetch the right logs
 
-Prefer the local CLI help over memory. On first use in a session, inspect the installed command shape if you are not already certain:
+The installed CLI uses these concrete commands:
 
-```bash
-"$BK_CLI" --help
-"$BK_CLI" build --help || "$BK_CLI" builds --help
-"$BK_CLI" job --help || "$BK_CLI" jobs --help
-"$BK_CLI" log --help || "$BK_CLI" logs --help
-```
+- `bk build view <build-number> -p <org>/<pipeline> --json`
+- `bk job log <job-id> -p <org>/<pipeline> -b <build-number> --no-timestamps`
 
-Use the parsed Buildkite target plus the locally available CLI commands to fetch, in this order:
+Use the parsed Buildkite target to fetch, in this order:
 
 1. build summary / state
-2. job or step list for the build
+2. embedded jobs from the build JSON
 3. logs for the failed or non-passing job(s)
+
+Suggested workflow:
+
+```bash
+pipeline_ref="<org>/<pipeline>"
+build_number="<build-number>"
+job_id="<job-id-if-known>"
+
+"$BK_CLI" build view "$build_number" -p "$pipeline_ref" --json > /tmp/buildkite-build.json
+```
+
+Then inspect `/tmp/buildkite-build.json` to identify:
+
+- overall build state
+- failed, broken, canceled, running, or scheduled jobs
+- the human-readable label/name for each relevant job
+- the UUID to use with `bk job log`
+
+If you already know the job UUID, fetch its logs directly:
+
+```bash
+"$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > /tmp/buildkite-job.log
+```
+
+If the GitHub link points only to the build, choose the failed or currently running job from the build JSON before pulling logs.
 
 Guidance:
 
 - Prefer job-specific logs over whole-build output whenever the check link points to a specific job.
-- If the GitHub link points only to the build, inspect the jobs and choose the failed job(s) before pulling logs.
 - If several jobs failed, summarize each one briefly but spend most attention on the first real root cause.
 - If logs are large, save raw CLI output to a temp file, then search and inspect around meaningful failures rather than pasting huge blobs into the response.
 - Search for signals like `error`, `failed`, `exception`, `traceback`, `panic`, `AssertionError`, `Caused by:`, or tool-specific failure markers, but always read surrounding context before concluding.
 - If the check is still running, summarize what is pending or currently executing instead of claiming failure.
+- If `bk build view --json` is missing a field you need, fall back to `bk api` against the relevant Buildkite REST endpoint rather than guessing.
 
 ## 5. What to return to the user
 
