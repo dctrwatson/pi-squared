@@ -679,6 +679,10 @@ if (!globalThis.__slackPiContentScriptLoaded) {
               continue;
             }
           }
+        } else if (message.messageTs) {
+          // Guard against virtual-list DOM nodes from before the start boundary
+          // that Slack hasn't recycled yet re-appearing on subsequent scroll steps.
+          if (cursorTs ? message.messageTs <= cursorTs : message.messageTs < startTs) continue;
         }
 
         const key = makeMessageKey(message);
