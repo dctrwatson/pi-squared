@@ -651,20 +651,12 @@ async function openTemporarySlackTab(url) {
   return { tabId: tab.id, resolvedUrl, preparation };
 }
 
-async function navigateTemporarySlackTab(tabId, url) {
-  const resolvedUrl = await resolveTemporarySlackTabUrl(url);
-  await chrome.tabs.update(tabId, { url: resolvedUrl.url });
-  const preparation = await prepareLoadedTemporarySlackTab(tabId, resolvedUrl);
-  return { tabId, resolvedUrl, preparation };
-}
-
 async function withTemporarySlackTab(url, handler) {
   const temporaryTab = await openTemporarySlackTab(url);
 
   try {
     return await handler({
       ...temporaryTab,
-      navigateTo: async (nextUrl) => await navigateTemporarySlackTab(temporaryTab.tabId, nextUrl),
       getCurrentTab: async () => serializeTab(await chrome.tabs.get(temporaryTab.tabId)),
     });
   } finally {
@@ -717,12 +709,10 @@ async function getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cur
 }
 
 async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages = 500, pageSize = CHANNEL_RANGE_PAGE_SIZE) {
-  return await withTemporarySlackTab(startUrl, async ({ tabId, navigateTo, getCurrentTab }) => {
+  return await withTemporarySlackTab(startUrl, async ({ tabId, getCurrentTab }) => {
     let firstPayload = null;
     const allMessages = [];
     let cursor;
-    let currentStartUrl = startUrl;
-    let navigation = null;
 
     while (allMessages.length < maxMessages) {
       const limit = Math.min(pageSize, maxMessages - allMessages.length);
@@ -730,7 +720,7 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
 
       try {
         payload = await readChannelRangePageFromTemporarySlackTab(tabId, {
-          startUrl: currentStartUrl,
+          startUrl,
           endUrl,
           limit,
           cursor,
@@ -747,14 +737,6 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
 
       if (!payload.nextCursor) break;
       cursor = payload.nextCursor;
-
-      if (typeof payload.nextStartUrl === "string" && payload.nextStartUrl) {
-        currentStartUrl = payload.nextStartUrl;
-        navigation = await navigateTo(currentStartUrl);
-        if (!navigation.preparation.prepared) {
-          break;
-        }
-      }
     }
 
     if (!firstPayload) {
