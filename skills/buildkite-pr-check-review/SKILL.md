@@ -1,7 +1,7 @@
 ---
 name: buildkite-pr-check-review
 description: Reviews GitHub PR status checks backed by Buildkite, fetches the relevant Buildkite logs with `bk`, and explains what failed. Use whenever the user asks what failed on a PR, mentions a red CI/status check, wants Buildkite logs, or asks to inspect the checks for the current branch PR.
-compatibility: Requires GitHub CLI (`gh` 2.40+), Python 3.7+, and a Buildkite CLI command available as `bk` or `buildkite`, with auth for the target GitHub repo and Buildkite org.
+compatibility: Requires GitHub CLI (`gh` 2.40+), Python 3.7+, and the Buildkite CLI (`bk`), with auth for the target GitHub repo and Buildkite org.
 ---
 
 # Buildkite PR Check Review
@@ -14,23 +14,12 @@ Use the current repo by default. Before doing anything else, verify GitHub and B
 
 ```bash
 set -euo pipefail
-
 gh auth status
-
-if command -v bk >/dev/null 2>&1; then
-  BK_CLI=bk
-elif command -v buildkite >/dev/null 2>&1; then
-  BK_CLI=buildkite
-else
-  echo "Missing Buildkite CLI: expected 'bk' or 'buildkite' on PATH" >&2
-  exit 1
-fi
-
-"$BK_CLI" auth status
-echo "Environment OK. BK_CLI=$BK_CLI"
+bk auth status
+echo "Environment OK"
 ```
 
-If any step fails, stop and tell the user exactly what is missing or unauthenticated. Note the `BK_CLI` value — use it in place of `"$BK_CLI"` in all subsequent commands.
+If any step fails, stop and tell the user exactly what is missing or unauthenticated.
 
 ## 2. Resolve the PR and choose the check
 
@@ -89,11 +78,11 @@ pipeline_ref="<org>/<pipeline>"
 build_number="<build-number>"
 job_id="<job-id-if-known>"
 
-"$BK_CLI" build view "$build_number" -p "$pipeline_ref" --json > "$workdir/buildkite-build.json"
+bk build view "$build_number" -p "$pipeline_ref" --json > "$workdir/buildkite-build.json"
 python3 <skill_dir>/scripts/select_buildkite_job.py "$workdir/buildkite-build.json" ${job_id:+--job-id-hint "$job_id"} > "$workdir/buildkite-job-selection.json"
 
 # Fetch annotations — often contain structured test failure summaries
-"$BK_CLI" api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/annotations" 2>/dev/null > "$workdir/buildkite-annotations.json" || true
+bk api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/annotations" 2>/dev/null > "$workdir/buildkite-annotations.json" || true
 ```
 
 `select_buildkite_job.py` is the default way to choose the job to inspect. It prefers:
@@ -105,7 +94,7 @@ python3 <skill_dir>/scripts/select_buildkite_job.py "$workdir/buildkite-build.js
 Then fetch logs for the selected job:
 
 ```bash
-"$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > "$workdir/buildkite-job.log"
+bk job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > "$workdir/buildkite-job.log"
 ```
 
 Interpret `select_buildkite_job.py` like this:
@@ -123,7 +112,7 @@ When reading logs:
 - If logs are large, save them and search around meaningful failures instead of pasting everything.
 - Read logs with fresh eyes; always review surrounding context before drawing conclusions. If the initial pass is inconclusive, surface what you found and ask the user whether to dig deeper into a specific section.
 - If the check is still running, summarize what is active or blocked instead of claiming failure.
-- If log evidence is sparse, check `$workdir/buildkite-annotations.json` — annotations often contain structured test reports. To go further, list build artifacts with `"$BK_CLI" api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/artifacts"`.
+- If log evidence is sparse, check `$workdir/buildkite-annotations.json` — annotations often contain structured test reports. To go further, list build artifacts with `bk api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/artifacts"`.
 - If `bk build view --json` is missing a field you need, use `bk api` instead of guessing.
 
 ## 5. What to return
@@ -158,7 +147,7 @@ Keep the response evidence-based:
 
 ## 6. Edge cases
 
-- **Missing Buildkite CLI or auth**: stop and explain what to install or authenticate.
+- **Missing `bk` CLI or auth**: stop and explain what to install or authenticate.
 - **Non-Buildkite check**: say the selected check is not backed by Buildkite.
 - **Canceled checks**: say whether the job appears user-canceled, superseded, or infra-related if the logs show it.
 - **Pending checks**: summarize queue / running state and name the relevant job if visible.
