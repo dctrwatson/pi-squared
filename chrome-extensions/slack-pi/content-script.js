@@ -3,6 +3,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
   const SCROLL_SETTLE_MS = 120;
   const MAX_SCROLL_STEPS = 240;
+  const PRE_CONTEXT_SCROLL_STEPS = 8;
   const READY_POLL_MS = 250;
   const READY_TIMEOUT_MS = 10_000;
 
@@ -696,29 +697,39 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     let hitLimit = false;
     let authorBeforeStart;
 
+    const isStartBoundary = (message) => {
+      if (cursorTs) {
+        return Boolean(message.messageTs && message.messageTs > cursorTs);
+      }
+      return message.messageTs === startTs;
+    };
+
+    const observeVisibleContext = () => {
+      const visible = extractMessages(mainRoot, composerElement);
+      let boundaryVisible = false;
+      for (const message of visible) {
+        if (isStartBoundary(message)) {
+          boundaryVisible = true;
+          break;
+        }
+        if (message.author) {
+          authorBeforeStart = message.author;
+        }
+      }
+      return boundaryVisible;
+    };
+
     const collectVisible = () => {
       const visible = extractMessages(mainRoot, composerElement);
       for (const message of visible) {
         if (!started) {
-          if (message.author) {
-            authorBeforeStart = message.author;
-          }
-
-          if (cursorTs) {
-            // Exclusive start: collect from the first message strictly after the cursor.
-            if (message.messageTs && message.messageTs > cursorTs) {
-              started = true;
-            } else {
-              continue;
+          if (!isStartBoundary(message)) {
+            if (message.author) {
+              authorBeforeStart = message.author;
             }
-          } else {
-            // Inclusive start: begin at the message matching startTs.
-            if (message.messageTs === startTs) {
-              started = true;
-            } else {
-              continue;
-            }
+            continue;
           }
+          started = true;
         }
 
         const key = makeMessageKey(message);
@@ -737,6 +748,25 @@ if (!globalThis.__slackPiContentScriptLoaded) {
         }
       }
     };
+
+    if (scrollContainer) {
+      let lastContextScrollTop = -1;
+      for (let step = 0; step < PRE_CONTEXT_SCROLL_STEPS; step += 1) {
+        const boundaryVisible = observeVisibleContext();
+        if (authorBeforeStart && boundaryVisible) break;
+
+        const currentTop = scrollContainer.scrollTop;
+        if (currentTop <= 2 || currentTop === lastContextScrollTop) break;
+
+        const stepSize = Math.max(180, Math.floor(scrollContainer.clientHeight * 0.85));
+        const nextTop = Math.max(0, currentTop - stepSize);
+        if (nextTop >= currentTop - 1) break;
+
+        lastContextScrollTop = currentTop;
+        scrollContainer.scrollTop = nextTop;
+        await sleep(SCROLL_SETTLE_MS);
+      }
+    }
 
     collectVisible();
 
