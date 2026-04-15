@@ -640,19 +640,53 @@ async function prepareLoadedTemporarySlackTab(tabId, resolvedUrl) {
   return preparation;
 }
 
-async function openTemporarySlackTab(url) {
+async function captureActiveTabContext() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab || typeof tab.id !== "number") return null;
+  return {
+    tabId: tab.id,
+    windowId: typeof tab.windowId === "number" ? tab.windowId : undefined,
+  };
+}
+
+async function focusTab(tabId, windowId) {
+  if (typeof windowId === "number") {
+    try {
+      await chrome.windows.update(windowId, { focused: true });
+    } catch {
+      // ignore focus errors; tab activation may still succeed.
+    }
+  }
+  await chrome.tabs.update(tabId, { active: true });
+}
+
+async function restoreActiveTabContext(context) {
+  if (!context || typeof context.tabId !== "number") return;
+  try {
+    await focusTab(context.tabId, context.windowId);
+  } catch {
+    // ignore restore errors
+  }
+}
+
+async function openTemporarySlackTab(url, options = {}) {
   const resolvedUrl = await resolveTemporarySlackTabUrl(url);
-  const tab = await chrome.tabs.create({ url: resolvedUrl.url, active: false });
+  const tab = await chrome.tabs.create({ url: resolvedUrl.url, active: Boolean(options.foreground) });
   if (typeof tab.id !== "number") {
     throw new BridgeActionError("invalid_tab", "Could not create a temporary Slack tab.");
+  }
+
+  if (options.foreground) {
+    await focusTab(tab.id, typeof tab.windowId === "number" ? tab.windowId : undefined);
   }
 
   const preparation = await prepareLoadedTemporarySlackTab(tab.id, resolvedUrl);
   return { tabId: tab.id, resolvedUrl, preparation };
 }
 
-async function withTemporarySlackTab(url, handler) {
-  const temporaryTab = await openTemporarySlackTab(url);
+async function withTemporarySlackTab(url, handler, options = {}) {
+  const previousContext = options.foreground ? await captureActiveTabContext() : null;
+  const temporaryTab = await openTemporarySlackTab(url, options);
 
   try {
     return await handler({
@@ -664,6 +698,9 @@ async function withTemporarySlackTab(url, handler) {
       await chrome.tabs.remove(temporaryTab.tabId);
     } catch {
       // ignore cleanup errors
+    }
+    if (options.foreground) {
+      await restoreActiveTabContext(previousContext);
     }
   }
 }
@@ -705,7 +742,7 @@ async function getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cur
       ...payload,
       tempTab: await getCurrentTab(),
     };
-  });
+  }, { foreground: true });
 }
 
 async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages = 500, pageSize = CHANNEL_RANGE_PAGE_SIZE) {
@@ -748,7 +785,7 @@ async function getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMess
       messages: allMessages.slice(0, maxMessages),
       tempTab: await getCurrentTab(),
     };
-  });
+  }, { foreground: true });
 }
 
 async function handleRequestMessage(socket, message) {
