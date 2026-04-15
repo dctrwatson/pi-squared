@@ -4,6 +4,7 @@ Repository for maintaining skills and extensions that I use with [Pi](https://bu
 
 ## Skills
 
+- [**buildkite-pr-check-review**](skills/buildkite-pr-check-review/SKILL.md) — Investigates GitHub PR status checks that map to Buildkite builds/jobs, fetches Buildkite logs with the CLI, and summarizes failures.
 - [**create-pr**](skills/create-pr/SKILL.md) — Creates or drafts a GitHub pull request from the current branch, analyzes changes, cleans up `pi:` auto-commits, and follows repo PR templates.
 
 ## Extensions
