@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -71,7 +73,7 @@ def nested_first_present(obj: dict[str, Any], paths: list[tuple[str, ...]]) -> A
     return None
 
 
-INTERESTING_STATES = {
+INTERESTING_STATES: frozenset[str] = frozenset({
     "failed",
     "failing",
     "broken",
@@ -84,7 +86,7 @@ INTERESTING_STATES = {
     "waiting",
     "blocked",
     "timed_out",
-}
+})
 
 
 def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -152,26 +154,28 @@ def build_identity(build: Any) -> dict[str, Any]:
     }
 
 
+_STATE_SCORES: dict[str, int] = {
+    "failed": 100,
+    "failing": 100,
+    "broken": 95,
+    "timed_out": 92,
+    "running": 80,
+    "assigned": 75,
+    "accepted": 74,
+    "scheduled": 70,
+    "waiting": 65,
+    "blocked": 60,
+    "canceled": 35,
+    "cancelled": 35,
+    "passed": 10,
+    "skipped": 5,
+    "not_run": 0,
+    "unknown": 0,
+}
+
+
 def state_score(state: str) -> int:
-    scores = {
-        "failed": 100,
-        "failing": 100,
-        "broken": 95,
-        "timed_out": 92,
-        "running": 80,
-        "assigned": 75,
-        "accepted": 74,
-        "scheduled": 70,
-        "waiting": 65,
-        "blocked": 60,
-        "canceled": 35,
-        "cancelled": 35,
-        "passed": 10,
-        "skipped": 5,
-        "not_run": 0,
-        "unknown": 0,
-    }
-    return scores.get(state, 0)
+    return _STATE_SCORES.get(state, 0)
 
 
 def type_score(job: dict[str, Any]) -> int:
@@ -263,7 +267,9 @@ def main() -> None:
     status = "ok"
     if not jobs:
         status = "no_jobs_found"
-    elif args.job_id_hint and selected_job and selected_job["id"] != args.job_id_hint:
+    elif args.job_id_hint and selected_job and selected_job["id"] == args.job_id_hint:
+        status = "job_hint_matched"
+    elif args.job_id_hint and (selected_job is None or selected_job["id"] != args.job_id_hint):
         status = "job_hint_not_found"
     elif len(failed_jobs) > 1:
         status = "multiple_failed_jobs"
@@ -285,12 +291,16 @@ def main() -> None:
         "job_id_hint": args.job_id_hint,
         "selection_reason": selection_reason,
         "selected_job": summarize_job(selected_job) if selected_job else None,
-        "other_relevant_jobs": [
-            summarize_job(job)
-            for job in jobs
-            if selected_job is None or job["id"] != selected_job["id"]
-            if job["state"] in INTERESTING_STATES
-        ][:10],
+        "other_relevant_jobs": sorted(
+            [
+                summarize_job(job)
+                for job in jobs
+                if (selected_job is None or job["id"] != selected_job["id"])
+                and job["state"] in INTERESTING_STATES
+            ],
+            key=lambda j: state_score(j["state"]),
+            reverse=True,
+        )[:10],
         "counts": {
             "jobs_found": len(jobs),
             "failed_jobs": len(failed_jobs),

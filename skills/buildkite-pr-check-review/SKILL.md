@@ -1,7 +1,7 @@
 ---
 name: buildkite-pr-check-review
 description: Reviews GitHub PR status checks backed by Buildkite, fetches the relevant Buildkite logs with `bk`, and explains what failed. Use whenever the user asks what failed on a PR, mentions a red CI/status check, wants Buildkite logs, or asks to inspect the checks for the current branch PR.
-compatibility: Requires GitHub CLI (`gh`), Python 3, and a Buildkite CLI command available as `bk` or `buildkite`, with auth for the target GitHub repo and Buildkite org.
+compatibility: Requires GitHub CLI (`gh` 2.40+), Python 3.7+, and a Buildkite CLI command available as `bk` or `buildkite`, with auth for the target GitHub repo and Buildkite org.
 ---
 
 # Buildkite PR Check Review
@@ -10,13 +10,13 @@ Turn a GitHub PR status check into the relevant Buildkite logs, then give the us
 
 ## 1. Verify the environment
 
-Use the current repo by default. Before doing anything else, make sure GitHub and Buildkite access work:
+Use the current repo by default. Before doing anything else, verify GitHub and Buildkite access in a single step:
 
 ```bash
+set -euo pipefail
+
 gh auth status
-```
 
-```bash
 if command -v bk >/dev/null 2>&1; then
   BK_CLI=bk
 elif command -v buildkite >/dev/null 2>&1; then
@@ -25,26 +25,33 @@ else
   echo "Missing Buildkite CLI: expected 'bk' or 'buildkite' on PATH" >&2
   exit 1
 fi
-```
 
-```bash
 "$BK_CLI" auth status
+echo "Environment OK. BK_CLI=$BK_CLI"
 ```
 
-If any of these fail, stop and tell the user exactly what is missing or unauthenticated.
+If any step fails, stop and tell the user exactly what is missing or unauthenticated. Note the `BK_CLI` value — use it in place of `"$BK_CLI"` in all subsequent commands.
 
 ## 2. Resolve the PR and choose the check
 
-For the common case, inspect the PR for the current branch in the current repo.
+For the common case, inspect the PR for the current branch in the current repo. First, create a working directory to avoid file collisions across concurrent runs:
 
 ```bash
-gh pr view [pr_selector] [--repo owner/repo] --json number,title,url,headRefName,headRefOid > /tmp/pr.json
-gh pr checks [pr_selector] [--repo owner/repo] --json name,state,bucket,link,description,workflow,startedAt,completedAt > /tmp/pr-checks.json
+workdir=$(mktemp -d /tmp/bk-review-XXXXXX)
+echo "WORKDIR=$workdir"
+```
+
+Note the printed path and substitute it for `$workdir` in every subsequent command.
+
+```bash
+gh pr view [pr_selector] [--repo owner/repo] --json number,title,url,headRefName,headRefOid > "$workdir/pr.json"
+gh pr checks [pr_selector] [--repo owner/repo] --json name,state,bucket,link,description,workflow,startedAt,completedAt > "$workdir/pr-checks.json"
 ```
 
 - Omit `pr_selector` to use the current branch PR.
 - `pr_selector` can be a PR number, PR URL, or branch name when the user gives one.
 - Treat a check as Buildkite-backed when its `link` points at Buildkite.
+- The `bucket` field in `gh pr checks --json` requires `gh` 2.40+; if the command errors on that field, drop `bucket` from the list.
 
 Choose the check from the GitHub results plus the user's wording:
 
@@ -82,8 +89,11 @@ pipeline_ref="<org>/<pipeline>"
 build_number="<build-number>"
 job_id="<job-id-if-known>"
 
-"$BK_CLI" build view "$build_number" -p "$pipeline_ref" --json > /tmp/buildkite-build.json
-python3 <skill_dir>/scripts/select_buildkite_job.py /tmp/buildkite-build.json ${job_id:+--job-id-hint "$job_id"} > /tmp/buildkite-job-selection.json
+"$BK_CLI" build view "$build_number" -p "$pipeline_ref" --json > "$workdir/buildkite-build.json"
+python3 <skill_dir>/scripts/select_buildkite_job.py "$workdir/buildkite-build.json" ${job_id:+--job-id-hint "$job_id"} > "$workdir/buildkite-job-selection.json"
+
+# Fetch annotations — often contain structured test failure summaries
+"$BK_CLI" api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/annotations" 2>/dev/null > "$workdir/buildkite-annotations.json" || true
 ```
 
 `select_buildkite_job.py` is the default way to choose the job to inspect. It prefers:
@@ -95,22 +105,25 @@ python3 <skill_dir>/scripts/select_buildkite_job.py /tmp/buildkite-build.json ${
 Then fetch logs for the selected job:
 
 ```bash
-"$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > /tmp/buildkite-job.log
+"$BK_CLI" job log "$job_id" -p "$pipeline_ref" -b "$build_number" --no-timestamps > "$workdir/buildkite-job.log"
 ```
 
 Interpret `select_buildkite_job.py` like this:
 
+- `job_hint_matched`: the exact URL-referenced job was found; note its state — if it passed, check `other_relevant_jobs` for the actual failures
 - `failed_job_selected` or `pending_job_selected`: continue with that job
 - `multiple_failed_jobs`: inspect `selected_job` first, but mention the others
 - `job_hint_not_found`: mention that you fell back from the URL-specific job to the closest live job on the build
+- `only_canceled_jobs`: no failed or running jobs; report the canceled state and ask the user if they want to investigate further
 - `no_jobs_found`: fall back to `bk api` or tell the user the build JSON did not include jobs
 
 When reading logs:
 
 - Prefer job logs over whole-build output.
 - If logs are large, save them and search around meaningful failures instead of pasting everything.
-- Look for signals like `error`, `failed`, `exception`, `traceback`, `panic`, `AssertionError`, or `Caused by:`, but always read surrounding context before concluding.
+- Read logs with fresh eyes; always review surrounding context before drawing conclusions. If the initial pass is inconclusive, surface what you found and ask the user whether to dig deeper into a specific section.
 - If the check is still running, summarize what is active or blocked instead of claiming failure.
+- If log evidence is sparse, check `$workdir/buildkite-annotations.json` — annotations often contain structured test reports. To go further, list build artifacts with `"$BK_CLI" api "organizations/<org>/pipelines/<pipeline>/builds/<build_number>/artifacts"`.
 - If `bk build view --json` is missing a field you need, use `bk api` instead of guessing.
 
 ## 5. What to return

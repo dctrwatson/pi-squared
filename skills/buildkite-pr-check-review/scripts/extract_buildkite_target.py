@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import argparse
 import json
 import re
 import sys
 from urllib.parse import urlparse
+
+_BUILDKITE_HOSTS: frozenset[str] = frozenset({"buildkite.com", "app.buildkite.com"})
+_UUID_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_UUID_RE = re.compile(_UUID_PATTERN, re.IGNORECASE)
 
 
 def parse(url: str) -> dict:
@@ -29,17 +35,22 @@ def parse(url: str) -> dict:
         if len(parts) >= 8 and parts[6] == "jobs":
             job_id = parts[7]
 
+    if build_number is not None and not build_number.isdigit():
+        build_number = None
+
     fragment = parsed.fragment or None
     if not job_id and fragment:
-        match = re.fullmatch(r"job-([A-Za-z0-9-]+)", fragment)
+        match = re.fullmatch(r"job-(" + _UUID_PATTERN + r")", fragment, re.IGNORECASE)
         if match:
             job_id = match.group(1)
-        elif re.fullmatch(r"[A-Za-z0-9-]+", fragment):
+        elif _UUID_RE.fullmatch(fragment):
             job_id = fragment
+
+    is_buildkite = host in _BUILDKITE_HOSTS or host.endswith(".buildkite.com")
 
     return {
         "input_url": url,
-        "is_buildkite": "buildkite" in host,
+        "is_buildkite": is_buildkite,
         "host": parsed.netloc,
         "organization": organization,
         "pipeline": pipeline,

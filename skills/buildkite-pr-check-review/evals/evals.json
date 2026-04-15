@@ -18,6 +18,36 @@
       "prompt": "Can you look at the `deploy-staging` check on the PR for my current branch? If it's still pending, tell me what job is running; if it failed, show me the relevant Buildkite log excerpt.",
       "expected_output": "Handles both pending and failed outcomes, reports the active or failed job clearly, and includes only the most relevant log lines.",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "Look at this Buildkite build directly: https://buildkite.com/acme/widgets/builds/9301",
+      "expected_output": "Skips GitHub PR lookup entirely, parses the URL directly with extract_buildkite_target.py, fetches the build with the Buildkite CLI, selects the most relevant job via select_buildkite_job.py, and presents a grounded diagnosis.",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "The `codestyle` check on PR #200 is red but it's a GitHub Actions workflow, not Buildkite.",
+      "expected_output": "Correctly identifies the check is not Buildkite-backed and says so clearly without attempting to fetch Buildkite logs.",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "My PR has two failing Buildkite checks: `unit-tests` and `integration-tests`. Which one should I look at?",
+      "expected_output": "Presents a short numbered list of both failing checks and asks the user which to investigate first, rather than guessing or silently picking one.",
+      "files": []
+    },
+    {
+      "id": 7,
+      "prompt": "The `e2e-tests` check on PR #88 was canceled. Did someone cancel it manually or did something go wrong?",
+      "expected_output": "Fetches the canceled build, reads available log context for the most relevant canceled job, and distinguishes between a user-triggered cancel, a superseded build, and an infrastructure issue — or says the evidence is inconclusive if logs are empty.",
+      "files": []
+    },
+    {
+      "id": 8,
+      "prompt": "I get a permission error when I run `gh pr checks`. What's wrong?",
+      "expected_output": "Surfaces the exact CLI error message, explains the likely cause (e.g., missing GitHub auth or insufficient repo access), and gives the specific remediation command.",
+      "files": []
     }
   ]
 }
