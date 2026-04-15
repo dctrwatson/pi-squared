@@ -56,6 +56,7 @@ Implemented so far:
 Not implemented yet:
 - any browser-side write-back tooling
 - Slack DOM hardening beyond the current heuristic extractor
+- Chrome-side implementation of `nextCursor` in `getChannelRange` responses (required for multi-page summarization to work)
 
 ## Useful commands
 
@@ -63,9 +64,11 @@ Not implemented yet:
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read` — read the active Slack thread and add it to the session as a visible message
-- `/slack-channel-read <start-url> [--next N] [--until <end-url>]` — read a channel range starting from a Slack message link
+- `/slack-channel-read <start-url> [--next N] [--until <end-url>]` — read a bounded channel range starting from a Slack message link
+- `/slack-summarize <start-url> [--until <end-url>] [--max <n>]` — fetch all channel messages from a link (auto-paginating) and inject them for summarization
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
-- ask Pi to use `slack_get_channel_range` — read channel messages from a Slack permalink range
+- ask Pi to use `slack_get_channel_range` — read a bounded range of channel messages from a Slack permalink
+- ask Pi to use `slack_summarize_channel_from` — fetch all channel messages from a permalink and summarize them
 
 ## Prompt behavior
 
