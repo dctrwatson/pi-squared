@@ -465,8 +465,8 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     );
   }
 
-  function backfillMissingAuthors(messages) {
-    let currentAuthor;
+  function backfillMissingAuthors(messages, initialAuthor) {
+    let currentAuthor = initialAuthor;
 
     return messages.map((message) => {
       if (!message) return message;
@@ -694,11 +694,16 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     let started = false;
     let reachedEnd = false;
     let hitLimit = false;
+    let authorBeforeStart;
 
     const collectVisible = () => {
       const visible = extractMessages(mainRoot, composerElement);
       for (const message of visible) {
         if (!started) {
+          if (message.author) {
+            authorBeforeStart = message.author;
+          }
+
           if (cursorTs) {
             // Exclusive start: collect from the first message strictly after the cursor.
             if (message.messageTs && message.messageTs > cursorTs) {
@@ -741,7 +746,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
 
     if (!scrollContainer) {
       return {
-        messages: backfillMissingAuthors([...collected.values()].filter(withinBounds)),
+        messages: backfillMissingAuthors([...collected.values()].filter(withinBounds), authorBeforeStart),
         harvestedViaScroll: false,
         started,
         reachedEnd,
@@ -771,7 +776,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     }
 
     return {
-      messages: backfillMissingAuthors([...collected.values()].filter(withinBounds)),
+      messages: backfillMissingAuthors([...collected.values()].filter(withinBounds), authorBeforeStart),
       harvestedViaScroll: true,
       started,
       reachedEnd,
