@@ -1,8 +1,8 @@
-# Slack Pi Architecture and Implementation Plan
+# Pi Slack Architecture and Implementation Plan
 
 ## Summary
 
-Build a **Slack-aware Pi launcher** named `slack-pi` that loads a repo-local Pi extension on demand, plus a Chrome extension that talks to it over a **local WebSocket**.
+Build a **Slack-aware Pi launcher** named `pi-slack` that loads a repo-local Pi extension on demand, plus a Chrome extension that talks to it over a **local WebSocket**.
 
 This design intentionally avoids:
 - installing a Slack app into the Slack workspace
@@ -12,7 +12,7 @@ This design intentionally avoids:
 
 It assumes the primary workflow is:
 1. Slack is open in a pinned Chrome tab
-2. `slack-pi` is launched when Slack assistance is needed
+2. `pi-slack` is launched when Slack assistance is needed
 3. Pi uses tool calls to read either the current thread or a channel message range starting from a pasted Slack permalink, then produces a revised reply or summary for manual copy/paste back into Slack
 
 ---
@@ -25,7 +25,7 @@ It assumes the primary workflow is:
 - Let Pi use Slack content as context during a normal tool-calling workflow
 - Accept a short or long user draft/note and turn it into a polished Slack reply or concise summary
 - If the Slack composer already contains text, use that draft as additional reply context
-- Keep the integration **opt-in** via a dedicated `slack-pi` launcher
+- Keep the integration **opt-in** via a dedicated `pi-slack` launcher
 - Keep the final reply workflow manual via copy/paste
 
 ### Secondary goals
@@ -51,10 +51,10 @@ It assumes the primary workflow is:
    - Integration must work entirely through the logged-in Slack web app in Chrome.
 
 2. **No always-on bridge daemon**
-   - Pi owns the WebSocket server while `slack-pi` is running.
+   - Pi owns the WebSocket server while `pi-slack` is running.
 
 3. **Single Slack-aware Pi instance**
-   - `slack-pi` is treated as a singleton.
+   - `pi-slack` is treated as a singleton.
    - If another Slack-aware instance is started, it should fail fast or disable Slack tools.
 
 4. **Repo-local, not auto-loaded**
@@ -67,19 +67,19 @@ It assumes the primary workflow is:
 ```text
 pi-squared/
   docs/
-    slack-pi-architecture.md
+    pi-slack-architecture.md
   extensions/
     ...existing auto-loaded extensions...
   skills/
     ...existing skills...
   manual-extensions/
-    slack-pi/
+    pi-slack/
       index.ts
       package.json
       tsconfig.json
       README.md             # setup and local usage
   chrome-extensions/
-    slack-pi/
+    pi-slack/
       manifest.json
       package.json
       background.js
@@ -92,7 +92,7 @@ pi-squared/
 - `extensions/` is already auto-loaded by the root `package.json`
 - `manual-extensions/` is **not** referenced by the root `pi.extensions` manifest
 - the Slack extension can be launched explicitly with `pi -e ...`
-- the Slack Pi pieces can live beside the main package without being auto-loaded
+- the Pi Slack pieces can live beside the main package without being auto-loaded
 - separate local package boundaries keep future Slack-specific dependencies out of the root auto-loaded Pi package
 
 ---
@@ -104,24 +104,24 @@ Use a dedicated shell function or script instead of auto-loading the Slack exten
 Example shape:
 
 ```sh
-slack-pi() {
-  pi --session-dir "$HOME/.pi/agent/sessions/--slack-pi--" \
-    -e ./manual-extensions/slack-pi/index.ts "$@"
+pi-slack() {
+  pi --session-dir "$HOME/.pi/agent/sessions/--pi-slack--" \
+    -e ./manual-extensions/pi-slack/index.ts "$@"
 }
 ```
 
 ### Launcher responsibilities
-- load the Slack Pi extension explicitly
+- load the Pi Slack extension explicitly
 - keep normal `pi` usage untouched
-- force a dedicated Slack Pi subdirectory inside Pi's normal session storage so session storage does not depend on cwd
-- provide a stable mental model: **Slack tools only exist in `slack-pi`**
+- force a dedicated Pi Slack subdirectory inside Pi's normal session storage so session storage does not depend on cwd
+- provide a stable mental model: **Slack tools only exist in `pi-slack`**
 
 ### Singleton enforcement
-The Slack Pi extension should bind a **fixed localhost port**, for example:
+The Pi Slack extension should bind a **fixed localhost port**, for example:
 - `ws://127.0.0.1:27183`
 
 If the port is already in use:
-- report that `slack-pi` is already running
+- report that `pi-slack` is already running
 - fail fast and exit
 
 This is a deliberate design choice so there is exactly one Slack controller.
@@ -151,7 +151,7 @@ This is a deliberate design choice so there is exactly one Slack controller.
             | WebSocket
             v
 +-----------------------+
-| slack-pi Pi Extension |
+| pi-slack Pi Extension |
 | ws://127.0.0.1:27183  |
 +-----------+-----------+
             |
@@ -166,7 +166,7 @@ This is a deliberate design choice so there is exactly one Slack controller.
 
 ## Component design
 
-## 1. Pi extension (`manual-extensions/slack-pi/index.ts`)
+## 1. Pi extension (`manual-extensions/pi-slack/index.ts`)
 
 ### Responsibilities
 - host the local WebSocket server
@@ -285,20 +285,20 @@ Expect selectors to break eventually. Keep them centralized and easy to update.
 ## Why a singleton is acceptable
 This design intentionally treats Slack control as a singleton because:
 - there is one pinned Slack workflow
-- only `slack-pi` should own Slack tools
+- only `pi-slack` should own Slack tools
 - normal `pi` sessions should not compete for the browser
 
 ## Ownership rules
-- `slack-pi` binds a fixed port and becomes the sole Slack controller
+- `pi-slack` binds a fixed port and becomes the sole Slack controller
 - Chrome always attempts to connect to that fixed endpoint
-- if `slack-pi` is not running, Chrome reports **offline**
+- if `pi-slack` is not running, Chrome reports **offline**
 - normal `pi` sessions are unaffected because they do not load the Slack extension
 
 ## Expected behavior when Pi is not running
 - Chrome extension remains installed and idle
 - background worker attempts reconnect with backoff
 - any popup/status UI shows `Pi offline`
-- no tool-driven behavior is available until `slack-pi` starts
+- no tool-driven behavior is available until `pi-slack` starts
 
 This is acceptable because the chosen UX is explicitly **Pi-only**, not always-on.
 
@@ -360,7 +360,7 @@ Use a simple JSON request/response protocol with explicit IDs.
   "role": "pi",
   "version": 1,
   "payload": {
-    "instance": "slack-pi",
+    "instance": "pi-slack",
     "protocolVersion": 1
   }
 }
@@ -487,7 +487,7 @@ For long threads:
 ## Tool UX design
 
 ## Typical user flow
-1. Launch `slack-pi`
+1. Launch `pi-slack`
 2. Open or focus the Slack thread in Chrome
 3. Optionally start a rough draft in the Slack composer
 4. Ask Pi something like:
@@ -519,7 +519,7 @@ Use a long-lived shared secret stored locally.
 
 ### Proposed setup
 - secret stored outside the repo, for example in a user config file
-- `slack-pi` reads it at startup and creates it on first run if missing
+- `pi-slack` reads it at startup and creates it on first run if missing
 - Chrome extension gets the value once through the popup setup flow
 - Chrome extension stores the same value in extension local storage/options after setup
 
@@ -540,7 +540,7 @@ Use a long-lived shared secret stored locally.
 Chrome shows disconnected/offline.
 
 ### Recovery
-Start `slack-pi`; Chrome reconnects automatically.
+Start `pi-slack`; Chrome reconnects automatically.
 
 ## Chrome not connected
 ### Symptom
@@ -565,7 +565,7 @@ Update the centralized DOM adapter selectors in the Chrome extension.
 
 ## Port already in use
 ### Symptom
-A second `slack-pi` instance starts.
+A second `pi-slack` instance starts.
 
 ### Recovery
 Fail fast with a clear singleton message.
@@ -578,7 +578,7 @@ Fail fast with a clear singleton message.
 - WebSocket URL: `ws://127.0.0.1:27183`
 - protocol version: `1`
 - single active Slack controller: yes
-- dedicated session directory via `--session-dir "$HOME/.pi/agent/sessions/--slack-pi--"` in the launcher
+- dedicated session directory via `--session-dir "$HOME/.pi/agent/sessions/--pi-slack--"` in the launcher
 
 ## Configurable values later if needed
 - port
@@ -594,10 +594,10 @@ Fail fast with a clear singleton message.
 **Goal:** create the structure without affecting current package loading.
 
 ### Tasks
-- create `manual-extensions/slack-pi/`
-- create `chrome-extensions/slack-pi/`
+- create `manual-extensions/pi-slack/`
+- create `chrome-extensions/pi-slack/`
 - add local README/setup notes
-- create separate local package boundaries for Slack Pi code
+- create separate local package boundaries for Pi Slack code
 - keep root typechecking wired through `npm run check`
 
 ### Deliverable
@@ -606,7 +606,7 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 ---
 
 ## Phase 1: Pi-side connection skeleton
-**Goal:** make `slack-pi` launchable and expose connection status.
+**Goal:** make `pi-slack` launchable and expose connection status.
 
 ### Tasks
 - implement Pi extension entrypoint
@@ -617,8 +617,8 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 - add `/slack-status` and `/slack-ping`
 
 ### Acceptance criteria
-- `slack-pi` starts cleanly
-- second `slack-pi` instance fails clearly
+- `pi-slack` starts cleanly
+- second `pi-slack` instance fails clearly
 - `/slack-status` reports disconnected/connected accurately
 - Chrome can authenticate and complete handshake
 
@@ -684,7 +684,7 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 ## Suggested MVP scope
 
 The MVP should include only:
-- `slack-pi` launcher
+- `pi-slack` launcher
 - fixed-port singleton WebSocket server
 - Chrome extension with reconnect logic
 - minimal Chrome popup for status/setup/testing
@@ -703,11 +703,11 @@ Everything else is optional.
 ## Manual test cases
 
 ### Connection
-- start `slack-pi`
+- start `pi-slack`
 - verify Chrome connects
-- close `slack-pi`
+- close `pi-slack`
 - verify Chrome reports offline
-- attempt second `slack-pi` launch and verify singleton enforcement
+- attempt second `pi-slack` launch and verify singleton enforcement
 
 ### Read thread
 - open thread in Slack
@@ -748,7 +748,7 @@ Everything else is optional.
 
 4. **Token/setup UX**
    - Use a one-time setup flow.
-   - `slack-pi` creates or reads a local shared secret.
+   - `pi-slack` creates or reads a local shared secret.
    - The Chrome popup accepts that secret once and stores it locally.
 
 5. **Popup UI**
@@ -764,15 +764,15 @@ Everything else is optional.
    - The user always presses send manually in the Slack UI.
 
 8. **Singleton behavior**
-   - If the fixed port is already in use, the second `slack-pi` instance fails fast and exits.
+   - If the fixed port is already in use, the second `pi-slack` instance fails fast and exits.
 
 ---
 
 ## Recommended next steps
 
 1. Create the directories under:
-   - `manual-extensions/slack-pi/`
-   - `chrome-extensions/slack-pi/`
+   - `manual-extensions/pi-slack/`
+   - `chrome-extensions/pi-slack/`
 2. Implement **Phase 1** and **Phase 2** only
 3. Prove the WebSocket handshake and singleton behavior
 4. Then build `slack_get_current_thread` before any write action

@@ -1,6 +1,6 @@
-# Slack Pi Chrome extension
+# Pi Slack Chrome extension
 
-Scaffold for the local Chrome side of the Slack Pi integration.
+Scaffold for the local Chrome side of the Pi Slack integration.
 
 This directory also has its own lightweight `package.json` so any future browser-side tooling or dependencies stay isolated from the root package.
 
@@ -32,6 +32,6 @@ Not implemented yet:
 1. Open `chrome://extensions`
 2. Enable **Developer mode**
 3. Choose **Load unpacked**
-4. Select `chrome-extensions/slack-pi`
+4. Select `chrome-extensions/pi-slack`
 
-See `docs/slack-pi-architecture.md` for the implementation plan.
+See `docs/pi-slack-architecture.md` for the implementation plan.

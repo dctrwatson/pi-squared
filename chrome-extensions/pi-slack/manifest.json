@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Slack Pi (Scaffold)",
+  "name": "Pi Slack (Scaffold)",
   "version": "0.0.1",
-  "description": "Scaffold for the local Slack Pi Chrome bridge.",
+  "description": "Scaffold for the local Pi Slack Chrome bridge.",
   "permissions": [
     "storage",
     "tabs",
@@ -29,7 +29,7 @@
     }
   ],
   "action": {
-    "default_title": "Slack Pi",
+    "default_title": "Pi Slack",
     "default_popup": "popup.html"
   }
 }

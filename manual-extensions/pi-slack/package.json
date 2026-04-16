@@ -1,8 +1,8 @@
 {
-  "name": "slack-pi-extension",
+  "name": "pi-slack-extension",
   "private": true,
   "version": "0.0.1",
-  "description": "Repo-local Slack Pi extension package",
+  "description": "Repo-local Pi Slack extension package",
   "type": "module",
   "scripts": {
     "check": "node ../../node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",

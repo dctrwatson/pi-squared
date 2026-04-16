@@ -1,6 +1,6 @@
-# slack-pi
+# pi-slack
 
-Scaffold for the repo-local Slack Pi extension.
+Scaffold for the repo-local Pi Slack extension.
 
 This directory is its **own package** so future Slack-specific dependencies can live here instead of in the root auto-loaded Pi package.
 
@@ -12,25 +12,25 @@ It is meant to be launched explicitly.
 Recommended launcher script:
 
 ```sh
-./bin/slack-pi
+./bin/pi-slack
 ```
 
 You can symlink that into a directory on your `PATH`, for example:
 
 ```sh
-ln -sf "$(pwd)/bin/slack-pi" "$HOME/bin/slack-pi"
+ln -sf "$(pwd)/bin/pi-slack" "$HOME/bin/pi-slack"
 ```
 
-The launcher forces a dedicated session directory under Pi's normal session storage so Slack Pi sessions do not depend on the current working directory:
+The launcher forces a dedicated session directory under Pi's normal session storage so Pi Slack sessions do not depend on the current working directory:
 
 ```sh
-$HOME/.pi/agent/sessions/--slack-pi--
+$HOME/.pi/agent/sessions/--pi-slack--
 ```
 
 Override it with:
 
 ```sh
-SLACK_PI_SESSION_DIR=/path/to/sessions slack-pi
+PI_SLACK_SESSION_DIR=/path/to/sessions pi-slack
 ```
 
 ## Current state
@@ -73,8 +73,8 @@ Not implemented yet:
 
 ## Prompt behavior
 
-When launched via `slack-pi`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for concise, accurate SRE/BOFH-style communication.
+When launched via `pi-slack`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for concise, accurate SRE/BOFH-style communication.
 
-The launcher also pins session storage to a dedicated Slack Pi subdirectory inside Pi's normal session storage, so normal project cwd-based session partitioning does not apply.
+The launcher also pins session storage to a dedicated Pi Slack subdirectory inside Pi's normal session storage, so normal project cwd-based session partitioning does not apply.
 
-See `docs/slack-pi-architecture.md` for the implementation plan.
+See `docs/pi-slack-architecture.md` for the implementation plan.

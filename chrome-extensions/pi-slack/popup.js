@@ -50,13 +50,13 @@ function formatStatus(status) {
 }
 
 async function refreshStatus() {
-  const status = await chrome.runtime.sendMessage({ type: "slack-pi:get-status" });
+  const status = await chrome.runtime.sendMessage({ type: "pi-slack:get-status" });
   setStatusText(formatStatus(status));
 }
 
 saveTokenButton.addEventListener("click", async () => {
   await chrome.runtime.sendMessage({
-    type: "slack-pi:set-token",
+    type: "pi-slack:set-token",
     token: tokenEl.value,
   });
   setTestResult("Token saved.");
@@ -65,13 +65,13 @@ saveTokenButton.addEventListener("click", async () => {
 
 resetTokenButton.addEventListener("click", async () => {
   tokenEl.value = "";
-  await chrome.runtime.sendMessage({ type: "slack-pi:reset-token" });
+  await chrome.runtime.sendMessage({ type: "pi-slack:reset-token" });
   setTestResult("Token cleared.");
   await refreshStatus();
 });
 
 testConnectionButton.addEventListener("click", async () => {
-  const result = await chrome.runtime.sendMessage({ type: "slack-pi:test-connection" });
+  const result = await chrome.runtime.sendMessage({ type: "pi-slack:test-connection" });
   setTestResult(result.message || (result.ok ? "Connected." : "Not connected."));
 });
 

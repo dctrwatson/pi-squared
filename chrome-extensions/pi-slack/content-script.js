@@ -1,5 +1,5 @@
-if (!globalThis.__slackPiContentScriptLoaded) {
-  globalThis.__slackPiContentScriptLoaded = true;
+if (!globalThis.__piSlackContentScriptLoaded) {
+  globalThis.__piSlackContentScriptLoaded = true;
 
   const SCROLL_SETTLE_MS = 120;
   const MAX_SCROLL_STEPS = 240;
@@ -1058,7 +1058,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return undefined;
 
-    if (message.type === "slack-pi:content-ping") {
+    if (message.type === "pi-slack:content-ping") {
       sendResponse({
         ok: true,
         title: document.title,
@@ -1067,7 +1067,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       return undefined;
     }
 
-    if (message.type === "slack-pi:get-current-thread") {
+    if (message.type === "pi-slack:get-current-thread") {
       void buildThreadSnapshot()
         .then((result) => sendResponse(result))
         .catch((error) => {
@@ -1082,7 +1082,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       return true;
     }
 
-    if (message.type === "slack-pi:prepare-channel-range-page") {
+    if (message.type === "pi-slack:prepare-channel-range-page") {
       void prepareChannelRangePage()
         .then((result) => sendResponse(result))
         .catch((error) => {
@@ -1097,7 +1097,7 @@ if (!globalThis.__slackPiContentScriptLoaded) {
       return true;
     }
 
-    if (message.type === "slack-pi:get-channel-range") {
+    if (message.type === "pi-slack:get-channel-range") {
       void buildChannelRangeSnapshot(message.startUrl, message.endUrl, message.limit, message.cursor, message.seedAuthor)
         .then((result) => sendResponse(result))
         .catch((error) => {
@@ -1115,12 +1115,12 @@ if (!globalThis.__slackPiContentScriptLoaded) {
     return undefined;
   });
 
-  console.debug("[slack-pi] content script loaded", {
+  console.debug("[pi-slack] content script loaded", {
     title: document.title,
     url: window.location.href,
   });
 } else {
-  console.debug("[slack-pi] content script already loaded", {
+  console.debug("[pi-slack] content script already loaded", {
     title: document.title,
     url: window.location.href,
   });

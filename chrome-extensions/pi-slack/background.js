@@ -1,6 +1,6 @@
-const SLACK_PI_PORT = 27183;
-const SLACK_PI_WS_URL = `ws://127.0.0.1:${SLACK_PI_PORT}`;
-const TOKEN_KEY = "slackPiToken";
+const PI_SLACK_PORT = 27183;
+const PI_SLACK_WS_URL = `ws://127.0.0.1:${PI_SLACK_PORT}`;
+const TOKEN_KEY = "piSlackToken";
 const PROTOCOL_VERSION = 1;
 const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
@@ -26,7 +26,7 @@ const state = {
 };
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("[slack-pi] background installed");
+  console.log("[pi-slack] background installed");
   void updateActionAppearance();
   void ensureConnected();
 });
@@ -45,27 +45,27 @@ function getAppearanceState() {
   if (state.authenticated && state.connected) {
     return {
       color: "#22c55e",
-      title: "Slack Pi: connected",
+      title: "Pi Slack: connected",
     };
   }
 
   if (state.socketState === "connecting" || state.socketState === "open") {
     return {
       color: "#6b7280",
-      title: "Slack Pi: connecting",
+      title: "Pi Slack: connecting",
     };
   }
 
   if (state.lastError) {
     return {
       color: "#ef4444",
-      title: `Slack Pi: ${state.lastError}`,
+      title: `Pi Slack: ${state.lastError}`,
     };
   }
 
   return {
     color: "#6b7280",
-    title: "Slack Pi: idle",
+    title: "Pi Slack: idle",
   };
 }
 
@@ -138,7 +138,7 @@ async function updateActionAppearance() {
       await chrome.action.setIcon({ imageData });
     }
   } catch (error) {
-    console.warn("[slack-pi] failed to update action appearance", error);
+    console.warn("[pi-slack] failed to update action appearance", error);
   }
 }
 
@@ -429,7 +429,7 @@ function isReceivingEndMissing(error) {
 
 async function ensureContentScriptLoaded(tabId) {
   try {
-    const probe = await chrome.tabs.sendMessage(tabId, { type: "slack-pi:content-ping" });
+    const probe = await chrome.tabs.sendMessage(tabId, { type: "pi-slack:content-ping" });
     if (probe && typeof probe === "object") return;
   } catch (error) {
     if (!isReceivingEndMissing(error)) {
@@ -507,7 +507,7 @@ async function sendMessageToTab(tabId, message) {
       "content_script_unavailable",
       error instanceof Error
         ? error.message
-        : "The Slack Pi content script could not be loaded into the target Slack tab.",
+        : "The Pi Slack content script could not be loaded into the target Slack tab.",
     );
   }
 
@@ -519,14 +519,14 @@ async function sendMessageToTab(tabId, message) {
       "content_script_unavailable",
       error instanceof Error
         ? error.message
-        : "The Slack Pi content script is not available in the target Slack tab.",
+        : "The Pi Slack content script is not available in the target Slack tab.",
     );
   }
 
   if (!response || typeof response !== "object") {
     throw new BridgeActionError(
       "content_script_invalid_response",
-      "The Slack Pi content script returned an invalid response.",
+      "The Pi Slack content script returned an invalid response.",
     );
   }
 
@@ -583,7 +583,7 @@ async function prepareTemporarySlackTab(tabId, maxAttempts = 4) {
   let lastPreparePayload = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const prepare = await sendMessageToTab(tabId, { type: "slack-pi:prepare-channel-range-page" });
+    const prepare = await sendMessageToTab(tabId, { type: "pi-slack:prepare-channel-range-page" });
     if (!prepare || typeof prepare !== "object") {
       return { prepared: false, lastPreparePayload };
     }
@@ -626,7 +626,7 @@ async function resolveTemporarySlackTabUrl(url) {
 
   const resolvedUrl = await resolveSlackWebMessageUrl(url);
   if (!resolvedUrl.rewritten) {
-    console.warn("[slack-pi] could not rewrite Slack message URL to a browser-safe web client URL", resolvedUrl);
+    console.warn("[pi-slack] could not rewrite Slack message URL to a browser-safe web client URL", resolvedUrl);
     if (resolvedUrl.reason === "missing_team_id") {
       throw new BridgeActionError(
         "missing_team_id",
@@ -642,7 +642,7 @@ async function prepareLoadedTemporarySlackTab(tabId, resolvedUrl) {
   await waitForTabComplete(tabId);
   const preparation = await prepareTemporarySlackTab(tabId);
   if (!preparation.prepared) {
-    console.warn("[slack-pi] temporary Slack tab was not fully prepared", {
+    console.warn("[pi-slack] temporary Slack tab was not fully prepared", {
       prepare: preparation.lastPreparePayload,
       resolvedUrl,
     });
@@ -718,7 +718,7 @@ async function withTemporarySlackTab(url, handler, options = {}) {
 
 async function readChannelRangePageFromTemporarySlackTab(tabId, { startUrl, endUrl, limit, cursor, seedAuthor }) {
   const page = await sendMessageToTab(tabId, {
-    type: "slack-pi:get-channel-range",
+    type: "pi-slack:get-channel-range",
     startUrl,
     endUrl,
     limit,
@@ -826,7 +826,7 @@ async function readThreadSnapshotFromTemporarySlackTab(tabId, threadUrl) {
   await chrome.tabs.update(tabId, { url: resolvedUrl.url });
   await waitForTabComplete(tabId);
 
-  const thread = await sendMessageToTab(tabId, { type: "slack-pi:get-current-thread" });
+  const thread = await sendMessageToTab(tabId, { type: "pi-slack:get-current-thread" });
   if (!thread.ok) {
     throw new BridgeActionError(
       thread.error?.code || "thread_read_failed",
@@ -874,7 +874,7 @@ async function expandThreadsOnChannelMessages(tabId, messages, options = {}) {
       remainingReplies = Math.max(0, remainingReplies - capturedReplies);
       expandedThreadCount += 1;
     } catch (error) {
-      console.warn("[slack-pi] failed to expand thread while summarizing channel", {
+      console.warn("[pi-slack] failed to expand thread while summarizing channel", {
         error: error instanceof Error ? error.message : String(error),
         threadUrl,
       });
@@ -968,7 +968,7 @@ async function handleRequestMessage(socket, message) {
     }
 
     if (message.action === "getCurrentThread") {
-      const result = await sendMessageToActiveSlackTab({ type: "slack-pi:get-current-thread" });
+      const result = await sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" });
       if (!result.response.ok) {
         sendSocketResponse(socket, message.id, {
           ok: false,
@@ -1048,7 +1048,7 @@ function handleSocketMessage(socket, event) {
   try {
     parsed = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
   } catch {
-    state.lastError = "Received invalid JSON from slack-pi.";
+    state.lastError = "Received invalid JSON from pi-slack.";
     return;
   }
 
@@ -1105,11 +1105,11 @@ async function ensureConnected() {
 
   let socket;
   try {
-    socket = new WebSocket(SLACK_PI_WS_URL);
+    socket = new WebSocket(PI_SLACK_WS_URL);
   } catch (error) {
     state.socketState = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
-    console.error("[slack-pi] failed to create WebSocket", error);
+    console.error("[pi-slack] failed to create WebSocket", error);
     void updateActionAppearance();
     void scheduleReconnect();
     return false;
@@ -1137,7 +1137,7 @@ async function ensureConnected() {
   });
 
   socket.addEventListener("error", () => {
-    state.lastError = "WebSocket error while talking to slack-pi.";
+    state.lastError = "WebSocket error while talking to pi-slack.";
     void updateActionAppearance();
   });
 
@@ -1166,7 +1166,7 @@ async function getStatus() {
     connected: state.connected,
     authenticated: state.authenticated,
     socketState: state.socketState,
-    wsUrl: SLACK_PI_WS_URL,
+    wsUrl: PI_SLACK_WS_URL,
     hasToken: token.length > 0,
     slackTabCount: tabs.count,
     activeTab: tabs.activeTab,
@@ -1189,12 +1189,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return undefined;
 
-  if (message.type === "slack-pi:get-status") {
+  if (message.type === "pi-slack:get-status") {
     getStatus().then(sendResponse);
     return true;
   }
 
-  if (message.type === "slack-pi:set-token") {
+  if (message.type === "pi-slack:set-token") {
     const token = typeof message.token === "string" ? message.token.trim() : "";
     chrome.storage.local.set({ [TOKEN_KEY]: token }).then(async () => {
       await ensureConnected();
@@ -1203,7 +1203,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "slack-pi:reset-token") {
+  if (message.type === "pi-slack:reset-token") {
     chrome.storage.local.remove(TOKEN_KEY).then(() => {
       clearReconnectTimer();
       closeSocket();
@@ -1214,14 +1214,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "slack-pi:test-connection") {
+  if (message.type === "pi-slack:test-connection") {
     getStatus().then((status) => {
       sendResponse({
         ok: status.connected,
         message: status.connected
-          ? "Connected to slack-pi."
-          : status.lastError || "Not connected to slack-pi yet.",
-        wsUrl: SLACK_PI_WS_URL,
+          ? "Connected to pi-slack."
+          : status.lastError || "Not connected to pi-slack yet.",
+        wsUrl: PI_SLACK_WS_URL,
       });
     });
     return true;

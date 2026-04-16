@@ -16,7 +16,7 @@ const THREAD_REQUEST_TIMEOUT_MS = 20_000;
 const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000;
 const CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS = 180_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
-const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "slack-pi", "token");
+const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "pi-slack", "token");
 
 type BridgeLifecycle = "stopped" | "starting" | "listening" | "error";
 
@@ -35,7 +35,7 @@ interface HelloAckMessage {
 	role: "pi";
 	version: number;
 	payload: {
-		instance: "slack-pi";
+		instance: "pi-slack";
 		protocolVersion: number;
 	};
 }
@@ -154,7 +154,7 @@ const state: BridgeState = {
 let startupPromise: Promise<void> | undefined;
 
 function resolvePort(): number {
-	const raw = process.env.SLACK_PI_PORT;
+	const raw = process.env.PI_SLACK_PORT;
 	if (!raw) return DEFAULT_PORT;
 	const parsed = Number.parseInt(raw, 10);
 	if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) return DEFAULT_PORT;
@@ -162,7 +162,7 @@ function resolvePort(): number {
 }
 
 function resolveTokenFile(): string {
-	const configured = process.env.SLACK_PI_TOKEN_FILE?.trim();
+	const configured = process.env.PI_SLACK_TOKEN_FILE?.trim();
 	return configured ? configured : DEFAULT_TOKEN_FILE;
 }
 
@@ -273,7 +273,7 @@ function connectionSummary(): string {
 
 function formatStatus(showToken: boolean): string {
 	const lines = [
-		`Slack Pi bridge: ${state.lifecycle}`,
+		`Pi Slack bridge: ${state.lifecycle}`,
 		`Endpoint: ${state.wsUrl}`,
 		`Token file: ${state.tokenFile}`,
 		`Token: ${showToken ? state.token : maskToken(state.token)}`,
@@ -307,7 +307,7 @@ function formatStatus(showToken: boolean): string {
 
 function buildSlackSystemPrompt(): string {
 	return [
-		"You are Slack Pi, a communications assistant for a distinguished SRE / BOFH.",
+		"You are Pi Slack, a communications assistant for a distinguished SRE / BOFH.",
 		"",
 		"Role:",
 		"- This is not a coding session.",
@@ -962,7 +962,7 @@ function handleHello(socket: WebSocket, raw: RawData, remoteAddress?: string): v
 		role: "pi",
 		version: PROTOCOL_VERSION,
 		payload: {
-			instance: "slack-pi",
+			instance: "pi-slack",
 			protocolVersion: PROTOCOL_VERSION,
 		},
 	};
@@ -1038,10 +1038,10 @@ async function startBridge(): Promise<void> {
 }
 
 async function stopBridge(): Promise<void> {
-	rejectAllPending("Slack Pi bridge is shutting down.");
+	rejectAllPending("Pi Slack bridge is shutting down.");
 
 	if (state.activeChrome) {
-		closeSocket(state.activeChrome.socket, 1001, "Slack Pi shutting down");
+		closeSocket(state.activeChrome.socket, 1001, "Pi Slack shutting down");
 		state.activeChrome = undefined;
 	}
 
@@ -1128,16 +1128,16 @@ async function readSlackChannelRangeAll(
 
 function startupFailureMessage(): string {
 	if (state.startupError?.includes("EADDRINUSE")) {
-		return `Slack Pi could not start because ${state.wsUrl} is already in use. Another slack-pi instance is probably running.`;
+		return `Pi Slack could not start because ${state.wsUrl} is already in use. Another pi-slack instance is probably running.`;
 	}
-	return `Slack Pi failed to start: ${state.startupError ?? "unknown error"}`;
+	return `Pi Slack failed to start: ${state.startupError ?? "unknown error"}`;
 }
 
 function writeStatus(message: string): void {
 	console.log(message);
 }
 
-export default function slackPi(pi: ExtensionAPI) {
+export default function piSlack(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async () => {
 		return {
 			systemPrompt: buildSlackSystemPrompt(),
@@ -1160,7 +1160,7 @@ export default function slackPi(pi: ExtensionAPI) {
 
 		pi.setActiveTools(["slack_get_current_thread", "slack_get_channel_range", "slack_summarize_channel_from"]);
 		if (!pi.getSessionName()) {
-			pi.setSessionName("Slack Pi");
+			pi.setSessionName("Pi Slack");
 		}
 
 		if (!ctx.hasUI) return;
@@ -1168,7 +1168,7 @@ export default function slackPi(pi: ExtensionAPI) {
 		const tokenNote = state.tokenCreated
 			? ` New shared secret created at ${state.tokenFile}. Run /slack-status --show-token to reveal it for Chrome setup.`
 			: "";
-		ctx.ui.notify(`Slack Pi bridge listening on ${state.wsUrl}.${tokenNote}`, "info");
+		ctx.ui.notify(`Pi Slack bridge listening on ${state.wsUrl}.${tokenNote}`, "info");
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1412,7 +1412,7 @@ export default function slackPi(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-status", {
-		description: "Show Slack Pi bridge status (use --show-token to reveal the shared secret)",
+		description: "Show Pi Slack bridge status (use --show-token to reveal the shared secret)",
 		handler: async (args, ctx) => {
 			try {
 				await ensureBridgeStarted();
@@ -1437,7 +1437,7 @@ export default function slackPi(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-ping", {
-		description: "Ping the connected Chrome extension over the local Slack Pi bridge",
+		description: "Ping the connected Chrome extension over the local Pi Slack bridge",
 		handler: async (_args, ctx) => {
 			try {
 				await ensureBridgeStarted();
@@ -1452,7 +1452,7 @@ export default function slackPi(pi: ExtensionAPI) {
 			}
 
 			if (!state.activeChrome) {
-				const message = "Chrome extension is not connected yet. Load the Slack Pi Chrome extension, configure the shared secret, and try again.";
+				const message = "Chrome extension is not connected yet. Load the Pi Slack Chrome extension, configure the shared secret, and try again.";
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "warning");
 				} else {
@@ -1475,14 +1475,14 @@ export default function slackPi(pi: ExtensionAPI) {
 					details = ` Chrome time: ${response.payload.now}`;
 				}
 
-				const message = `Slack Pi ping succeeded in ${state.lastPingRoundTripMs}ms.${details}`;
+				const message = `Pi Slack ping succeeded in ${state.lastPingRoundTripMs}ms.${details}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "info");
 				} else {
 					writeStatus(message);
 				}
 			} catch (error) {
-				const message = `Slack Pi ping failed: ${error instanceof Error ? error.message : String(error)}`;
+				const message = `Pi Slack ping failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "error");
 				} else {

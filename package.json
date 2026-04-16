@@ -23,10 +23,10 @@
     ]
   },
   "scripts": {
-    "check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/slack-pi/tsconfig.json",
+    "check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/pi-slack/tsconfig.json",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "check:slack-pi": "node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/slack-pi/tsconfig.json"
+    "check:pi-slack": "node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/pi-slack/tsconfig.json"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

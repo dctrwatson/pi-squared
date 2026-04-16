@@ -14,23 +14,23 @@ done
 
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
-EXTENSION_PATH="$REPO_ROOT/manual-extensions/slack-pi/index.ts"
-EXTENSION_PACKAGE_DIR="$REPO_ROOT/manual-extensions/slack-pi"
+EXTENSION_PATH="$REPO_ROOT/manual-extensions/pi-slack/index.ts"
+EXTENSION_PACKAGE_DIR="$REPO_ROOT/manual-extensions/pi-slack"
 PI_AGENT_DIR_DEFAULT="$HOME/.pi/agent"
-SESSION_DIR="${SLACK_PI_SESSION_DIR:-$PI_AGENT_DIR_DEFAULT/sessions/--slack-pi--}"
+SESSION_DIR="${PI_SLACK_SESSION_DIR:-$PI_AGENT_DIR_DEFAULT/sessions/--pi-slack--}"
 
 if ! command -v pi >/dev/null 2>&1; then
-  echo "slack-pi: 'pi' is not installed or not on PATH" >&2
+  echo "pi-slack: 'pi' is not installed or not on PATH" >&2
   exit 127
 fi
 
 if [ ! -f "$EXTENSION_PATH" ]; then
-  echo "slack-pi: extension not found: $EXTENSION_PATH" >&2
+  echo "pi-slack: extension not found: $EXTENSION_PATH" >&2
   exit 1
 fi
 
 if [ ! -d "$EXTENSION_PACKAGE_DIR/node_modules" ]; then
-  echo "slack-pi: missing dependencies in $EXTENSION_PACKAGE_DIR/node_modules" >&2
+  echo "pi-slack: missing dependencies in $EXTENSION_PACKAGE_DIR/node_modules" >&2
   echo "Run: (cd '$EXTENSION_PACKAGE_DIR' && npm install)" >&2
   exit 1
 fi
