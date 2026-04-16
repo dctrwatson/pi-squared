@@ -1,784 +1,569 @@
-# Pi Slack Architecture and Implementation Plan
+# Pi Slack Architecture
 
-## Summary
+## Overview
 
-Build a **Slack-aware Pi launcher** named `pi-slack` that loads a repo-local Pi extension on demand, plus a Chrome extension that talks to it over a **local WebSocket**.
+`pi-slack` is a repo-local Slack assistant built from two cooperating pieces:
 
-This design intentionally avoids:
-- installing a Slack app into the Slack workspace
-- auto-loading Slack integration into every normal Pi session
-- a separate always-on local daemon
-- multi-instance ambiguity
+- a dedicated Pi extension at `manual-extensions/pi-slack`
+- a Chrome extension at `chrome-extensions/pi-slack`
 
-It assumes the primary workflow is:
-1. Slack is open in a pinned Chrome tab
-2. `pi-slack` is launched when Slack assistance is needed
-3. Pi uses tool calls to read either the current thread or a channel message range starting from a pasted Slack permalink, then produces a revised reply or summary for manual copy/paste back into Slack
+The integration is intentionally opt-in. Normal `pi` sessions do not load any Slack tooling. Slack support only exists when the user launches Pi through `bin/pi-slack`.
 
----
+The system is read-only with respect to Slack itself. It reads Slack threads and channel message ranges from the Slack web UI, feeds normalized text into Pi, and lets Pi draft replies or summaries for manual copy/paste.
 
-## Goals
+## What exists today
 
-### Primary goals
-- Read the **currently open Slack thread** from Chrome
-- Read a **channel message range** starting from a pasted Slack message permalink
-- Let Pi use Slack content as context during a normal tool-calling workflow
-- Accept a short or long user draft/note and turn it into a polished Slack reply or concise summary
-- If the Slack composer already contains text, use that draft as additional reply context
-- Keep the integration **opt-in** via a dedicated `pi-slack` launcher
-- Keep the final reply workflow manual via copy/paste
+The current implementation provides:
 
-### Secondary goals
-- Keep implementation local-only and personal-workflow-friendly
-- Keep normal `pi` sessions unaffected
-- Store all source in this repo without making the Slack extension auto-load as part of the package
-- Make failure modes clear and predictable
+- a dedicated `pi-slack` launcher with a fixed session directory
+- a singleton local WebSocket bridge on `127.0.0.1:27183` by default
+- shared-secret authentication between Pi and Chrome
+- a Slack-specific Pi system prompt and restricted tool set
+- `slack_read_thread` for the currently open Slack thread
+- `slack_read_channel` for channel reads starting from a Slack permalink
+- paginated channel summarization with optional thread expansion
+- Chrome popup status and token setup
+- DOM-based extraction of Slack threads, composer draft text, and channel message ranges
 
-### Non-goals
-- No Slack workspace app or OAuth install
-- No background processing when Pi is closed
-- No support for autonomous bot behavior
-- No attempt to read messages outside the currently accessible Slack web UI
-- No multi-controller coordination between several Pi instances
-- No Pi-driven final send action; the user always clicks send in Slack manually
-- No Pi-driven composer insertion in the MVP; the user copy/pastes manually
+The current implementation does **not** provide:
 
----
+- browser-side message insertion
+- automatic sending in Slack
+- a workspace-installed Slack app
+- a standalone always-on daemon
 
-## Key constraints
-
-1. **No Slack workspace installation**
-   - Integration must work entirely through the logged-in Slack web app in Chrome.
-
-2. **No always-on bridge daemon**
-   - Pi owns the WebSocket server while `pi-slack` is running.
-
-3. **Single Slack-aware Pi instance**
-   - `pi-slack` is treated as a singleton.
-   - If another Slack-aware instance is started, it should fail fast or disable Slack tools.
-
-4. **Repo-local, not auto-loaded**
-   - The Slack extension must live in this repo, but outside the root package manifest paths so it is not auto-discovered.
-
----
-
-## Proposed repository layout
+## Repository layout
 
 ```text
 pi-squared/
+  bin/
+    pi-slack
   docs/
     pi-slack-architecture.md
-  extensions/
-    ...existing auto-loaded extensions...
-  skills/
-    ...existing skills...
   manual-extensions/
     pi-slack/
       index.ts
       package.json
       tsconfig.json
-      README.md             # setup and local usage
+      README.md
   chrome-extensions/
     pi-slack/
       manifest.json
-      package.json
       background.js
       content-script.js
       popup.html
       popup.js
+      README.md
+      package.json
 ```
 
-### Why this layout
-- `extensions/` is already auto-loaded by the root `package.json`
-- `manual-extensions/` is **not** referenced by the root `pi.extensions` manifest
-- the Slack extension can be launched explicitly with `pi -e ...`
-- the Pi Slack pieces can live beside the main package without being auto-loaded
-- separate local package boundaries keep future Slack-specific dependencies out of the root auto-loaded Pi package
+This layout keeps the Slack integration out of the repo's auto-loaded `extensions/` path. The Pi side is only loaded explicitly through the launcher.
 
----
-
-## Launcher model
-
-Use a dedicated shell function or script instead of auto-loading the Slack extension globally.
-
-Example shape:
-
-```sh
-pi-slack() {
-  pi --session-dir "$HOME/.pi/agent/sessions/--pi-slack--" \
-    -e ./manual-extensions/pi-slack/index.ts "$@"
-}
-```
-
-### Launcher responsibilities
-- load the Pi Slack extension explicitly
-- keep normal `pi` usage untouched
-- force a dedicated Pi Slack subdirectory inside Pi's normal session storage so session storage does not depend on cwd
-- provide a stable mental model: **Slack tools only exist in `pi-slack`**
-
-### Singleton enforcement
-The Pi Slack extension should bind a **fixed localhost port**, for example:
-- `ws://127.0.0.1:27183`
-
-If the port is already in use:
-- report that `pi-slack` is already running
-- fail fast and exit
-
-This is a deliberate design choice so there is exactly one Slack controller.
-
----
-
-## High-level architecture
+## Runtime architecture
 
 ```text
 +-----------------------+
 | Chrome Slack Tab      |
-| app.slack.com         |
+| app.slack.com / *.slack.com |
 +-----------+-----------+
             |
-            | DOM read/write
+            | DOM inspection
             v
 +-----------------------+
-| Chrome Content Script |
+| Content Script        |
+| content-script.js     |
 +-----------+-----------+
             |
-            | extension messaging
+            | chrome.runtime messaging
             v
 +-----------------------+
-| Chrome Background SW  |
+| Background SW         |
+| background.js         |
 +-----------+-----------+
             |
-            | WebSocket
+            | WebSocket + shared secret
             v
 +-----------------------+
-| pi-slack Pi Extension |
-| ws://127.0.0.1:27183  |
+| Pi Slack Extension    |
+| manual-extensions/... |
 +-----------+-----------+
             |
-            | tool calls / commands
+            | tools + commands
             v
 +-----------------------+
-| Pi model workflow     |
+| Pi model session      |
 +-----------------------+
 ```
 
----
+## Launcher model
 
-## Component design
+`bin/pi-slack` is the supported entrypoint.
 
-## 1. Pi extension (`manual-extensions/pi-slack/index.ts`)
+It is responsible for:
+
+- locating `manual-extensions/pi-slack/index.ts`
+- verifying that `pi` is installed
+- verifying that `manual-extensions/pi-slack/node_modules` exists
+- forcing a dedicated session directory
+- launching Pi with the Slack extension explicitly enabled
+
+Default session directory:
+
+```text
+$HOME/.pi/agent/sessions/--pi-slack--
+```
+
+Override:
+
+- `PI_SLACK_SESSION_DIR`
+
+This gives `pi-slack` stable session storage independent of the current working directory.
+
+## Pi extension architecture
+
+File: `manual-extensions/pi-slack/index.ts`
 
 ### Responsibilities
-- host the local WebSocket server
-- maintain connection state for Chrome
-- expose Slack-oriented tools to the LLM
-- expose a few slash commands for status/debugging
-- normalize Chrome-returned Slack data into clean LLM context
-- support a read-only Slack integration plus manual copy/paste workflow
 
-### Proposed slash commands
+The Pi extension owns the local bridge and defines the Slack-facing Pi behavior.
+
+It:
+
+- starts the WebSocket server
+- enforces singleton ownership through a fixed localhost port
+- creates or loads the shared secret token
+- authenticates the Chrome extension handshake
+- tracks the active Chrome connection
+- exposes Slack read tools and commands to Pi
+- rewrites the system prompt so the session behaves as a Slack communications assistant rather than a coding agent
+- renames the session based on the Slack context that was read
+
+### Startup and shutdown
+
+On session start, the extension:
+
+- ensures the WebSocket bridge is listening
+- fails the session early if the bridge cannot start
+- restricts active tools to:
+  - `slack_read_thread`
+  - `slack_read_channel`
+- sets a default session name of `Pi Slack` if none exists
+
+On shutdown, it:
+
+- closes the WebSocket server
+- disconnects Chrome
+- rejects any pending requests
+
+### Bridge defaults
+
+Default values in the implementation:
+
+- host: `127.0.0.1`
+- port: `27183`
+- protocol version: `1`
+- hello timeout: 5 seconds
+- default request timeout: 10 seconds
+- thread read timeout: 20 seconds
+- bounded channel range timeout: 60 seconds
+- paginated channel range timeout: 180 seconds
+
+Overrides:
+
+- `PI_SLACK_PORT`
+- `PI_SLACK_TOKEN_FILE`
+
+Default token file:
+
+```text
+~/.config/pi-slack/token
+```
+
+If the token file does not exist, the extension creates one and writes it with mode `0600`.
+
+### Commands
+
+The extension currently registers these commands:
+
 - `/slack-status`
-  - show whether Chrome is connected
-  - show last active Slack tab metadata if available
-- `/slack-reconnect`
-  - reset connection state if needed
+- `/slack-status --show-token`
 - `/slack-ping`
-  - round-trip test to Chrome
+- `/slack-read-thread`
+- `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max N] [--no-threads]`
 
-### Proposed tools
+`/slack-read-thread` and `/slack-read-channel` inject a visible `slack-read` message into the session, using a custom renderer in the TUI.
+
+### Tools
 
 #### `slack_read_thread`
-Read the currently open Slack thread from the active Slack tab.
 
-**Behavior:**
-- request thread data from Chrome
-- only operate on the currently open thread pane in the MVP
-- fail clearly if no thread pane is open
-- include current Slack composer contents as additional context when non-empty
-- normalize it into compact text for the model
-- include structured details for rendering/debugging
+Reads the currently open Slack thread from the active Slack tab.
+
+Returned context includes:
+
+- workspace name if available
+- channel name if available
+- page title
+- current Slack URL
+- ordered thread messages
+- root message
+- existing composer draft text when present
+- extraction metadata such as reported message count and whether scrolling was needed
 
 #### `slack_read_channel`
-Read channel messages starting from a Slack message permalink.
 
-**Behavior:**
-- accept a required `startUrl`
-- optionally accept `limit` for “the next N messages”
-- optionally accept `endUrl` for “until this other message permalink”
-- optionally accept `maxMessages` for paginated reads through `endUrl` or to the present
-- optionally accept `includeThreads` to expand threaded replies during paginated reads
-- if `limit` is set, perform a bounded read
-- otherwise paginate automatically and return the larger span for summarization
-- open the permalink in a temporary Slack tab, harvest the relevant channel messages, then close the temporary tab
-- normalize the result into compact text for the model
-- include structured details for rendering/debugging
+Reads channel messages starting from a Slack permalink.
 
-There is no write-back tool in the MVP. Manual copy/paste is the intended workflow.
+It supports two modes:
 
-#### Optional later tool: `slack_get_selection`
-Read only the currently selected message or visible root message rather than the full thread.
+- bounded mode via `limit`
+- paginated mode when `limit` is omitted
 
----
+Parameters:
 
-## 2. Chrome extension
+- `startUrl` required
+- `limit` optional bounded read size
+- `endUrl` optional inclusive stop permalink
+- `maxMessages` optional cap for paginated mode
+- `includeThreads` optional, defaults to true in paginated mode
 
-### Manifest version
-Use **Manifest V3**.
+Paginated mode returns a larger, summary-oriented snapshot and can expand thread replies for channel messages that have replies.
 
-### Permissions
-Keep permissions as narrow as possible.
+## Chrome extension architecture
 
-Expected host permission:
+Files:
+
+- `chrome-extensions/pi-slack/manifest.json`
+- `chrome-extensions/pi-slack/background.js`
+- `chrome-extensions/pi-slack/content-script.js`
+- `chrome-extensions/pi-slack/popup.html`
+- `chrome-extensions/pi-slack/popup.js`
+
+### Manifest and permissions
+
+The extension uses Manifest V3.
+
+Permissions:
+
+- `storage`
+- `tabs`
+- `scripting`
+
+Host permissions:
+
 - `https://app.slack.com/*`
+- `https://*.slack.com/*`
 
-Expected extension pieces:
-- **content script** on Slack pages
-- **background service worker** for WebSocket lifecycle and routing
-- **minimal popup** for status, token setup/reset, and connection testing
+The second pattern exists because Slack permalinks and browser fallback flows may use workspace-specific Slack hosts in addition to `app.slack.com`.
 
-### Background service worker responsibilities
-- connect to the Pi WebSocket server
-- reconnect when Pi starts/stops
-- route requests between Pi and the Slack tab
-- track which Slack tab is considered active
-- apply the MVP active-tab rule for current-thread reads:
-  - if exactly one Slack tab exists, use it
-  - if multiple Slack tabs exist, use the most recently focused one
-  - if no Slack tab exists, report that no active Slack tab is available
-- open temporary Slack tabs for permalink-based channel-range reads
-- expose simple connection state for the popup
+### Background service worker
 
-### Content script responsibilities
-- read visible Slack message/thread DOM
-- read current Slack composer contents when present
-- normalize DOM fragments into structured data
-- report whether the page is in a supported state
+The background worker is the bridge between Pi and Slack tabs.
 
-### MVP page scope
-- current-thread reads operate on the currently open thread pane
-- if no thread pane is open, current-thread reads fail clearly
-- channel-range reads operate on Slack permalinks opened in a temporary Slack tab
-- channel-range reads are limited to “start at this message, then the next N messages” or “until this other message permalink”
+It is responsible for:
 
----
+- maintaining the authenticated WebSocket connection to Pi
+- reconnecting automatically when Pi is unavailable or restarted
+- sending heartbeat events every 20 seconds once authenticated
+- routing `getCurrentThread`, `getChannelRange`, and `getChannelRangeAll` requests
+- tracking Slack tabs and picking the active one for current-thread reads
+- opening temporary Slack tabs for permalink-based channel reads
+- restoring the previously active tab after temporary foreground work
+- exposing status and token setup flows to the popup
+- updating the extension action icon color for connection state
 
-## 3. Slack DOM adapter layer
+Connection state is stored in the background service worker, including:
 
-The browser side should isolate Slack DOM handling into a small adapter instead of scattering selectors through the code.
+- socket lifecycle
+- hello/ack timestamps
+- ping/pong timestamps
+- last error
 
-### Responsibilities
-- detect whether a thread pane is open
-- extract:
-  - workspace/team name if available
-  - channel or DM title
-  - permalink if discoverable
-  - root message
-  - replies
-  - author labels
-  - timestamps if available
-  - current composer draft text if present
-- normalize message text
+### Active Slack tab selection
 
-### Design principle
-Expect selectors to break eventually. Keep them centralized and easy to update.
+For current-thread reads, the background worker queries all Slack tabs and sorts them by `lastAccessed`.
 
----
+Selection rule:
 
-## Connection and ownership model
+- if one Slack tab exists, use it
+- if multiple Slack tabs exist, use the most recently focused one
+- if no Slack tab exists, return a clear error
 
-## Why a singleton is acceptable
-This design intentionally treats Slack control as a singleton because:
-- there is one pinned Slack workflow
-- only `pi-slack` should own Slack tools
-- normal `pi` sessions should not compete for the browser
+### Temporary-tab channel reads
 
-## Ownership rules
-- `pi-slack` binds a fixed port and becomes the sole Slack controller
-- Chrome always attempts to connect to that fixed endpoint
-- if `pi-slack` is not running, Chrome reports **offline**
-- normal `pi` sessions are unaffected because they do not load the Slack extension
+Channel permalink reads are performed in a temporary Slack tab.
 
-## Expected behavior when Pi is not running
-- Chrome extension remains installed and idle
-- background worker attempts reconnect with backoff
-- any popup/status UI shows `Pi offline`
-- no tool-driven behavior is available until `pi-slack` starts
+The background worker:
 
-This is acceptable because the chosen UX is explicitly **Pi-only**, not always-on.
+1. rewrites the input URL into a browser-safe Slack web URL when needed
+2. opens a temporary Slack tab in the foreground
+3. waits for the page to load
+4. asks the content script to prepare the page if Slack shows an app-to-browser handoff screen
+5. harvests the requested channel messages
+6. optionally paginates through more messages
+7. optionally revisits thread URLs in the same temporary tab to expand replies for summary mode
+8. closes the temporary tab
+9. restores the previously active tab context
 
----
+This means permalink reads are not purely hidden background work; they temporarily take foreground focus and then restore it.
+
+### Popup
+
+The popup is intentionally minimal.
+
+It supports:
+
+- viewing bridge status
+- entering and saving the shared secret token
+- resetting the stored token
+- running a simple connection test
+
+The token is stored in `chrome.storage.local` under `piSlackToken`.
+
+## Slack DOM extraction architecture
+
+File: `chrome-extensions/pi-slack/content-script.js`
+
+The content script is a heuristic DOM adapter for the Slack web UI. It isolates Slack-specific selectors and extraction behavior from the rest of the system.
+
+### General approach
+
+The script:
+
+- locates either the thread pane or the main channel view
+- finds visible message containers
+- extracts author, timestamp, permalink, text, and reply count
+- finds the active composer when present
+- scrolls virtualized Slack lists to collect messages that are not currently rendered
+- backfills missing authors for grouped Slack message rows
+- normalizes text to remove UI noise and zero-width characters
+
+### Thread extraction
+
+For `getCurrentThread`, the script:
+
+- finds a visible thread pane
+- finds the thread composer, if present
+- extracts the composer draft text
+- scrolls the virtualized thread list from top to bottom to harvest all visible thread messages it can collect
+- returns the first collected message as the root message
+- reports whether scrolling-based harvesting was used
+
+If no thread pane is open, it returns `no_thread_open`.
+
+### Channel range extraction
+
+For permalink-based channel reads, the script:
+
+- parses `message_ts` from the start URL
+- optionally parses an end URL
+- waits for the main channel root to be ready
+- scans messages until it reaches the start boundary
+- keeps collecting until the end permalink or limit is reached
+- returns a pagination cursor based on the last message timestamp when the limit is hit
+
+To improve author continuity, it scrolls slightly upward before collection so that grouped messages after the start point can inherit the previous author when Slack omits repeated sender labels.
+
+### Browser fallback preparation
+
+Slack sometimes lands on pages that prompt the user to continue in the browser.
+
+The content script includes a preparation step that can:
+
+- report that the page is already ready
+- navigate to a browser-safe URL
+- click a visible browser fallback control
+- report that the page is still unready
+
+This preparation loop is what makes workspace-host permalinks and app handoff pages usable from the bridge.
+
+## End-to-end data flows
+
+### Current thread read
+
+1. User launches `pi-slack`
+2. Pi extension starts the local bridge
+3. Chrome background connects and authenticates with the shared secret
+4. User asks Pi to read the current Slack thread
+5. Pi calls `slack_read_thread`
+6. Pi extension sends `getCurrentThread` over WebSocket
+7. Background worker routes the request to the active Slack tab
+8. Content script extracts the thread and composer draft
+9. Data flows back to Pi
+10. Pi normalizes the thread for model context and uses it to draft or refine a reply
+
+### Bounded channel range read
+
+1. User provides a Slack message permalink and a bounded request such as "next 20 messages"
+2. Pi calls `slack_read_channel` with `startUrl` and `limit`
+3. Pi extension sends `getChannelRange`
+4. Background worker opens a temporary Slack tab and prepares it
+5. Content script collects messages from the start permalink onward
+6. Background worker closes the temporary tab and returns the payload
+7. Pi formats the range into compact model-readable text
+
+### Paginated channel summarization
+
+1. User provides a Slack permalink and asks for a summary
+2. Pi calls `slack_read_channel` without `limit`
+3. Pi extension sends `getChannelRangeAll`
+4. Background worker repeatedly collects pages of messages using a cursor
+5. If thread expansion is enabled, the background worker revisits selected thread roots in the same temporary tab and attaches thread snapshots to the corresponding channel messages
+6. Pi formats the full result into a summary-oriented text block with optional nested thread replies
 
 ## WebSocket protocol
 
-Use a simple JSON request/response protocol with explicit IDs.
-
-## Envelope
-
-```json
-{
-  "id": "req_123",
-  "type": "request",
-  "action": "getCurrentThread",
-  "payload": {}
-}
-```
-
-```json
-{
-  "id": "req_123",
-  "type": "response",
-  "ok": true,
-  "payload": {}
-}
-```
-
-```json
-{
-  "type": "event",
-  "event": "status",
-  "payload": {
-    "connected": true
-  }
-}
-```
-
-## Initial handshake
-
-### Chrome -> Pi
-```json
-{
-  "type": "hello",
-  "role": "chrome",
-  "version": 1,
-  "token": "shared-secret",
-  "payload": {
-    "extensionVersion": "0.1.0"
-  }
-}
-```
-
-### Pi -> Chrome
-```json
-{
-  "type": "hello_ack",
-  "role": "pi",
-  "version": 1,
-  "payload": {
-    "instance": "pi-slack",
-    "protocolVersion": 1
-  }
-}
-```
-
-## Initial request set
-
-### `ping`
-Health check.
-
-### `getCurrentThread`
-Ask Chrome for the current Slack thread.
-
-#### Success response shape
-```json
-{
-  "id": "req_1",
-  "type": "response",
-  "ok": true,
-  "payload": {
-    "workspace": "Acme",
-    "channel": "eng",
-    "title": "Thread in #eng",
-    "url": "https://app.slack.com/...",
-    "isThread": true,
-    "rootMessage": {
-      "author": "Alice",
-      "text": "Can we ship this today?",
-      "timestamp": "2026-04-14T10:15:00Z"
-    },
-    "messages": [
-      {
-        "author": "Alice",
-        "text": "Can we ship this today?",
-        "timestamp": "2026-04-14T10:15:00Z",
-        "isRoot": true
-      },
-      {
-        "author": "Bob",
-        "text": "Blocked on final review.",
-        "timestamp": "2026-04-14T10:18:00Z",
-        "isRoot": false
-      }
-    ],
-    "composerDraftText": "I can take the review this afternoon if that helps."
-  }
-}
-```
-
-### `insertReply`
-Insert text into the active Slack composer.
-
-#### Request
-```json
-{
-  "id": "req_2",
-  "type": "request",
-  "action": "insertReply",
-  "payload": {
-    "text": "Draft reply text"
-  }
-}
-```
-
-## Error shape
-
-```json
-{
-  "id": "req_3",
-  "type": "response",
-  "ok": false,
-  "error": {
-    "code": "composer_not_found",
-    "message": "Could not locate the Slack reply composer"
-  }
-}
-```
-
----
-
-## Pi-facing data normalization
-
-The LLM should not receive raw DOM output. Normalize the thread into a compact structured text block.
-
-## Suggested normalization format
-
-```text
-Slack thread
-Workspace: Acme
-Channel: #eng
-URL: https://app.slack.com/...
-
-1. Alice (2026-04-14 10:15)
-Can we ship this today?
-
-2. Bob (2026-04-14 10:18)
-Blocked on final review.
-
-3. Carol (2026-04-14 10:21)
-If review lands by noon, yes.
-
-Current composer draft:
-I can take the review this afternoon if that helps.
-```
-
-## Normalization rules
-- preserve message order
-- strip visual-only UI text
-- keep author and timestamp when available
-- keep line breaks inside message bodies
-- if the Slack composer already has text, include it as a separate draft-context section
-- treat composer draft text as user intent/context, not as the final reply
-- truncate long threads safely if needed
-- return structured `details` alongside the text form
-
-## Truncation strategy
-For long threads:
-- keep enough context to understand the conversation
-- include count of omitted messages
-- prefer preserving the root message and most recent replies
-
----
-
-## Tool UX design
-
-## Typical user flow
-1. Launch `pi-slack`
-2. Open or focus the Slack thread in Chrome
-3. Optionally start a rough draft in the Slack composer
-4. Ask Pi something like:
-   - `Read the current Slack thread and refine my draft into a concise reply.`
-5. Pi calls `slack_read_thread`
-6. Pi sees both the thread and any existing composer draft text
-7. Pi drafts or refines a reply
-8. You copy/paste the final reply into Slack
-9. You review it and press send manually in the Slack UI
-
-## Recommended safety model
-- the browser integration is read-only in the MVP
-- final copy/paste and send actions always happen manually in Slack UI
-
-### Final-send policy
-- Pi never triggers Slack send in the MVP
-- the user always reviews and clicks send manually in Slack
+The bridge uses a simple JSON protocol.
 
----
-
-## Security model
+Message categories:
 
-## Local-only transport
-- bind WebSocket server to `127.0.0.1`
-- do not listen on `0.0.0.0`
-
-## Shared secret
-Use a long-lived shared secret stored locally.
-
-### Proposed setup
-- secret stored outside the repo, for example in a user config file
-- `pi-slack` reads it at startup and creates it on first run if missing
-- Chrome extension gets the value once through the popup setup flow
-- Chrome extension stores the same value in extension local storage/options after setup
-
-## Browser restrictions
-- only run content script on `https://app.slack.com/*`
-- background worker should reject actions unless a matching Slack tab exists
-
-## Final send policy
-- Pi does not send Slack messages in the MVP
-- the final send action always happens manually in the Slack UI
-
----
-
-## Failure modes and recovery
-
-## Pi not running
-### Symptom
-Chrome shows disconnected/offline.
-
-### Recovery
-Start `pi-slack`; Chrome reconnects automatically.
-
-## Chrome not connected
-### Symptom
-Pi Slack tools fail with a clear message.
-
-### Recovery
-Open Slack in Chrome and wait for reconnect, or use `/slack-status`.
-
-## Unsupported Slack page state
-### Symptom
-No thread open, or composer not found.
-
-### Recovery
-Prompt the user to open the target thread or channel and retry.
-
-## Broken Slack selectors after UI changes
-### Symptom
-Read/insert tools begin failing.
-
-### Recovery
-Update the centralized DOM adapter selectors in the Chrome extension.
-
-## Port already in use
-### Symptom
-A second `pi-slack` instance starts.
-
-### Recovery
-Fail fast with a clear singleton message.
-
----
-
-## Configuration model
-
-## Fixed values for MVP
-- WebSocket URL: `ws://127.0.0.1:27183`
-- protocol version: `1`
-- single active Slack controller: yes
-- dedicated session directory via `--session-dir "$HOME/.pi/agent/sessions/--pi-slack--"` in the launcher
-
-## Configurable values later if needed
-- port
-- reconnect backoff
-- preferred active Slack tab behavior
-- optional future write-back behavior if manual copy/paste is revisited
-
----
-
-## Recommended implementation phases
-
-## Phase 0: repo scaffolding
-**Goal:** create the structure without affecting current package loading.
-
-### Tasks
-- create `manual-extensions/pi-slack/`
-- create `chrome-extensions/pi-slack/`
-- add local README/setup notes
-- create separate local package boundaries for Pi Slack code
-- keep root typechecking wired through `npm run check`
-
-### Deliverable
-Repo structure exists, does not auto-load the Slack extension, and keeps Slack-specific dependencies out of the root package.
-
----
-
-## Phase 1: Pi-side connection skeleton
-**Goal:** make `pi-slack` launchable and expose connection status.
-
-### Tasks
-- implement Pi extension entrypoint
-- start WebSocket server on fixed port
-- reject startup if port is already bound
-- implement shared-secret handshake
-- track Chrome connection status in memory
-- add `/slack-status` and `/slack-ping`
-
-### Acceptance criteria
-- `pi-slack` starts cleanly
-- second `pi-slack` instance fails clearly
-- `/slack-status` reports disconnected/connected accurately
-- Chrome can authenticate and complete handshake
-
----
-
-## Phase 2: Chrome extension connection skeleton
-**Goal:** connect Chrome to Pi and identify an active Slack tab.
-
-### Tasks
-- create MV3 manifest
-- implement background service worker
-- open WebSocket to Pi with reconnect logic
-- register content script on Slack pages
-- surface connection status, token setup/reset, and a test action in the minimal popup
-
-### Acceptance criteria
-- background worker reconnects automatically
-- Pi sees Chrome connection events
-- `/slack-ping` performs a full round trip
-
----
-
-## Phase 3: Read current thread, existing draft, and channel permalink ranges
-**Goal:** support `slack_read_thread` and `slack_read_channel` end to end.
-
-### Tasks
-- implement Slack DOM adapter for thread extraction
-- extract current composer draft text when present
-- define normalized thread payload shape
-- implement Pi tool `slack_read_thread`
-- implement Pi tool `slack_read_channel`
-- add temporary-tab permalink routing for channel-range reads
-- normalize tool output for LLM consumption
-- add truncation/formatting for long threads and long channel ranges
-
-### Acceptance criteria
-- Pi can read the currently open Slack thread
-- Pi can read either a bounded channel range or a paginated channel span starting from a Slack message permalink
-- output includes workspace/channel/url when available
-- existing composer text is included as separate context when present for thread reads
-- errors are clear when no thread is open, a permalink cannot be parsed, or selectors fail
-
----
-
-## Phase 4: polish and hardening
-**Goal:** make the integration pleasant and resilient.
-
-### Tasks
-- improve Slack text normalization
-- improve diagnostics in `/slack-status`
-- add helpful empty-state guidance
-- add better composer mode detection
-- document setup and troubleshooting
-- add tests where practical for message protocol and normalization logic
-
-### Acceptance criteria
-- common failures are easy to diagnose
-- day-to-day usage feels predictable
-- docs are sufficient to reinstall from scratch
-
----
-
-## Suggested MVP scope
-
-The MVP should include only:
-- `pi-slack` launcher
-- fixed-port singleton WebSocket server
-- Chrome extension with reconnect logic
-- minimal Chrome popup for status/setup/testing
-- `slack_read_thread`
-- `slack_read_channel`
-- `/slack-read-thread`
-- `/slack-read-channel`
-- `/slack-status`
-
-Everything else is optional.
-
----
-
-## Testing strategy
-
-## Manual test cases
-
-### Connection
-- start `pi-slack`
-- verify Chrome connects
-- close `pi-slack`
-- verify Chrome reports offline
-- attempt second `pi-slack` launch and verify singleton enforcement
-
-### Read thread
-- open thread in Slack
-- ask Pi to read it
-- verify author/text ordering
-- verify existing composer text is included when present
-- test on DM and channel thread if possible
-- test with no thread open
-
-### Manual copy/paste workflow
-- ask Pi to produce a generated draft after `/slack-read-thread`
-- verify the draft is easy to copy/paste into Slack manually
-- verify existing composer text can still be used as context without any browser-side write-back
-
-### Error handling
-- disconnect Chrome
-- reload Slack tab
-- change focus between multiple Slack tabs
-- verify meaningful error messages
-
----
-
-## Resolved MVP decisions
-
-1. **Active tab selection**
-   - If exactly one `app.slack.com` tab exists, use it.
-   - If multiple Slack tabs exist, use the most recently focused one.
-   - If no Slack tab exists, fail clearly.
-
-2. **Reply workflow**
-   - Manual copy/paste is the MVP workflow.
-   - Do not implement browser-side reply insertion in the MVP.
-
-3. **Read scope**
-   - Current-thread reads operate only on the currently open thread pane.
-   - If no thread pane is open, current-thread reads fail clearly.
-   - Channel reads are supported via pasted Slack message permalinks as a separate tool.
-
-4. **Token/setup UX**
-   - Use a one-time setup flow.
-   - `pi-slack` creates or reads a local shared secret.
-   - The Chrome popup accepts that secret once and stores it locally.
-
-5. **Popup UI**
-   - Include a minimal popup in v1.
-   - It should show connection status, active Slack tab state, token entry/reset, and a simple test action.
-
-6. **Existing composer draft context**
-   - If the Slack composer already contains text, include it in read results as additional draft context.
-   - Pi should treat that text as user intent/context, not as the final message.
-
-7. **Final send behavior**
-   - Pi never sends the Slack message.
-   - The user always presses send manually in the Slack UI.
-
-8. **Singleton behavior**
-   - If the fixed port is already in use, the second `pi-slack` instance fails fast and exits.
-
----
-
-## Recommended next steps
-
-1. Create the directories under:
-   - `manual-extensions/pi-slack/`
-   - `chrome-extensions/pi-slack/`
-2. Implement **Phase 1** and **Phase 2** only
-3. Prove the WebSocket handshake and singleton behavior
-4. Then build `slack_read_thread` before any write action
-
-That order gives the best feedback loop with the least risk.
+- `hello`
+- `hello_ack`
+- `request`
+- `response`
+- `event`
+
+### Handshake
+
+Chrome sends:
+
+- role `chrome`
+- protocol version `1`
+- shared secret token
+- extension version
+
+Pi validates the token and protocol version, then returns `hello_ack` with:
+
+- role `pi`
+- instance `pi-slack`
+- protocol version `1`
+
+Only one authenticated Chrome connection is kept active at a time. A newer valid Chrome connection replaces the previous one.
+
+### Requests currently implemented
+
+- `ping`
+- `getCurrentThread`
+- `getChannelRange`
+- `getChannelRangeAll`
+
+### Events
+
+Chrome currently emits heartbeat events. Pi accepts them but does not currently surface them as a higher-level feature.
+
+### Errors
+
+Responses use a structured error shape with a code and message. Common error codes include:
+
+- `no_active_slack_tab`
+- `no_thread_open`
+- `thread_read_failed`
+- `invalid_start_url`
+- `invalid_end_url`
+- `start_message_not_found`
+- `no_channel_messages`
+- `missing_team_id`
+- `content_script_unavailable`
+
+## Model-facing normalization
+
+The Pi extension does not pass raw DOM fragments to the model.
+
+Instead, it formats Slack data into compact text blocks such as:
+
+- `Slack thread`
+- `Slack channel range`
+- `Slack channel summary`
+
+Formatting includes:
+
+- workspace, channel, title, and URLs when available
+- numbered messages in order
+- timestamps and author names when available
+- composer draft text as a separate section for thread reads
+- omission notices when content must be trimmed to fit context
+- nested thread reply formatting for summary mode when thread expansion succeeded
+
+### Context budgeting
+
+The extension computes approximate character budgets from the current model context window and current token usage.
+
+The budgeting logic tries to:
+
+- always preserve the root message
+- preserve early thread context
+- preserve recent context from the end
+- condense larger channel summaries when necessary
+
+## Session behavior
+
+Launching through `pi-slack` changes Pi from a coding assistant into a Slack reply assistant.
+
+The custom system prompt emphasizes:
+
+- concise, direct, technically precise replies
+- using Slack tools when thread or channel context is needed
+- treating existing composer text as user intent, not as already-sent content
+- never claiming to have sent or inserted a Slack message
+- producing Slack-ready output for manual copy/paste
+
+Session names are also updated from read results so saved sessions are easier to identify in history.
+
+## Security and ownership model
+
+### Local-only bridge
+
+The WebSocket server binds to `127.0.0.1`, not `0.0.0.0`.
+
+### Shared secret
+
+Authentication is based on a locally stored shared secret.
+
+- Pi stores the token in a local file
+- Chrome stores the token in extension local storage
+- every connection must send the correct token in the hello message
+
+### Singleton ownership
+
+The Pi extension owns a fixed localhost port. If the port is already in use, startup fails and `pi-slack` exits.
+
+This is the mechanism that makes `pi-slack` a single-controller integration.
+
+### Manual-send policy
+
+The integration is intentionally read-only with respect to Slack message sending.
+
+Pi can:
+
+- read Slack context
+- summarize it
+- draft replies
+
+Pi cannot:
+
+- insert text into the Slack composer
+- press send
+- operate as an autonomous Slack bot
+
+## Current limitations
+
+The current implementation is usable, but still intentionally conservative.
+
+Known limitations:
+
+- Slack extraction depends on heuristic DOM selectors and may need maintenance when Slack changes its UI
+- current-thread reads require an already open thread pane
+- permalink-based reads temporarily open a foreground Slack tab
+- no browser-side write-back exists
+- no workspace app or Slack API integration exists
+- channel and thread extraction are best-effort against a virtualized DOM, not a first-party message API
+
+## Summary
+
+The current `pi-slack` architecture is a local, singleton, read-only Slack assistant:
+
+- `bin/pi-slack` launches a dedicated Pi session
+- the Pi extension owns a localhost WebSocket bridge and Slack-specific tooling
+- the Chrome extension authenticates to that bridge and reads Slack DOM state
+- current-thread and permalink-based channel reads are normalized into model-friendly text
+- Pi uses that context to produce replies and summaries for manual copy/paste back into Slack

@@ -34,4 +34,4 @@ Not implemented yet:
 3. Choose **Load unpacked**
 4. Select `chrome-extensions/pi-slack`
 
-See `docs/pi-slack-architecture.md` for the implementation plan.
+See `docs/pi-slack-architecture.md` for the architecture details.

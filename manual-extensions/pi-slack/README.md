@@ -74,4 +74,4 @@ When launched via `pi-slack`, Pi no longer behaves like a coding agent. The exte
 
 The launcher also pins session storage to a dedicated Pi Slack subdirectory inside Pi's normal session storage, so normal project cwd-based session partitioning does not apply.
 
-See `docs/pi-slack-architecture.md` for the implementation plan.
+See `docs/pi-slack-architecture.md` for the architecture details.
