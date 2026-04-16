@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec pi --model claude-haiku-4-5 --thinking off --no-extensions --no-prompt-templates --no-session -p "create GitHub PR for this branch. $*"
+exec pi --model gpt-5.4-mini --thinking off --no-extensions --no-prompt-templates --no-session -p "create GitHub PR for this branch. $*"
