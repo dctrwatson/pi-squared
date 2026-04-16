@@ -696,7 +696,7 @@ function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: s
 function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: string; maxMessages?: number; includeThreads: boolean } {
 	const trimmed = args.trim();
 	if (!trimmed) {
-		throw new Error("Usage: /slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]");
+		throw new Error("Usage: /slack-channel-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]");
 	}
 
 	const tokens = trimmed.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
@@ -1293,7 +1293,7 @@ export default function piSlack(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("slack-read", {
+	pi.registerCommand("slack-thread-read", {
 		description: "Read the current Slack thread and inject it into the session as a visible Slack message",
 		handler: async (_args, ctx) => {
 			try {
@@ -1365,8 +1365,8 @@ export default function piSlack(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("slack-summarize", {
-		description: "Fetch all channel messages from a Slack permalink and summarize them: /slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]",
+	pi.registerCommand("slack-channel-summarize", {
+		description: "Fetch all channel messages from a Slack permalink and summarize them: /slack-channel-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]",
 		handler: async (args, ctx) => {
 			try {
 				const parsed = parseSlackSummarizeArgs(args);

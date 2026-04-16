@@ -47,8 +47,9 @@ Implemented so far:
 - automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
 - `/slack-ping` command
-- `/slack-read` command for the active thread
+- `/slack-thread-read` command for the active thread
 - `/slack-channel-read` command for channel ranges by permalink
+- `/slack-channel-summarize` command for channel summarization by permalink
 - `slack_get_current_thread` tool
 - `slack_get_channel_range` tool
 - `slack_summarize_channel_from` tool
@@ -64,9 +65,9 @@ Not implemented yet:
 - `/slack-status` — show bridge status
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
-- `/slack-read` — read the active Slack thread and add it to the session as a visible message
+- `/slack-thread-read` — read the active Slack thread and add it to the session as a visible message
 - `/slack-channel-read <start-url> [--next N] [--until <end-url>]` — read a bounded channel range starting from a Slack message link
-- `/slack-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]` — fetch all channel messages from a link (auto-paginating), expanding thread replies by default, and inject them for summarization
+- `/slack-channel-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]` — fetch all channel messages from a link (auto-paginating), expanding thread replies by default, and inject them for summarization
 - ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
 - ask Pi to use `slack_get_channel_range` — read a bounded range of channel messages from a Slack permalink
 - ask Pi to use `slack_summarize_channel_from` — fetch all channel messages from a permalink, including threaded replies by default, and summarize them

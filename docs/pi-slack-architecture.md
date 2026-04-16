@@ -690,8 +690,9 @@ The MVP should include only:
 - minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
 - `slack_get_channel_range`
-- `/slack-read`
+- `/slack-thread-read`
 - `/slack-channel-read`
+- `/slack-channel-summarize`
 - `/slack-status`
 
 Everything else is optional.
@@ -718,7 +719,7 @@ Everything else is optional.
 - test with no thread open
 
 ### Manual copy/paste workflow
-- ask Pi to produce a generated draft after `/slack-read`
+- ask Pi to produce a generated draft after `/slack-thread-read`
 - verify the draft is easy to copy/paste into Slack manually
 - verify existing composer text can still be used as context without any browser-side write-back
 
