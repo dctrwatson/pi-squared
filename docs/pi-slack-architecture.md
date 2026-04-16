@@ -198,15 +198,19 @@ Read the currently open Slack thread from the active Slack tab.
 - normalize it into compact text for the model
 - include structured details for rendering/debugging
 
-#### `slack_get_channel_range`
-Read a channel message range starting from a Slack message permalink.
+#### `slack_read_channel`
+Read channel messages starting from a Slack message permalink.
 
 **Behavior:**
 - accept a required `startUrl`
 - optionally accept `limit` for “the next N messages”
 - optionally accept `endUrl` for “until this other message permalink”
+- optionally accept `maxMessages` for paginated reads through `endUrl` or to the present
+- optionally accept `includeThreads` to expand threaded replies during paginated reads
+- if `limit` is set, perform a bounded read
+- otherwise paginate automatically and return the larger span for summarization
 - open the permalink in a temporary Slack tab, harvest the relevant channel messages, then close the temporary tab
-- normalize the range into compact text for the model
+- normalize the result into compact text for the model
 - include structured details for rendering/debugging
 
 There is no write-back tool in the MVP. Manual copy/paste is the intended workflow.
@@ -642,21 +646,21 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 ---
 
 ## Phase 3: Read current thread, existing draft, and channel permalink ranges
-**Goal:** support `slack_get_current_thread` and `slack_get_channel_range` end to end.
+**Goal:** support `slack_get_current_thread` and `slack_read_channel` end to end.
 
 ### Tasks
 - implement Slack DOM adapter for thread extraction
 - extract current composer draft text when present
 - define normalized thread payload shape
 - implement Pi tool `slack_get_current_thread`
-- implement Pi tool `slack_get_channel_range`
+- implement Pi tool `slack_read_channel`
 - add temporary-tab permalink routing for channel-range reads
 - normalize tool output for LLM consumption
 - add truncation/formatting for long threads and long channel ranges
 
 ### Acceptance criteria
 - Pi can read the currently open Slack thread
-- Pi can read a channel range starting from a Slack message permalink
+- Pi can read either a bounded channel range or a paginated channel span starting from a Slack message permalink
 - output includes workspace/channel/url when available
 - existing composer text is included as separate context when present for thread reads
 - errors are clear when no thread is open, a permalink cannot be parsed, or selectors fail
@@ -689,10 +693,9 @@ The MVP should include only:
 - Chrome extension with reconnect logic
 - minimal Chrome popup for status/setup/testing
 - `slack_get_current_thread`
-- `slack_get_channel_range`
+- `slack_read_channel`
 - `/slack-thread-read`
-- `/slack-channel-read`
-- `/slack-channel-summarize`
+- `/slack-read-channel`
 - `/slack-status`
 
 Everything else is optional.
