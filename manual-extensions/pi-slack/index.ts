@@ -323,8 +323,8 @@ function buildSlackSystemPrompt(): string {
 		"",
 		"Workflow:",
 		"- When the user refers to the current Slack thread, use slack_get_current_thread if you need context.",
-		"- When the user pastes a Slack message link and wants a bounded fetch of following channel messages, use slack_get_channel_range.",
-		"- When the user wants to summarize all messages from a Slack message link, use slack_summarize_channel_from.",
+		"- When the user pastes a Slack message link and wants channel context from that point onward, use slack_read_channel.",
+		"- Use limit for a bounded read of the next N messages. Omit limit to paginate from the permalink through endUrl or to the present, which is useful before summarizing.",
 		"- Treat any existing composer draft text in the Slack thread result as the user's rough draft or intent.",
 		"- The browser integration is read-only. Produce replies for manual copy/paste into Slack.",
 		"- Never claim to have sent, inserted, or modified a Slack message.",
@@ -641,10 +641,18 @@ function formatAllMessagesForSummary(snapshot: SlackChannelRangeSnapshot, charBu
 	return lines.join("\n");
 }
 
-function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: string; limit?: number } {
+function parseSlackReadChannelArgs(args: string): {
+	startUrl: string;
+	endUrl?: string;
+	limit?: number;
+	maxMessages?: number;
+	includeThreads: boolean;
+} {
 	const trimmed = args.trim();
 	if (!trimmed) {
-		throw new Error("Usage: /slack-channel-read <start-url> [--next <n>] [--until <end-url>]");
+		throw new Error(
+			"Usage: /slack-read-channel <start-url> [--next <n>] [--until <end-url>] [--max <n>] [--no-threads]",
+		);
 	}
 
 	const tokens = trimmed.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
@@ -652,6 +660,8 @@ function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: s
 	let startUrl: string | undefined;
 	let endUrl: string | undefined;
 	let limit: number | undefined;
+	let maxMessages: number | undefined;
+	let includeThreads = true;
 
 	for (let index = 0; index < tokens.length; index++) {
 		const token = tokens[index];
@@ -667,48 +677,6 @@ function parseSlackChannelReadArgs(args: string): { startUrl: string; endUrl?: s
 			index += 1;
 			continue;
 		}
-
-		if (token === "--until") {
-			const nextToken = tokens[index + 1];
-			if (!nextToken) {
-				throw new Error("--until requires a Slack message URL.");
-			}
-			endUrl = unquote(nextToken);
-			index += 1;
-			continue;
-		}
-
-		if (!startUrl) {
-			startUrl = unquote(token);
-			continue;
-		}
-
-		throw new Error(`Unexpected argument: ${token}`);
-	}
-
-	if (!startUrl) {
-		throw new Error("A start Slack message URL is required.");
-	}
-
-	return { startUrl, endUrl, limit };
-}
-
-function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: string; maxMessages?: number; includeThreads: boolean } {
-	const trimmed = args.trim();
-	if (!trimmed) {
-		throw new Error("Usage: /slack-channel-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]");
-	}
-
-	const tokens = trimmed.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
-	const unquote = (value: string): string => value.replace(/^['"]|['"]$/g, "");
-	let startUrl: string | undefined;
-	let endUrl: string | undefined;
-	let maxMessages: number | undefined;
-	let includeThreads = true;
-
-	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index];
-		if (!token) continue;
 
 		if (token === "--until") {
 			const nextToken = tokens[index + 1];
@@ -753,7 +721,11 @@ function parseSlackSummarizeArgs(args: string): { startUrl: string; endUrl?: str
 		throw new Error("A start Slack message URL is required.");
 	}
 
-	return { startUrl, endUrl, maxMessages, includeThreads };
+	if (limit !== undefined && maxMessages !== undefined) {
+		throw new Error("--next and --max cannot be used together.");
+	}
+
+	return { startUrl, endUrl, limit, maxMessages, includeThreads };
 }
 
 function createToken(): string {
@@ -1158,7 +1130,7 @@ export default function piSlack(pi: ExtensionAPI) {
 			return;
 		}
 
-		pi.setActiveTools(["slack_get_current_thread", "slack_get_channel_range", "slack_summarize_channel_from"]);
+		pi.setActiveTools(["slack_get_current_thread", "slack_read_channel"]);
 		if (!pi.getSessionName()) {
 			pi.setSessionName("Pi Slack");
 		}
@@ -1218,58 +1190,46 @@ export default function piSlack(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "slack_get_channel_range",
-		label: "Slack Channel Range",
+		name: "slack_read_channel",
+		label: "Slack Read Channel",
 		description:
-			"Read a range of channel messages starting from a Slack message link, optionally limited to the next N messages or ending at another Slack message link.",
+			"Read channel messages starting from a Slack message link. Use limit for a bounded window, or omit limit to paginate through a larger span for summarization.",
 		promptSnippet:
-			"Read channel messages starting from a Slack message link, optionally for the next N messages or until another Slack message link.",
+			"Read channel messages starting from a Slack message link, either as a bounded window or as a paginated span suitable for summarization.",
 		promptGuidelines: [
-			"Use this tool when the user pastes a Slack message link and wants a bounded fetch of following channel messages.",
-			"Use slack_summarize_channel_from instead when the user wants to summarize all messages from a link.",
-			"Prefer limit for 'next N messages' and endUrl for 'until this other message link'.",
+			"Use this tool when the user pastes a Slack message link and wants channel context from that point.",
+			"Set limit for 'next N messages' or a bounded window between two permalinks.",
+			"Omit limit to paginate from startUrl through endUrl or to the present, which is useful before summarizing.",
+			"Leave includeThreads enabled unless the user wants a faster, channel-only fetch.",
 		],
 		parameters: Type.Object({
 			startUrl: Type.String({ description: "Slack message permalink to start from" }),
-			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Number of messages to include starting at startUrl" })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, description: "Bounded read: number of messages to include starting at startUrl" })),
 			endUrl: Type.Optional(Type.String({ description: "Optional Slack message permalink to stop at, inclusive" })),
+			maxMessages: Type.Optional(Type.Integer({ minimum: 1, description: "Paginated read: safety cap on total messages fetched (default 500)" })),
+			includeThreads: Type.Optional(Type.Boolean({ description: "Paginated read: whether to expand threaded replies (default true)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const range = await readSlackChannelRange(params.startUrl, params.endUrl, params.limit);
-			updateSessionNameFromChannelRange(pi, range);
-			const charBudget = getThreadCharBudget(ctx);
-			return {
-				content: [{ type: "text", text: formatSlackChannelRangeForModel(range, charBudget) }],
-				details: {
-					range,
-					messageCount: range.messages.length,
-					requestedLimit: range.requestedLimit,
-					charBudget,
-				},
-			};
-		},
-	});
+			if (params.limit !== undefined && params.maxMessages !== undefined) {
+				throw new Error("limit and maxMessages cannot be combined. Use limit for bounded reads, or omit limit for paginated reads.");
+			}
 
-	pi.registerTool({
-		name: "slack_summarize_channel_from",
-		label: "Slack Summarize Channel",
-		description:
-			"Fetch all channel messages from a Slack message link to the present, paginating automatically, and optionally expand threaded replies for summarization.",
-		promptSnippet:
-			"Fetch all channel messages from a Slack message link to the present, paginating automatically, including thread replies unless disabled.",
-		promptGuidelines: [
-			"Use this tool when the user wants to summarize all or many messages in a channel starting from a Slack message link.",
-			"Do not call slack_get_channel_range separately — this tool paginates internally.",
-			"Leave includeThreads enabled unless the user wants a faster, channel-only summary.",
-			"After receiving the messages, produce a concise summary organized by topic or timeline.",
-		],
-		parameters: Type.Object({
-			startUrl: Type.String({ description: "Slack message permalink to start from" }),
-			endUrl: Type.Optional(Type.String({ description: "Optional Slack message permalink to stop at, inclusive" })),
-			maxMessages: Type.Optional(Type.Integer({ minimum: 1, description: "Safety cap on total messages fetched (default 500)" })),
-			includeThreads: Type.Optional(Type.Boolean({ description: "Whether to expand threaded replies while summarizing (default true)" })),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (params.limit !== undefined) {
+				const range = await readSlackChannelRange(params.startUrl, params.endUrl, params.limit);
+				updateSessionNameFromChannelRange(pi, range);
+				const charBudget = getThreadCharBudget(ctx);
+				return {
+					content: [{ type: "text", text: formatSlackChannelRangeForModel(range, charBudget) }],
+					details: {
+						mode: "bounded",
+						range,
+						messageCount: range.messages.length,
+						requestedLimit: range.requestedLimit,
+						charBudget,
+					},
+				};
+			}
+
 			const snapshot = await readSlackChannelRangeAll(
 				params.startUrl,
 				params.endUrl,
@@ -1281,6 +1241,8 @@ export default function piSlack(pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: formatAllMessagesForSummary(snapshot, charBudget) }],
 				details: {
+					mode: "paginated",
+					snapshot,
 					messageCount: snapshot.messages.length,
 					capped: params.maxMessages !== undefined && snapshot.messages.length >= params.maxMessages,
 					threadSummariesIncluded: snapshot.threadSummariesIncluded,
@@ -1329,47 +1291,38 @@ export default function piSlack(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("slack-channel-read", {
-		description: "Read a channel message range from a Slack permalink: /slack-channel-read <start-url> [--next N] [--until <end-url>]",
+	pi.registerCommand("slack-read-channel", {
+		description:
+			"Read channel messages from a Slack permalink: /slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]",
 		handler: async (args, ctx) => {
 			try {
-				const parsed = parseSlackChannelReadArgs(args);
-				const range = await readSlackChannelRange(parsed.startUrl, parsed.endUrl, parsed.limit);
-				updateSessionNameFromChannelRange(pi, range);
-				const charBudget = getThreadCharBudget(ctx);
-				const content = formatSlackChannelRangeForModel(range, charBudget);
-				pi.sendMessage({
-					customType: "slack-read",
-					content,
-					display: true,
-					details: {
-						range,
-						messageCount: range.messages.length,
-						requestedLimit: range.requestedLimit,
-						charBudget,
-					},
-				});
-				if (ctx.hasUI) {
-					ctx.ui.notify("Slack channel range added to the session.", "info");
-				} else {
-					writeStatus(content);
-				}
-			} catch (error) {
-				const message = `Slack channel read failed: ${error instanceof Error ? error.message : String(error)}`;
-				if (ctx.hasUI) {
-					ctx.ui.notify(message, "error");
-				} else {
-					console.error(message);
-				}
-			}
-		},
-	});
+				const parsed = parseSlackReadChannelArgs(args);
 
-	pi.registerCommand("slack-channel-summarize", {
-		description: "Fetch all channel messages from a Slack permalink and summarize them: /slack-channel-summarize <start-url> [--until <end-url>] [--max <n>] [--no-threads]",
-		handler: async (args, ctx) => {
-			try {
-				const parsed = parseSlackSummarizeArgs(args);
+				if (parsed.limit !== undefined) {
+					const range = await readSlackChannelRange(parsed.startUrl, parsed.endUrl, parsed.limit);
+					updateSessionNameFromChannelRange(pi, range);
+					const charBudget = getThreadCharBudget(ctx);
+					const content = formatSlackChannelRangeForModel(range, charBudget);
+					pi.sendMessage({
+						customType: "slack-read",
+						content,
+						display: true,
+						details: {
+							mode: "bounded",
+							range,
+							messageCount: range.messages.length,
+							requestedLimit: range.requestedLimit,
+							charBudget,
+						},
+					});
+					if (ctx.hasUI) {
+						ctx.ui.notify("Slack channel range added to the session.", "info");
+					} else {
+						writeStatus(content);
+					}
+					return;
+				}
+
 				const snapshot = await readSlackChannelRangeAll(
 					parsed.startUrl,
 					parsed.endUrl,
@@ -1384,6 +1337,8 @@ export default function piSlack(pi: ExtensionAPI) {
 					content,
 					display: true,
 					details: {
+						mode: "paginated",
+						snapshot,
 						messageCount: snapshot.messages.length,
 						threadSummariesIncluded: snapshot.threadSummariesIncluded,
 						expandedThreadCount: snapshot.expandedThreadCount,
@@ -1393,15 +1348,13 @@ export default function piSlack(pi: ExtensionAPI) {
 					},
 				});
 				if (ctx.hasUI) {
-					const threadNote = snapshot.threadSummariesIncluded
-						? `, ${snapshot.expandedThreadCount ?? 0} thread(s) expanded`
-						: "";
+					const threadNote = snapshot.threadSummariesIncluded ? `, ${snapshot.expandedThreadCount ?? 0} thread(s) expanded` : "";
 					ctx.ui.notify(`${snapshot.messages.length} messages fetched${threadNote}. Ask Pi to summarize.`, "info");
 				} else {
 					writeStatus(content);
 				}
 			} catch (error) {
-				const message = `Slack summarize failed: ${error instanceof Error ? error.message : String(error)}`;
+				const message = `Slack channel read failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "error");
 				} else {
