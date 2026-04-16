@@ -322,7 +322,7 @@ function buildSlackSystemPrompt(): string {
 		"- A slightly dry BOFH-adjacent tone is fine if it fits the user's intent, but clarity and accuracy come first.",
 		"",
 		"Workflow:",
-		"- When the user refers to the current Slack thread, use slack_get_current_thread if you need context.",
+		"- When the user refers to the current Slack thread, use slack_read_thread if you need context.",
 		"- When the user pastes a Slack message link and wants channel context from that point onward, use slack_read_channel.",
 		"- Use limit for a bounded read of the next N messages. Omit limit to paginate from the permalink through endUrl or to the present, which is useful before summarizing.",
 		"- Treat any existing composer draft text in the Slack thread result as the user's rough draft or intent.",
@@ -1130,7 +1130,7 @@ export default function piSlack(pi: ExtensionAPI) {
 			return;
 		}
 
-		pi.setActiveTools(["slack_get_current_thread", "slack_read_channel"]);
+		pi.setActiveTools(["slack_read_thread", "slack_read_channel"]);
 		if (!pi.getSessionName()) {
 			pi.setSessionName("Pi Slack");
 		}
@@ -1162,8 +1162,8 @@ export default function piSlack(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "slack_get_current_thread",
-		label: "Slack Current Thread",
+		name: "slack_read_thread",
+		label: "Slack Read Thread",
 		description:
 			"Read the currently open Slack thread from the active Chrome Slack tab, including any existing draft text in the reply composer.",
 		promptSnippet:
@@ -1255,7 +1255,7 @@ export default function piSlack(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("slack-thread-read", {
+	pi.registerCommand("slack-read-thread", {
 		description: "Read the current Slack thread and inject it into the session as a visible Slack message",
 		handler: async (_args, ctx) => {
 			try {

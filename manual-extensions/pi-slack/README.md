@@ -43,13 +43,13 @@ Implemented so far:
 - local shared-secret creation/loading
 - Chrome hello/ack handshake support
 - Slack-specific non-coding system prompt override
-- active tools restricted to `slack_get_current_thread` and `slack_read_channel`
+- active tools restricted to `slack_read_thread` and `slack_read_channel`
 - automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
 - `/slack-ping` command
-- `/slack-thread-read` command for the active thread
+- `/slack-read-thread` command for the active thread
 - `/slack-read-channel` command for channel reads by permalink
-- `slack_get_current_thread` tool
+- `slack_read_thread` tool
 - `slack_read_channel` tool
 - Slack thread and channel-range normalization for model context
 - channel summarization with automatic pagination and optional thread expansion
@@ -63,9 +63,9 @@ Not implemented yet:
 - `/slack-status` — show bridge status
 - `/slack-status --show-token` — reveal the shared secret for Chrome setup
 - `/slack-ping` — ping the connected Chrome extension
-- `/slack-thread-read` — read the active Slack thread and add it to the session as a visible message
+- `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]` — read channel messages from a Slack message link, either as a bounded window (`--next`) or as a paginated span suitable for summarization
-- ask Pi to use `slack_get_current_thread` — read the active Slack thread plus any existing composer draft text
+- ask Pi to use `slack_read_thread` — read the active Slack thread plus any existing composer draft text
 - ask Pi to use `slack_read_channel` — read channel messages from a Slack permalink, either as a bounded range or as a larger paginated span for summarization
 
 ## Prompt behavior

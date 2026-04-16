@@ -187,7 +187,7 @@ This is a deliberate design choice so there is exactly one Slack controller.
 
 ### Proposed tools
 
-#### `slack_get_current_thread`
+#### `slack_read_thread`
 Read the currently open Slack thread from the active Slack tab.
 
 **Behavior:**
@@ -496,7 +496,7 @@ For long threads:
 3. Optionally start a rough draft in the Slack composer
 4. Ask Pi something like:
    - `Read the current Slack thread and refine my draft into a concise reply.`
-5. Pi calls `slack_get_current_thread`
+5. Pi calls `slack_read_thread`
 6. Pi sees both the thread and any existing composer draft text
 7. Pi drafts or refines a reply
 8. You copy/paste the final reply into Slack
@@ -646,13 +646,13 @@ Repo structure exists, does not auto-load the Slack extension, and keeps Slack-s
 ---
 
 ## Phase 3: Read current thread, existing draft, and channel permalink ranges
-**Goal:** support `slack_get_current_thread` and `slack_read_channel` end to end.
+**Goal:** support `slack_read_thread` and `slack_read_channel` end to end.
 
 ### Tasks
 - implement Slack DOM adapter for thread extraction
 - extract current composer draft text when present
 - define normalized thread payload shape
-- implement Pi tool `slack_get_current_thread`
+- implement Pi tool `slack_read_thread`
 - implement Pi tool `slack_read_channel`
 - add temporary-tab permalink routing for channel-range reads
 - normalize tool output for LLM consumption
@@ -692,9 +692,9 @@ The MVP should include only:
 - fixed-port singleton WebSocket server
 - Chrome extension with reconnect logic
 - minimal Chrome popup for status/setup/testing
-- `slack_get_current_thread`
+- `slack_read_thread`
 - `slack_read_channel`
-- `/slack-thread-read`
+- `/slack-read-thread`
 - `/slack-read-channel`
 - `/slack-status`
 
@@ -722,7 +722,7 @@ Everything else is optional.
 - test with no thread open
 
 ### Manual copy/paste workflow
-- ask Pi to produce a generated draft after `/slack-thread-read`
+- ask Pi to produce a generated draft after `/slack-read-thread`
 - verify the draft is easy to copy/paste into Slack manually
 - verify existing composer text can still be used as context without any browser-side write-back
 
@@ -779,6 +779,6 @@ Everything else is optional.
    - `chrome-extensions/pi-slack/`
 2. Implement **Phase 1** and **Phase 2** only
 3. Prove the WebSocket handshake and singleton behavior
-4. Then build `slack_get_current_thread` before any write action
+4. Then build `slack_read_thread` before any write action
 
 That order gives the best feedback loop with the least risk.
