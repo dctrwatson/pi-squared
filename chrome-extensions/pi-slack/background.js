@@ -2281,7 +2281,7 @@ async function ensureConnected() {
       void updateActionAppearance();
       if (clearPairingBecauseStale) {
         void clearPairing().then(() => {
-          state.lastError = "Pairing is stale or rotated. Run /slack-status --show-pairing and pair Chrome again.";
+          state.lastError = "Pairing is stale or rotated. Run /slack-pair and pair Chrome again.";
           void updateActionAppearance();
         });
         return;

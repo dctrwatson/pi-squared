@@ -453,15 +453,8 @@ function connectionSummary(): string {
 	return `connected${version}`;
 }
 
-function formatStatus(showPairing: boolean): string {
+function formatStatus(): string {
 	const lines: string[] = [];
-	if (showPairing) {
-		lines.push(
-			"WARNING: the pairing code grants read access to this Pi Slack session until it is rotated or the session exits. Keep it confidential.",
-			"",
-		);
-		state.pairingRevealedAt = Date.now();
-	}
 	lines.push(
 		`Pi Slack bridge: ${state.lifecycle}`,
 		`Endpoint: ${state.wsUrl}`,
@@ -478,9 +471,6 @@ function formatStatus(showPairing: boolean): string {
 		lines.push(`Pairing last revealed at: ${formatTimestamp(state.pairingRevealedAt)}`);
 	}
 
-	if (showPairing && state.pairingCode) {
-		lines.push("", "Pairing code:", state.pairingCode);
-	}
 
 	if (state.activeChrome) {
 		lines.push(`Chrome connected at: ${formatTimestamp(state.activeChrome.connectedAt)}`);
@@ -528,16 +518,28 @@ function formatPairingMessage(heading?: string): string {
 }
 
 function revealPairing(
+	pi: ExtensionAPI,
 	ctx: { hasUI: boolean; ui?: { notify(message: string, type?: "info" | "warning" | "error"): void } },
 	heading?: string,
 ): void {
-	const message = formatPairingMessage(heading);
+	state.pairingRevealedAt = Date.now();
 	if (ctx.hasUI && ctx.ui) {
-		ctx.ui.notify(message, "info");
+		pi.sendMessage({
+			customType: "slack-pairing",
+			content: heading ?? "Current Pi Slack pairing code",
+			display: true,
+			details: {
+				pairingCode: state.pairingCode,
+				endpoint: state.wsUrl,
+				sessionId: state.sessionId,
+				revealedAt: state.pairingRevealedAt,
+			},
+		});
+		ctx.ui.notify("Slack pairing code added to the session for easy copy.", "info");
 		return;
 	}
 	console.error("WARNING: pairing code displayed — keep this output confidential until the Pi Slack session exits.");
-	writeStatus(message);
+	writeStatus(formatPairingMessage(heading));
 }
 
 function buildSlackSystemPrompt(): string {
@@ -1569,7 +1571,7 @@ export default function piSlack(pi: ExtensionAPI) {
 			return;
 		}
 
-		revealPairing(ctx, `Pi Slack bridge listening on ${state.wsUrl}. Pair Chrome for this startup:`);
+		revealPairing(pi, ctx, `Pi Slack bridge listening on ${state.wsUrl}. Pair Chrome for this startup:`);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1600,6 +1602,32 @@ export default function piSlack(pi: ExtensionAPI) {
 		text += `\n${body}`;
 		if (truncated) {
 			text += `\n${theme.fg("muted", "... expand to view the full debug payload")}`;
+		}
+		return new Text(text, 0, 0);
+	});
+
+	pi.registerMessageRenderer("slack-pairing", (message, _options, theme) => {
+		const details = (message.details ?? {}) as {
+			pairingCode?: string;
+			endpoint?: string;
+			sessionId?: string;
+			revealedAt?: number;
+		};
+		const title = typeof message.content === "string" ? message.content : "Current Pi Slack pairing code";
+		const pairingCode = details.pairingCode ?? "";
+		let text = theme.fg("toolTitle", theme.bold("slack-pair"));
+		text += `\n${title}`;
+		text += `\n\n${theme.fg("warning", "Keep this code confidential until it is rotated or the Pi Slack session exits.")}`;
+		text += `\n\n${theme.bold("Pairing code:")}`;
+		text += `\n${theme.fg("accent", pairingCode)}`;
+		if (details.endpoint) {
+			text += `\n\nEndpoint: ${details.endpoint}`;
+		}
+		if (details.sessionId) {
+			text += `\nSession: ${details.sessionId}`;
+		}
+		if (details.revealedAt) {
+			text += `\nRevealed: ${formatTimestamp(details.revealedAt)}`;
 		}
 		return new Text(text, 0, 0);
 	});
@@ -1886,7 +1914,7 @@ export default function piSlack(pi: ExtensionAPI) {
 				}
 				rejectAllPending("Pi Slack pairing rotated.");
 				rotatePairing("manual rotation command");
-				revealPairing(ctx, "Pi Slack pairing rotated. Paste the new pairing code into Chrome to reconnect:");
+				revealPairing(pi, ctx, "Pi Slack pairing rotated. Paste the new pairing code into Chrome to reconnect:");
 			} catch (error) {
 				const message = `Pi Slack pairing rotation failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
@@ -1899,16 +1927,12 @@ export default function piSlack(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-status", {
-		description: "Show Pi Slack bridge status (use --show-pairing to reveal the pairing code)",
-		handler: async (args, ctx) => {
-			const showPairing = args.includes("--show-pairing") || args.includes("--show-token");
-			const message = formatStatus(showPairing);
+		description: "Show Pi Slack bridge status",
+		handler: async (_args, ctx) => {
+			const message = formatStatus();
 			if (ctx.hasUI) {
 				ctx.ui.notify(message, "info");
 			} else {
-				if (showPairing) {
-					console.error("WARNING: pairing code displayed — keep this output confidential until the Pi Slack session exits.");
-				}
 				writeStatus(message);
 			}
 		},
@@ -1919,7 +1943,7 @@ export default function piSlack(pi: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			try {
 				await ensureBridgeStarted();
-				revealPairing(ctx, "Current Pi Slack pairing code:");
+				revealPairing(pi, ctx, "Current Pi Slack pairing code:");
 			} catch (error) {
 				const message = `Pi Slack pairing reveal failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {

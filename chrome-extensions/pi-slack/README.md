@@ -35,7 +35,7 @@ Not implemented yet:
 
 The Chrome extension now pairs to a single live `pi-slack` session.
 See `manual-extensions/pi-slack/README.md` — **First-run setup** — for the flow:
-launch `pi-slack`, run `/slack-status --show-pairing`, then paste that pairing code into the popup.
+launch `pi-slack`, copy the pairing code that Pi shows at startup (or run `/slack-pair`), then paste that pairing code into the popup.
 Chrome will prompt before each Slack read request is executed.
 
 ## Loading in Chrome

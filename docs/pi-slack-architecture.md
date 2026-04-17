@@ -201,8 +201,6 @@ The extension currently registers these commands:
 
 - `/slack-status`
 - `/slack-pair`
-- `/slack-status --show-pairing`
-- `/slack-status --show-token` — compatibility alias for `--show-pairing`
 - `/slack-rotate-pairing`
 - `/slack-ping`
 - `/slack-read-thread`
@@ -225,16 +223,10 @@ Instead, each live `pi-slack` startup creates:
 
 Within the same live `pi-slack` process, `/new` preserves that pairing so the user can clear model context without re-pairing Chrome.
 
-On fresh startup, Pi reveals the pairing code automatically in the UI. The user can reveal it again with:
+On fresh startup, Pi reveals the pairing code automatically in the session UI so it is easy to copy. The user can reveal it again with:
 
 ```text
 /slack-pair
-```
-
-For the full status view, including the pairing code, the user can also run:
-
-```text
-/slack-status --show-pairing
 ```
 
 The user pastes that code into the Chrome popup. Chrome stores it in `chrome.storage.session`, not `chrome.storage.local`, so the pairing is session-scoped rather than a long-lived browser secret.
