@@ -336,12 +336,30 @@ function createNonce() {
   return toHex(crypto.getRandomValues(new Uint8Array(16)));
 }
 
-function approvalSummaryForRequest(message) {
+function summarizeTabForApproval(tab) {
+  if (!tab) {
+    return [
+      "No active Slack tab is currently available.",
+      "If you allow this request now, it may still fail until Slack is open in Chrome.",
+    ];
+  }
+
+  return [
+    `Active tab title: ${tab.title || "(untitled)"}`,
+    `Active tab URL: ${tab.url || "(missing URL)"}`,
+  ];
+}
+
+async function approvalSummaryForRequest(message) {
   if (message.action === "getCurrentThread") {
+    const tabs = await getSlackTabsDetailed();
     return {
       title: "Read current Slack thread",
       lines: [
-        "Reads the currently open Slack thread from the active Slack tab.",
+        ...summarizeTabForApproval(serializeTab(tabs.activeTab)),
+        `Slack tabs detected: ${tabs.count}`,
+        `Tab selection rule: ${tabs.selectionRule}`,
+        "Reads the currently open Slack thread from the selected Slack tab.",
         "Includes any unsent draft text in the thread composer.",
       ],
     };
@@ -355,8 +373,8 @@ function approvalSummaryForRequest(message) {
       title: "Read Slack channel range",
       lines: [
         `Start URL: ${startUrl}`,
-        ...(endUrl ? [`End URL: ${endUrl}`] : []),
-        ...(limit ? [`Requested next messages: ${limit}`] : []),
+        ...(endUrl ? [`End URL: ${endUrl}`] : ["End URL: not set (bounded read starts at Start URL and stops after the requested count)."]),
+        ...(limit ? [`Requested next messages: ${limit}`] : ["Requested next messages: not specified"]),
         "Chrome may temporarily focus a Slack tab to harvest the range.",
       ],
     };
@@ -371,10 +389,11 @@ function approvalSummaryForRequest(message) {
       title: "Read Slack channel summary span",
       lines: [
         `Start URL: ${startUrl}`,
-        ...(endUrl ? [`End URL: ${endUrl}`] : []),
+        ...(endUrl ? [`End URL: ${endUrl}`] : ["End URL: not set (read may continue from Start URL to the present)."]),
         `Max messages: ${maxMessages}`,
         `Expand threads: ${includeThreads ? "yes" : "no"}`,
         "Chrome may temporarily focus Slack tabs and collect a larger message span.",
+        "This is a higher-scope read than the current-thread tool.",
       ],
     };
   }
@@ -420,7 +439,7 @@ async function openApprovalWindow() {
 }
 
 async function requestUserApproval(message) {
-  const summary = approvalSummaryForRequest(message);
+  const summary = await approvalSummaryForRequest(message);
   const approval = {
     id: message.id,
     action: message.action,
