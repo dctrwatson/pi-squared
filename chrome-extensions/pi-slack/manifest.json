@@ -6,7 +6,8 @@
   "permissions": [
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "host_permissions": [
     "https://app.slack.com/*",
@@ -19,8 +20,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://app.slack.com/*",
-        "https://*.slack.com/*"
+        "https://app.slack.com/*"
       ],
       "js": [
         "content-script.js"

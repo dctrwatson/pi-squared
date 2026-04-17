@@ -9,14 +9,16 @@ const CHANNEL_SUMMARY_THREAD_LIMIT = 50;
 const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 100;
 const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 2_000;
 const ICON_SIZES = [16, 32, 48, 128];
+const HEARTBEAT_ALARM = "pi-slack-heartbeat"; // T22
+const RECONNECT_ALARM = "pi-slack-reconnect"; // T22
 
 const state = {
   socket: null,
   socketState: "idle",
   connected: false,
   authenticated: false,
-  reconnectTimer: null,
-  heartbeatTimer: null,
+  reconnectAttempt: 0, // T23
+  temporaryTabIds: new Set(), // T26
   lastError: "",
   lastHelloSentAt: 0,
   lastHelloAckAt: 0,
@@ -143,17 +145,11 @@ async function updateActionAppearance() {
 }
 
 function clearReconnectTimer() {
-  if (state.reconnectTimer !== null) {
-    clearTimeout(state.reconnectTimer);
-    state.reconnectTimer = null;
-  }
+  void chrome.alarms.clear(RECONNECT_ALARM); // T22
 }
 
 function clearHeartbeatTimer() {
-  if (state.heartbeatTimer !== null) {
-    clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = null;
-  }
+  void chrome.alarms.clear(HEARTBEAT_ALARM); // T22
 }
 
 function resetSocketState() {
@@ -181,34 +177,20 @@ async function scheduleReconnect() {
   const token = await getToken();
   if (!token) return;
 
-  state.reconnectTimer = setTimeout(() => {
-    state.reconnectTimer = null;
-    void ensureConnected();
-  }, RECONNECT_DELAY_MS);
+  // T22: Use chrome.alarms so reconnects survive service worker eviction.
+  // T23: Exponential backoff with jitter (cap 30 s).
+  const delay = Math.min(30_000, 1_000 * 2 ** state.reconnectAttempt) + Math.floor(Math.random() * 500);
+  chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delay / 60_000 });
 }
 
 function sendJson(socket, message) {
   socket.send(JSON.stringify(message));
 }
 
-function startHeartbeat(socket) {
+function startHeartbeat() {
+  // T22: Use chrome.alarms so heartbeats survive service worker eviction.
   clearHeartbeatTimer();
-  state.heartbeatTimer = setInterval(() => {
-    if (!state.authenticated || state.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-    state.lastHeartbeatSentAt = Date.now();
-    try {
-      sendJson(socket, {
-        type: "event",
-        event: "heartbeat",
-        payload: {
-          sentAt: new Date(state.lastHeartbeatSentAt).toISOString(),
-        },
-      });
-    } catch (error) {
-      state.lastError = error instanceof Error ? error.message : String(error);
-      void updateActionAppearance();
-    }
-  }, HEARTBEAT_INTERVAL_MS);
+  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: HEARTBEAT_INTERVAL_MS / 60_000 });
 }
 
 class BridgeActionError extends Error {
@@ -694,6 +676,7 @@ async function openTemporarySlackTab(url, options = {}) {
   if (typeof tab.id !== "number") {
     throw new BridgeActionError("invalid_tab", "Could not create a temporary Slack tab.");
   }
+  state.temporaryTabIds.add(tab.id); // T26: track for cleanup on disconnect
 
   if (options.foreground) {
     await focusTab(tab.id, typeof tab.windowId === "number" ? tab.windowId : undefined);
@@ -718,6 +701,7 @@ async function withTemporarySlackTab(url, handler, options = {}) {
     } catch {
       // ignore cleanup errors
     }
+    state.temporaryTabIds.delete(temporaryTab.tabId); // T26: untrack after normal close
     if (options.foreground) {
       await restoreActiveTabContext(previousContext);
     }
@@ -1068,7 +1052,8 @@ function handleSocketMessage(socket, event) {
     state.socketState = "authenticated";
     state.lastHelloAckAt = Date.now();
     state.lastError = "";
-    startHeartbeat(socket);
+    state.reconnectAttempt = 0; // T23: reset backoff on successful connection
+    startHeartbeat(); // T22: alarm-based
     void updateActionAppearance();
     return;
   }
@@ -1151,6 +1136,12 @@ async function ensureConnected() {
 
   socket.addEventListener("close", (event) => {
     if (state.socket === socket) {
+      // T26: Clean up any open temporary Slack tabs on disconnect.
+      for (const tabId of state.temporaryTabIds) {
+        chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
+      }
+      state.temporaryTabIds.clear();
+      state.reconnectAttempt += 1; // T23: increment backoff counter
       if (event.reason) {
         state.lastError = `Socket closed: ${event.reason}`;
       } else if (event.code) {
@@ -1188,6 +1179,29 @@ async function getStatus() {
   };
 }
 
+// T22: Alarm handler for heartbeat and reconnect — runs even after service worker eviction.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === HEARTBEAT_ALARM) {
+    if (!state.authenticated || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+    state.lastHeartbeatSentAt = Date.now();
+    try {
+      sendJson(state.socket, {
+        type: "event",
+        event: "heartbeat",
+        payload: { sentAt: new Date(state.lastHeartbeatSentAt).toISOString() },
+      });
+    } catch (error) {
+      state.lastError = error instanceof Error ? error.message : String(error);
+      void updateActionAppearance();
+    }
+    return;
+  }
+
+  if (alarm.name === RECONNECT_ALARM) {
+    void ensureConnected();
+  }
+});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !(TOKEN_KEY in changes)) return;
   void updateActionAppearance();
@@ -1215,6 +1229,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     chrome.storage.local.remove(TOKEN_KEY).then(() => {
       clearReconnectTimer();
       closeSocket();
+      // T26: Clean up any open temporary Slack tabs.
+      for (const tabId of state.temporaryTabIds) {
+        chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
+      }
+      state.temporaryTabIds.clear();
       state.lastError = "No shared secret configured.";
       void updateActionAppearance();
       sendResponse({ ok: true });
