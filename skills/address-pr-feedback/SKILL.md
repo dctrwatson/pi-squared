@@ -1,7 +1,7 @@
 ---
 name: address-pr-feedback
 description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and drafts or posts responses. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR.
-compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. Pushing commits or posting replies also requires the corresponding repo permissions.
+compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. The bundled helper script also requires Python 3. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
 # Address PR Feedback
@@ -14,7 +14,21 @@ Some comments should lead to code changes. Some should lead to a thoughtful repl
 
 Use the current repo and current branch PR unless the user specifies a PR number or URL.
 
-Start with:
+Prefer the bundled helper first:
+
+```bash
+python3 -B <skill_dir>/scripts/gather-pr-feedback.py [pr-selector]
+```
+
+The script prints `WORKDIR=`, `SUMMARY=`, and `NORMALIZED_JSON=` paths and writes:
+
+- `feedback-summary.md` — a readable summary of general comments, review summaries, and inline threads
+- `normalized-feedback.json` — normalized structured data for deeper inspection
+- raw API payloads such as `issue-comments.json`, `reviews.json`, and `review-comments.json`
+
+Read `feedback-summary.md` first, then inspect `normalized-feedback.json` or the raw payloads only if you need more detail.
+
+If you cannot use the helper, gather manually:
 
 ```bash
 set -euo pipefail
@@ -40,7 +54,7 @@ gh pr view <pr-selector> --json number,title,url
 
 You need the full feedback picture before deciding what to change.
 
-Fetch these sources:
+If you are gathering manually, fetch these sources:
 
 ```bash
 gh pr view "$pr" --json number,title,url,baseRefName,headRefName,reviewDecision,isDraft > "$workdir/pr.json"
@@ -222,3 +236,7 @@ Treat bot findings as input, not automatic requirements. Apply the same reply-ve
 
 ### Dirty working tree
 Do not mix unrelated local changes into review-response commits. Ask the user whether to stash, commit, or discard unrelated work first.
+
+## Helper files
+
+- `scripts/gather-pr-feedback.py` — resolves the PR, fetches general comments plus inline review threads, normalizes them, and writes a summary you can read before planning changes
