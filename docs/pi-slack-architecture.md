@@ -18,6 +18,7 @@ The current implementation provides:
 - a dedicated `pi-slack` launcher with a fixed session directory
 - a local WebSocket bridge on `127.0.0.1` using a session-specific port by default
 - session pairing via a one-session pairing code shown by Pi
+- manual and automatic pairing rotation to reduce stale pairing lifetime
 - nonce/HMAC handshake between Chrome and Pi after pairing
 - a Slack-specific Pi system prompt and restricted tool set
 - explicit Chrome-side approval before each Slack read request
@@ -181,6 +182,7 @@ Default values in the implementation:
 - thread execution timeout: 20 seconds
 - bounded channel range execution timeout: 60 seconds
 - paginated channel range execution timeout: 180 seconds
+- automatic pairing rotation after Chrome disconnect grace period: 10 minutes
 - total Pi-side wait budget for default requests: 75 seconds
 - total Pi-side wait budget for thread reads: 85 seconds
 - total Pi-side wait budget for bounded channel reads: 125 seconds
@@ -189,6 +191,8 @@ Default values in the implementation:
 Overrides:
 
 - `PI_SLACK_PORT` — bind to a fixed port instead of a session-specific ephemeral one
+- `PI_SLACK_ALLOW_NO_ORIGIN=1` — allow no-origin clients for manual debugging; by default `chrome-extension://` origin is required
+- `PI_SLACK_PAIRING_ROTATE_AFTER_DISCONNECT_MS` — override the post-disconnect pairing rotation grace period; `0` disables automatic rotation
 
 ### Commands
 
@@ -197,6 +201,7 @@ The extension currently registers these commands:
 - `/slack-status`
 - `/slack-status --show-pairing`
 - `/slack-status --show-token` — compatibility alias for `--show-pairing`
+- `/slack-rotate-pairing`
 - `/slack-ping`
 - `/slack-read-thread`
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max N] [--no-threads]`
@@ -686,7 +691,7 @@ Session names are also updated from read results so saved sessions are easier to
 
 ### Browser origin enforcement
 
-The WebSocket server uses `verifyClient` to reject any connection whose `Origin` header is present but does not match `chrome-extension://`. No-origin clients (CLI tools, wscat) are still accepted. This is a defense-in-depth measure on top of session pairing and the nonce/HMAC handshake.
+The WebSocket server uses `verifyClient` to require a `chrome-extension://` origin by default. No-origin clients (CLI tools, `wscat`) are rejected unless the user explicitly sets `PI_SLACK_ALLOW_NO_ORIGIN=1` for manual debugging. This is a defense-in-depth measure on top of session pairing and the nonce/HMAC handshake.
 
 ### Session pairing
 
@@ -696,8 +701,11 @@ Authentication is scoped to a live Pi Slack session.
 - Pi exposes those through a pairing code for the current session only
 - Chrome stores the pairing in `chrome.storage.session`
 - Chrome proves knowledge of the session secret without sending it as plaintext in the first message
+- Pi can rotate the pairing on demand with `/slack-rotate-pairing`
+- Pi also rotates the pairing automatically after a configurable grace period if Chrome disconnects and does not return
+- Chrome invalidates stale pairing state when the Pi side rejects the current session as rotated or mismatched
 
-This means pairing must be repeated for each new `pi-slack` session.
+This means pairing must be repeated for each new `pi-slack` session and after pairing rotation.
 
 ### Approval gate
 

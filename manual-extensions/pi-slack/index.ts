@@ -19,6 +19,8 @@ const CHANNEL_RANGE_ALL_EXECUTION_TIMEOUT_MS = 180_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const MAX_UNAUTHENTICATED_SOCKETS = 8; // T08: cap on pre-hello connections
 const PAIRING_CODE_PREFIX = "pi-slack-pair:";
+const ALLOW_NO_ORIGIN_CLIENTS = process.env.PI_SLACK_ALLOW_NO_ORIGIN === "1";
+const DEFAULT_PAIRING_ROTATE_AFTER_DISCONNECT_MS = 10 * 60_000;
 
 type BridgeLifecycle = "stopped" | "starting" | "listening" | "error";
 
@@ -127,6 +129,10 @@ interface BridgeState {
 	sessionId: string;
 	sessionSecret: string;
 	pairingCode: string;
+	allowNoOriginClients: boolean;
+	pairingRotatedAt: number;
+	pairingRevealedAt?: number;
+	rotatePairingAfterDisconnectTimeout?: NodeJS.Timeout;
 	startupError?: string;
 	server?: WebSocketServer;
 	activeChrome?: ActiveChromeConnection;
@@ -209,6 +215,8 @@ const state: BridgeState = {
 	sessionId: randomUUID(),
 	sessionSecret: createSessionSecret(),
 	pairingCode: "",
+	allowNoOriginClients: ALLOW_NO_ORIGIN_CLIENTS,
+	pairingRotatedAt: Date.now(),
 	pendingRequests: new Map(),
 	unauthenticatedSockets: 0,
 };
@@ -225,6 +233,13 @@ function resolvePort(): number {
 
 function createSessionSecret(): string {
 	return randomBytes(32).toString("hex");
+}
+
+function resolvePairingRotateAfterDisconnectMs(): number {
+	const raw = process.env.PI_SLACK_PAIRING_ROTATE_AFTER_DISCONNECT_MS;
+	if (!raw) return DEFAULT_PAIRING_ROTATE_AFTER_DISCONNECT_MS;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_PAIRING_ROTATE_AFTER_DISCONNECT_MS;
 }
 
 function formatTimestamp(timestamp?: number): string {
@@ -397,9 +412,10 @@ function formatStatus(showPairing: boolean): string {
 	const lines: string[] = [];
 	if (showPairing) {
 		lines.push(
-			"WARNING: the pairing code grants read access to this Pi Slack session until the session exits. Keep it confidential.",
+			"WARNING: the pairing code grants read access to this Pi Slack session until it is rotated or the session exits. Keep it confidential.",
 			"",
 		);
+		state.pairingRevealedAt = Date.now();
 	}
 	lines.push(
 		`Pi Slack bridge: ${state.lifecycle}`,
@@ -407,8 +423,15 @@ function formatStatus(showPairing: boolean): string {
 		`Session: ${state.sessionId}`,
 		`Chrome: ${connectionSummary()}`,
 		`Approval gate: Chrome must explicitly allow each Slack read`,
+		`Origin policy: ${state.allowNoOriginClients ? "chrome-extension:// or no-origin clients allowed" : "chrome-extension:// origin required"}`,
+		`Pairing rotated at: ${formatTimestamp(state.pairingRotatedAt)}`,
+		`Pairing auto-rotates after disconnect: ${resolvePairingRotateAfterDisconnectMs() > 0 ? `${Math.round(resolvePairingRotateAfterDisconnectMs() / 1000)}s` : "disabled"}`,
 		`Mode: read-only Slack assistant`,
 	);
+
+	if (state.pairingRevealedAt) {
+		lines.push(`Pairing last revealed at: ${formatTimestamp(state.pairingRevealedAt)}`);
+	}
 
 	if (showPairing && state.pairingCode) {
 		lines.push("", "Pairing code:", state.pairingCode);
@@ -939,10 +962,39 @@ function rejectAllPending(reason: string): void {
 	}
 }
 
+function clearPendingPairingRotation(): void {
+	if (!state.rotatePairingAfterDisconnectTimeout) return;
+	clearTimeout(state.rotatePairingAfterDisconnectTimeout);
+	state.rotatePairingAfterDisconnectTimeout = undefined;
+}
+
+function rotatePairing(reason?: string): void {
+	clearPendingPairingRotation();
+	state.sessionId = randomUUID();
+	state.sessionSecret = createSessionSecret();
+	state.pairingCode = encodePairingCode(createPairingPayload());
+	state.pairingRotatedAt = Date.now();
+	state.pairingRevealedAt = undefined;
+	if (reason) {
+		console.warn(`[pi-slack] pairing rotated: ${reason}`);
+	}
+}
+
+function schedulePairingRotationAfterDisconnect(): void {
+	clearPendingPairingRotation();
+	const delayMs = resolvePairingRotateAfterDisconnectMs();
+	if (delayMs <= 0) return;
+	state.rotatePairingAfterDisconnectTimeout = setTimeout(() => {
+		if (state.activeChrome) return;
+		rotatePairing("no Chrome connection during disconnect grace period");
+	}, delayMs);
+}
+
 function clearActiveChrome(socket: WebSocket): void {
 	if (state.activeChrome?.socket !== socket) return;
 	state.activeChrome = undefined;
 	rejectAllPending("Chrome extension disconnected.");
+	schedulePairingRotationAfterDisconnect();
 }
 
 function closeSocket(socket: WebSocket, code: number, reason: string): void {
@@ -1066,14 +1118,16 @@ async function startBridge(): Promise<void> {
 	state.sessionId = randomUUID();
 	state.sessionSecret = createSessionSecret();
 	state.pairingCode = "";
+	state.pairingRotatedAt = Date.now();
+	clearPendingPairingRotation();
 
 	const server = new WebSocketServer({
 		host: state.host,
 		port: state.port,
-		// T01: Only accept connections from chrome-extension:// origins (or no-origin CLI clients).
+		// T01: Require chrome-extension:// origins by default; no-origin clients are opt-in for manual debugging.
 		verifyClient: (info: { origin: string; secure: boolean; req: IncomingMessage }) => {
 			const origin = info.origin;
-			if (!origin) return true;
+			if (!origin) return state.allowNoOriginClients;
 			return /^chrome-extension:\/\//i.test(origin);
 		},
 	});
@@ -1204,6 +1258,7 @@ async function startBridge(): Promise<void> {
 				clearActiveChrome(previousSocket);
 			}
 
+			clearPendingPairingRotation();
 			state.activeChrome = {
 				socket,
 				connectedAt: Date.now(),
@@ -1260,6 +1315,7 @@ async function startBridge(): Promise<void> {
 
 async function stopBridge(): Promise<void> {
 	rejectAllPending("Pi Slack bridge is shutting down.");
+	clearPendingPairingRotation();
 
 	if (state.activeChrome) {
 		closeSocket(state.activeChrome.socket, 1001, "Pi Slack shutting down");
@@ -1700,6 +1756,34 @@ export default function piSlack(pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				const message = `Slack channel debug scan failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
+			}
+		},
+	});
+
+	pi.registerCommand("slack-rotate-pairing", {
+		description: "Rotate the live Pi Slack pairing code, disconnecting Chrome until it re-pairs",
+		handler: async (_args, ctx) => {
+			try {
+				await ensureBridgeStarted();
+				if (state.activeChrome) {
+					closeSocket(state.activeChrome.socket, 1008, "Pairing rotated");
+					state.activeChrome = undefined;
+				}
+				rejectAllPending("Pi Slack pairing rotated.");
+				rotatePairing("manual rotation command");
+				const message = "Pi Slack pairing rotated. Run /slack-status --show-pairing and re-pair Chrome.";
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "info");
+				} else {
+					writeStatus(message);
+				}
+			} catch (error) {
+				const message = `Pi Slack pairing rotation failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "error");
 				} else {

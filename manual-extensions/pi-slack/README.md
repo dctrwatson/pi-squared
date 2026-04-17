@@ -77,11 +77,14 @@ Implemented so far:
 - dedicated local `tsconfig.json`
 - localhost WebSocket server on a session-specific port (or `PI_SLACK_PORT` override)
 - per-session pairing code generation
+- pairing rotation command and automatic post-disconnect pairing rotation grace period
 - nonce/HMAC Chrome handshake support
+- stricter default origin policy (`chrome-extension://` required unless `PI_SLACK_ALLOW_NO_ORIGIN=1`)
 - Slack-specific non-coding system prompt override
 - active tools restricted to `slack_read_thread` and `slack_read_channel`
 - automatic Slack-aware session naming for easier resume/history browsing
 - `/slack-status` command
+- `/slack-rotate-pairing` command
 - `/slack-ping` command
 - `/slack-read-thread` command for the active thread
 - `/slack-read-channel` command for channel reads by permalink
@@ -98,6 +101,7 @@ Not implemented yet:
 
 - `/slack-status` — show bridge status
 - `/slack-status --show-pairing` — reveal the pairing code for Chrome setup (`--show-token` remains a compatibility alias)
+- `/slack-rotate-pairing` — rotate the live pairing code and force Chrome to re-pair
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]` — read channel messages from a Slack message link, either as a bounded window (`--next`) or as a paginated span suitable for summarization

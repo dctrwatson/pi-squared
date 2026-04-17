@@ -12,6 +12,7 @@ Implemented so far:
 - MV3 manifest
 - lightweight local `package.json`
 - background service worker with per-session WebSocket pairing and nonce/HMAC handshake
+- stale-pairing invalidation when the Pi session rotates or rejects the current pairing
 - ping response handling for the Pi bridge
 - Chrome-side approval gate for every Slack read request
 - short-lived temporary approval policies for current-thread reads only

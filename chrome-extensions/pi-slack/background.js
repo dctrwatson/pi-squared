@@ -432,6 +432,20 @@ function clearTemporaryApprovalPolicies() {
   void updateActionAppearance();
 }
 
+function shouldClearPairingOnClose(event) {
+  if (event?.code !== 1008) return false;
+  const reason = String(event?.reason || "");
+  return [
+    "Session mismatch",
+    "Invalid server challenge",
+    "Invalid hello acknowledgement",
+    "Invalid server proof",
+    "Handshake mismatch",
+    "Invalid proof",
+    "Pairing rotated",
+  ].some((fragment) => reason.includes(fragment));
+}
+
 function createTemporaryApprovalPolicy(message, classification, scope) {
   const now = Date.now();
   const expiresAt = scope === "5m" ? now + 5 * 60_000 : null;
@@ -643,13 +657,17 @@ function resolveApproval(id, decision) {
   clearTimeout(approval.timeout);
   state.pendingApprovals.delete(id);
 
-  if (decision === "allow_5m" || decision === "allow_session") {
-    const scope = decision === "allow_5m" ? "5m" : "session";
+  const normalizedDecision = ["allow_once", "allow_5m", "allow_session", "deny"].includes(decision)
+    ? decision
+    : "deny";
+
+  if (normalizedDecision === "allow_5m" || normalizedDecision === "allow_session") {
+    const scope = normalizedDecision === "allow_5m" ? "5m" : "session";
     const policy = createTemporaryApprovalPolicy({ action: approval.action }, { risk: approval.risk, signature: approval.signature, policyEligible: true }, scope);
     state.tempApprovalPolicies.set(policy.id, policy);
   }
 
-  if (decision === "deny") {
+  if (normalizedDecision === "deny") {
     for (const waiter of approval.waiters) {
       waiter.reject(new BridgeActionError("user_denied", "User denied this Slack read request in Chrome."));
     }
@@ -1797,8 +1815,16 @@ async function ensureConnected() {
       } else if (event.code) {
         state.lastError = `Socket closed (${event.code}).`;
       }
+      const clearPairingBecauseStale = shouldClearPairingOnClose(event);
       resetSocketState();
       void updateActionAppearance();
+      if (clearPairingBecauseStale) {
+        void clearPairing().then(() => {
+          state.lastError = "Pairing is stale or rotated. Run /slack-status --show-pairing and pair Chrome again.";
+          void updateActionAppearance();
+        });
+        return;
+      }
       void scheduleReconnect();
     }
   });
