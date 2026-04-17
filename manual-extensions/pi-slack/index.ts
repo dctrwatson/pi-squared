@@ -147,6 +147,24 @@ interface SlackThreadMessage {
 	thread?: SlackThreadSnapshot;
 }
 
+interface SlackExtractionDiagnostics {
+	rootSelector?: string;
+	rootCandidateCount?: number;
+	composerPresent?: boolean;
+	extractPasses?: number;
+	candidateRowCount?: number;
+	filteredRowCount?: number;
+	finalMessageCount?: number;
+	explicitAuthorCount?: number;
+	backfilledAuthorCount?: number;
+	permalinkCount?: number;
+	messageTsCount?: number;
+	fallbackTextCount?: number;
+	startedAtBoundary?: boolean;
+	reachedEndBoundary?: boolean;
+	hitLimit?: boolean;
+}
+
 interface SlackThreadSnapshot {
 	workspace?: string;
 	channel?: string;
@@ -158,6 +176,8 @@ interface SlackThreadSnapshot {
 	composerDraftText?: string;
 	reportedMessageCount?: number;
 	harvestedViaScroll?: boolean;
+	diagnostics?: SlackExtractionDiagnostics;
+	extractionWarnings?: string[];
 }
 
 interface SlackChannelRangeSnapshot {
@@ -176,6 +196,8 @@ interface SlackChannelRangeSnapshot {
 	expandedThreadCount?: number;
 	omittedThreadCount?: number;
 	failedThreadCount?: number;
+	diagnostics?: SlackExtractionDiagnostics;
+	extractionWarnings?: string[];
 }
 
 const state: BridgeState = {
@@ -259,6 +281,27 @@ function isSlackThreadMessage(value: unknown): value is SlackThreadMessage {
 	);
 }
 
+function isSlackExtractionDiagnostics(value: unknown): value is SlackExtractionDiagnostics {
+	if (!isRecord(value)) return false;
+	return (
+		(value.rootSelector === undefined || typeof value.rootSelector === "string") &&
+		(value.rootCandidateCount === undefined || typeof value.rootCandidateCount === "number") &&
+		(value.composerPresent === undefined || typeof value.composerPresent === "boolean") &&
+		(value.extractPasses === undefined || typeof value.extractPasses === "number") &&
+		(value.candidateRowCount === undefined || typeof value.candidateRowCount === "number") &&
+		(value.filteredRowCount === undefined || typeof value.filteredRowCount === "number") &&
+		(value.finalMessageCount === undefined || typeof value.finalMessageCount === "number") &&
+		(value.explicitAuthorCount === undefined || typeof value.explicitAuthorCount === "number") &&
+		(value.backfilledAuthorCount === undefined || typeof value.backfilledAuthorCount === "number") &&
+		(value.permalinkCount === undefined || typeof value.permalinkCount === "number") &&
+		(value.messageTsCount === undefined || typeof value.messageTsCount === "number") &&
+		(value.fallbackTextCount === undefined || typeof value.fallbackTextCount === "number") &&
+		(value.startedAtBoundary === undefined || typeof value.startedAtBoundary === "boolean") &&
+		(value.reachedEndBoundary === undefined || typeof value.reachedEndBoundary === "boolean") &&
+		(value.hitLimit === undefined || typeof value.hitLimit === "boolean")
+	);
+}
+
 function isSlackThreadSnapshot(value: unknown): value is SlackThreadSnapshot {
 	if (!isRecord(value)) return false;
 	return (
@@ -270,6 +313,8 @@ function isSlackThreadSnapshot(value: unknown): value is SlackThreadSnapshot {
 		(value.composerDraftText === undefined || typeof value.composerDraftText === "string") &&
 		(value.reportedMessageCount === undefined || typeof value.reportedMessageCount === "number") &&
 		(value.harvestedViaScroll === undefined || typeof value.harvestedViaScroll === "boolean") &&
+		(value.diagnostics === undefined || isSlackExtractionDiagnostics(value.diagnostics)) &&
+		(value.extractionWarnings === undefined || (Array.isArray(value.extractionWarnings) && value.extractionWarnings.every((w) => typeof w === "string"))) &&
 		Array.isArray(value.messages) &&
 		value.messages.every(isSlackThreadMessage) &&
 		(value.rootMessage === undefined || isSlackThreadMessage(value.rootMessage))
@@ -293,6 +338,8 @@ function isSlackChannelRangeSnapshot(value: unknown): value is SlackChannelRange
 		(value.expandedThreadCount === undefined || typeof value.expandedThreadCount === "number") &&
 		(value.omittedThreadCount === undefined || typeof value.omittedThreadCount === "number") &&
 		(value.failedThreadCount === undefined || typeof value.failedThreadCount === "number") &&
+		(value.diagnostics === undefined || isSlackExtractionDiagnostics(value.diagnostics)) &&
+		(value.extractionWarnings === undefined || (Array.isArray(value.extractionWarnings) && value.extractionWarnings.every((w) => typeof w === "string"))) &&
 		Array.isArray(value.messages) &&
 		value.messages.every(isSlackThreadMessage)
 	);
@@ -639,6 +686,29 @@ function formatExpandedThreadReplies(
 	}
 }
 
+function appendExtractionNotes(lines: string[], snapshot: { extractionWarnings?: string[]; diagnostics?: SlackExtractionDiagnostics }): void {
+	const warnings = snapshot.extractionWarnings ?? [];
+	if (warnings.length > 0) {
+		lines.push("Extraction notes:");
+		for (const warning of warnings) {
+			lines.push(`- ${warning}`);
+		}
+	}
+
+	const diagnostics = snapshot.diagnostics;
+	if (!diagnostics) return;
+	const details: string[] = [];
+	if (diagnostics.rootSelector) details.push(`root=${diagnostics.rootSelector}`);
+	if (diagnostics.finalMessageCount !== undefined) details.push(`messages=${diagnostics.finalMessageCount}`);
+	if (diagnostics.permalinkCount !== undefined) details.push(`permalinks=${diagnostics.permalinkCount}`);
+	if (diagnostics.messageTsCount !== undefined) details.push(`messageTs=${diagnostics.messageTsCount}`);
+	if (diagnostics.fallbackTextCount) details.push(`fallback_text=${diagnostics.fallbackTextCount}`);
+	if (diagnostics.backfilledAuthorCount) details.push(`author_backfill=${diagnostics.backfilledAuthorCount}`);
+	if (details.length > 0) {
+		lines.push(`Diagnostics: ${details.join(", ")}`);
+	}
+}
+
 function formatSlackMessages(lines: string[], messages: SlackThreadMessage[], omittedCount: number): void {
 	const blockLines: string[] = [];
 	for (let index = 0; index < messages.length; index++) {
@@ -666,6 +736,7 @@ function formatSlackThreadForModel(snapshot: SlackThreadSnapshot, charBudget: nu
 	if (snapshot.harvestedViaScroll) {
 		lines.push("Capture: harvested by scrolling the virtualized thread pane");
 	}
+	appendExtractionNotes(lines, snapshot);
 
 	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
 	formatSlackMessages(lines, messages, omittedCount);
@@ -693,6 +764,7 @@ function formatSlackChannelRangeForModel(snapshot: SlackChannelRangeSnapshot, ch
 	if (snapshot.harvestedViaScroll) {
 		lines.push("Capture: harvested by scrolling the virtualized channel pane");
 	}
+	appendExtractionNotes(lines, snapshot);
 
 	const { messages, omittedCount } = selectMessagesForModel(snapshot.messages, charBudget);
 	formatSlackMessages(lines, messages, omittedCount);
@@ -719,6 +791,7 @@ function formatAllMessagesForSummary(snapshot: SlackChannelRangeSnapshot, charBu
 			lines.push(`Thread expansions failed: ${snapshot.failedThreadCount}`);
 		}
 	}
+	appendExtractionNotes(lines, snapshot);
 
 	const msgs = snapshot.messages;
 	// T17: Root message is always formatted at full fidelity; only the remaining messages are scaled.
@@ -1352,6 +1425,8 @@ export default function piSlack(pi: ExtensionAPI) {
 					messageCount: thread.messages.length,
 					reportedMessageCount: thread.reportedMessageCount,
 					composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+					extractionWarnings: thread.extractionWarnings,
+					diagnostics: thread.diagnostics,
 					charBudget,
 				},
 			};
@@ -1394,6 +1469,8 @@ export default function piSlack(pi: ExtensionAPI) {
 						range,
 						messageCount: range.messages.length,
 						requestedLimit: range.requestedLimit,
+						extractionWarnings: range.extractionWarnings,
+						diagnostics: range.diagnostics,
 						charBudget,
 					},
 				};
@@ -1418,6 +1495,8 @@ export default function piSlack(pi: ExtensionAPI) {
 					expandedThreadCount: snapshot.expandedThreadCount,
 					omittedThreadCount: snapshot.omittedThreadCount,
 					failedThreadCount: snapshot.failedThreadCount,
+					extractionWarnings: snapshot.extractionWarnings,
+					diagnostics: snapshot.diagnostics,
 					charBudget,
 				},
 			};
@@ -1441,6 +1520,8 @@ export default function piSlack(pi: ExtensionAPI) {
 						messageCount: thread.messages.length,
 						reportedMessageCount: thread.reportedMessageCount,
 						composerDraftPresent: Boolean(thread.composerDraftText?.trim()),
+						extractionWarnings: thread.extractionWarnings,
+						diagnostics: thread.diagnostics,
 						charBudget,
 					},
 				});
@@ -1481,6 +1562,8 @@ export default function piSlack(pi: ExtensionAPI) {
 							range,
 							messageCount: range.messages.length,
 							requestedLimit: range.requestedLimit,
+							extractionWarnings: range.extractionWarnings,
+							diagnostics: range.diagnostics,
 							charBudget,
 						},
 					});
@@ -1513,6 +1596,8 @@ export default function piSlack(pi: ExtensionAPI) {
 						expandedThreadCount: snapshot.expandedThreadCount,
 						omittedThreadCount: snapshot.omittedThreadCount,
 						failedThreadCount: snapshot.failedThreadCount,
+						extractionWarnings: snapshot.extractionWarnings,
+						diagnostics: snapshot.diagnostics,
 						charBudget,
 					},
 				});
