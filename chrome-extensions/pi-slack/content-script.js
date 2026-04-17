@@ -67,6 +67,18 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return queryVisibleAll(root, selectors)[0] ?? null;
   }
 
+  function firstMatchingSelector(element, selectors) {
+    if (!(element instanceof Element)) return undefined;
+    for (const selector of selectors) {
+      try {
+        if (element.matches(selector)) return selector;
+      } catch {
+        // ignore selector errors here; callers already control the selector set.
+      }
+    }
+    return undefined;
+  }
+
   function getElementText(element) {
     if (!(element instanceof HTMLElement)) return "";
     return normalizeText(element.innerText || element.textContent || "");
@@ -85,7 +97,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     };
   }
 
-  function findThreadRoot() {
+  function findThreadRootDetails() {
     const selectors = [
       '[data-qa="thread_flexpane"]',
       '[data-qa="threads_flexpane"]',
@@ -104,11 +116,23 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         candidate.querySelector('[contenteditable="true"]') ||
         candidate.querySelector('[data-qa="virtual-list-item"], [role="listitem"]')
       ) {
-        return candidate;
+        return {
+          root: candidate,
+          matchedSelector: firstMatchingSelector(candidate, selectors),
+          candidateCount: candidates.length,
+        };
       }
     }
 
-    return null;
+    return {
+      root: null,
+      matchedSelector: undefined,
+      candidateCount: candidates.length,
+    };
+  }
+
+  function findThreadRoot() {
+    return findThreadRootDetails().root;
   }
 
   function isLikelyComposer(element) {
@@ -467,10 +491,17 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return stripLeadingMetadata(getElementText(clone), author, timestamp);
   }
 
-  function extractMessageText(messageElement, composerElement) {
+  function extractMessageTextDetailed(messageElement, composerElement) {
     const direct = extractMessageTextFromSelectors(messageElement, composerElement);
-    if (direct) return direct;
-    return extractMessageTextFallback(messageElement, composerElement);
+    if (direct) return { text: direct, usedFallback: false };
+    return {
+      text: extractMessageTextFallback(messageElement, composerElement),
+      usedFallback: true,
+    };
+  }
+
+  function extractMessageText(messageElement, composerElement) {
+    return extractMessageTextDetailed(messageElement, composerElement).text;
   }
 
   function isLikelyMessageElement(element, composerElement) {
@@ -495,7 +526,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     ).length;
   }
 
-  function findMainRoot() {
+  function findMainRootDetails() {
     const selectors = [
       '[role="main"]',
       'main',
@@ -521,47 +552,66 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       })
       .sort((a, b) => b.score - a.score);
 
-    const best = scored.find((entry) => entry.messageCount > 0);
-    if (best) return best.candidate;
-    if (scored[0]) return scored[0].candidate;
-    if (document.body && countMessageLikeDescendants(document.body) > 0) return document.body;
-    return document.body ?? null;
+    const best = scored.find((entry) => entry.messageCount > 0) ?? scored[0];
+    if (best) {
+      return {
+        root: best.candidate,
+        matchedSelector: firstMatchingSelector(best.candidate, selectors),
+        candidateCount: candidates.length,
+      };
+    }
+    if (document.body && countMessageLikeDescendants(document.body) > 0) {
+      return { root: document.body, matchedSelector: "document.body", candidateCount: candidates.length };
+    }
+    return { root: document.body ?? null, matchedSelector: document.body ? "document.body" : undefined, candidateCount: candidates.length };
+  }
+
+  function findMainRoot() {
+    return findMainRootDetails().root;
+  }
+
+  async function waitForChannelRootDetails(timeoutMs = READY_TIMEOUT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    let lastDetails = findMainRootDetails();
+
+    while (Date.now() < deadline) {
+      const details = findMainRootDetails();
+      if (details.root) {
+        lastDetails = details;
+        if (countMessageLikeDescendants(details.root) > 0) {
+          return details;
+        }
+      }
+      await sleep(READY_POLL_MS);
+    }
+
+    return lastDetails.root ? lastDetails : findMainRootDetails();
   }
 
   async function waitForChannelRoot(timeoutMs = READY_TIMEOUT_MS) {
+    return (await waitForChannelRootDetails(timeoutMs)).root;
+  }
+
+  async function waitForThreadRootDetails(timeoutMs = READY_TIMEOUT_MS) {
     const deadline = Date.now() + timeoutMs;
-    let lastRoot = findMainRoot();
+    let lastDetails = findThreadRootDetails();
 
     while (Date.now() < deadline) {
-      const root = findMainRoot();
-      if (root) {
-        lastRoot = root;
-        if (countMessageLikeDescendants(root) > 0) {
-          return root;
+      const details = findThreadRootDetails();
+      if (details.root) {
+        lastDetails = details;
+        if (countMessageLikeDescendants(details.root) > 0) {
+          return details;
         }
       }
       await sleep(READY_POLL_MS);
     }
 
-    return lastRoot ?? findMainRoot();
+    return lastDetails.root ? lastDetails : findThreadRootDetails();
   }
 
   async function waitForThreadRoot(timeoutMs = READY_TIMEOUT_MS) {
-    const deadline = Date.now() + timeoutMs;
-    let lastRoot = findThreadRoot();
-
-    while (Date.now() < deadline) {
-      const root = findThreadRoot();
-      if (root) {
-        lastRoot = root;
-        if (countMessageLikeDescendants(root) > 0) {
-          return root;
-        }
-      }
-      await sleep(READY_POLL_MS);
-    }
-
-    return lastRoot ?? findThreadRoot();
+    return (await waitForThreadRootDetails(timeoutMs)).root;
   }
 
   function findMessageElements(root, composerElement) {
@@ -583,10 +633,11 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     );
   }
 
-  function backfillMissingAuthors(messages, initialAuthor) {
+  function backfillMissingAuthorsWithCount(messages, initialAuthor) {
     let currentAuthor = initialAuthor;
+    let backfilledAuthorCount = 0;
 
-    return messages.map((message) => {
+    const result = messages.map((message) => {
       if (!message) return message;
       if (message.author) {
         currentAuthor = message.author;
@@ -597,6 +648,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       // visible sender name. Reuse the most recent explicit author for normal
       // message rows that still have a permalink/timestamp identity.
       if (currentAuthor && (message.messageTs || message.permalinkUrl || message.timestamp)) {
+        backfilledAuthorCount += 1;
         return {
           ...message,
           author: currentAuthor,
@@ -605,30 +657,102 @@ if (!globalThis.__piSlackContentScriptLoaded) {
 
       return message;
     });
+
+    return {
+      messages: result,
+      backfilledAuthorCount,
+    };
   }
 
-  function extractMessages(root, composerElement) {
+  function backfillMissingAuthors(messages, initialAuthor) {
+    return backfillMissingAuthorsWithCount(messages, initialAuthor).messages;
+  }
+
+  function mergeExtractionDiagnostics(target, source) {
+    target.extractPasses += source.extractPasses ?? 0;
+    target.candidateRowCount = Math.max(target.candidateRowCount, source.candidateRowCount ?? 0);
+    target.filteredRowCount = Math.max(target.filteredRowCount, source.filteredRowCount ?? 0);
+    target.finalMessageCount = Math.max(target.finalMessageCount, source.finalMessageCount ?? 0);
+    target.explicitAuthorCount = Math.max(target.explicitAuthorCount, source.explicitAuthorCount ?? 0);
+    target.backfilledAuthorCount = Math.max(target.backfilledAuthorCount, source.backfilledAuthorCount ?? 0);
+    target.permalinkCount = Math.max(target.permalinkCount, source.permalinkCount ?? 0);
+    target.messageTsCount = Math.max(target.messageTsCount, source.messageTsCount ?? 0);
+    target.fallbackTextCount = Math.max(target.fallbackTextCount, source.fallbackTextCount ?? 0);
+  }
+
+  function createEmptyExtractionDiagnostics() {
+    return {
+      extractPasses: 0,
+      candidateRowCount: 0,
+      filteredRowCount: 0,
+      finalMessageCount: 0,
+      explicitAuthorCount: 0,
+      backfilledAuthorCount: 0,
+      permalinkCount: 0,
+      messageTsCount: 0,
+      fallbackTextCount: 0,
+    };
+  }
+
+  function extractMessagesDetailed(root, composerElement, initialAuthor) {
     const messageElements = findMessageElements(root, composerElement);
-    const messages = messageElements
-      .map((element) => {
-        const text = extractMessageText(element, composerElement);
-        if (!text) return null;
-        return {
-          author: extractAuthor(element) || undefined,
-          text,
-          timestamp: extractTimestamp(element) || undefined,
-          messageTs: extractMessageTs(element),
-          permalinkUrl: extractMessagePermalinkUrl(element),
-          replyCount: extractReplyCount(element),
-        };
-      })
+    const rawMessages = [];
+    let fallbackTextCount = 0;
+    let explicitAuthorCount = 0;
+    let permalinkCount = 0;
+    let messageTsCount = 0;
+
+    for (const element of messageElements) {
+      const textDetails = extractMessageTextDetailed(element, composerElement);
+      const text = textDetails.text;
+      if (!text) continue;
+      if (textDetails.usedFallback) fallbackTextCount += 1;
+
+      const author = extractAuthor(element) || undefined;
+      if (author) explicitAuthorCount += 1;
+
+      const permalinkUrl = extractMessagePermalinkUrl(element);
+      if (permalinkUrl) permalinkCount += 1;
+
+      const messageTs = parseSlackTsFromUrl(permalinkUrl);
+      if (messageTs) messageTsCount += 1;
+
+      rawMessages.push({
+        author,
+        text,
+        timestamp: extractTimestamp(element) || undefined,
+        messageTs,
+        permalinkUrl,
+        replyCount: extractReplyCount(element),
+      });
+    }
+
+    const filteredMessages = rawMessages
       .filter(Boolean)
       // T19: Drop system-event rows (join/leave notices, etc.) that carry no identity fields.
       .filter((m) => m.author || m.timestamp || m.permalinkUrl || m.messageTs);
 
-    // T19: Apply isRoot after filtering so the first real message is the root.
-    const withRoot = messages.map((m, index) => ({ ...m, isRoot: index === 0 }));
-    return backfillMissingAuthors(withRoot);
+    const withRoot = filteredMessages.map((m, index) => ({ ...m, isRoot: index === 0 }));
+    const backfilled = backfillMissingAuthorsWithCount(withRoot, initialAuthor);
+
+    return {
+      messages: backfilled.messages,
+      diagnostics: {
+        extractPasses: 1,
+        candidateRowCount: messageElements.length,
+        filteredRowCount: filteredMessages.length,
+        finalMessageCount: backfilled.messages.length,
+        explicitAuthorCount,
+        backfilledAuthorCount: backfilled.backfilledAuthorCount,
+        permalinkCount,
+        messageTsCount,
+        fallbackTextCount,
+      },
+    };
+  }
+
+  function extractMessages(root, composerElement) {
+    return extractMessagesDetailed(root, composerElement).messages;
   }
 
   function makeMessageKey(message) {
@@ -715,13 +839,17 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   }
 
   async function harvestThreadMessages(threadRoot, composerElement) {
-    const visibleMessages = extractMessages(threadRoot, composerElement);
+    const initial = extractMessagesDetailed(threadRoot, composerElement);
+    const visibleMessages = initial.messages;
+    const diagnostics = createEmptyExtractionDiagnostics();
+    mergeExtractionDiagnostics(diagnostics, initial.diagnostics);
     const scrollContainer = findScrollContainer(threadRoot);
 
     if (!scrollContainer) {
       return {
         messages: visibleMessages,
         harvestedViaScroll: false,
+        diagnostics,
       };
     }
 
@@ -729,17 +857,23 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const originalScrollBehavior = scrollContainer.style.scrollBehavior;
     const collected = new Map();
 
+    const collectDetailed = () => {
+      const details = extractMessagesDetailed(threadRoot, composerElement);
+      mergeExtractionDiagnostics(diagnostics, details.diagnostics);
+      collectMessagesInto(collected, details.messages);
+    };
+
     try {
       scrollContainer.style.scrollBehavior = "auto";
       scrollContainer.scrollTop = 0;
       await sleep(SCROLL_SETTLE_MS);
-      collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+      collectDetailed();
 
       let lastScrollTop = -1;
       for (let step = 0; step < MAX_SCROLL_STEPS; step += 1) {
         const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
         const currentTop = scrollContainer.scrollTop;
-        collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+        collectDetailed();
 
         if (currentTop >= maxScrollTop - 2) {
           break;
@@ -758,13 +892,16 @@ if (!globalThis.__piSlackContentScriptLoaded) {
 
       scrollContainer.scrollTop = scrollContainer.scrollHeight;
       await sleep(SCROLL_SETTLE_MS);
-      collectMessagesInto(collected, extractMessages(threadRoot, composerElement));
+      collectDetailed();
     } finally {
       scrollContainer.scrollTop = originalScrollTop;
       scrollContainer.style.scrollBehavior = originalScrollBehavior;
     }
 
-    const messages = backfillMissingAuthors([...collected.values()]);
+    const backfilled = backfillMissingAuthorsWithCount([...collected.values()]);
+    const messages = backfilled.messages;
+    diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
+    diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, messages.length);
     messages.forEach((message, index) => {
       message.isRoot = index === 0;
     });
@@ -772,11 +909,13 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return {
       messages,
       harvestedViaScroll: true,
+      diagnostics,
     };
   }
 
   async function buildThreadSnapshot() {
-    const threadRoot = await waitForThreadRoot();
+    const threadRootDetails = await waitForThreadRootDetails();
+    const threadRoot = threadRootDetails.root;
     if (!threadRoot) {
       return {
         ok: false,
@@ -819,6 +958,12 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         composerDraftText: composerDraftText || undefined,
         reportedMessageCount,
         harvestedViaScroll: harvest.harvestedViaScroll,
+        diagnostics: {
+          rootSelector: threadRootDetails.matchedSelector,
+          rootCandidateCount: threadRootDetails.candidateCount,
+          composerPresent: Boolean(composerElement),
+          ...harvest.diagnostics,
+        },
       },
     };
   }
@@ -826,6 +971,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   async function harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs, seedAuthor) {
     const scrollContainer = findScrollContainer(mainRoot);
     const collected = new Map();
+    const diagnostics = createEmptyExtractionDiagnostics();
     let started = false;
     let reachedEnd = false;
     let hitLimit = false;
@@ -839,9 +985,10 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     };
 
     const observeVisibleContext = () => {
-      const visible = extractMessages(mainRoot, composerElement);
+      const details = extractMessagesDetailed(mainRoot, composerElement, authorBeforeStart);
+      mergeExtractionDiagnostics(diagnostics, details.diagnostics);
       let boundaryVisible = false;
-      for (const message of visible) {
+      for (const message of details.messages) {
         if (isStartBoundary(message)) {
           boundaryVisible = true;
           break;
@@ -854,8 +1001,9 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     };
 
     const collectVisible = () => {
-      const visible = extractMessages(mainRoot, composerElement);
-      for (const message of visible) {
+      const details = extractMessagesDetailed(mainRoot, composerElement, authorBeforeStart);
+      mergeExtractionDiagnostics(diagnostics, details.diagnostics);
+      for (const message of details.messages) {
         if (!started) {
           if (!isStartBoundary(message)) {
             if (message.author) {
@@ -915,12 +1063,16 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const withinBounds = (m) => !m.messageTs || (cursorTs ? m.messageTs > cursorTs : m.messageTs >= startTs);
 
     if (!scrollContainer) {
+      const backfilled = backfillMissingAuthorsWithCount([...collected.values()].filter(withinBounds), authorBeforeStart);
+      diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
+      diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, backfilled.messages.length);
       return {
-        messages: backfillMissingAuthors([...collected.values()].filter(withinBounds), authorBeforeStart),
+        messages: backfilled.messages,
         harvestedViaScroll: false,
         started,
         reachedEnd,
         hitLimit,
+        diagnostics,
       };
     }
 
@@ -945,12 +1097,16 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       collectVisible();
     }
 
+    const backfilled = backfillMissingAuthorsWithCount([...collected.values()].filter(withinBounds), authorBeforeStart);
+    diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
+    diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, backfilled.messages.length);
     return {
-      messages: backfillMissingAuthors([...collected.values()].filter(withinBounds), authorBeforeStart),
+      messages: backfilled.messages,
       harvestedViaScroll: true,
       started,
       reachedEnd,
       hitLimit,
+      diagnostics,
     };
   }
 
@@ -1070,7 +1226,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       };
     }
 
-    const mainRoot = await waitForChannelRoot();
+    const mainRootDetails = await waitForChannelRootDetails();
+    const mainRoot = mainRootDetails.root;
     if (!mainRoot) {
       return {
         ok: false,
@@ -1128,6 +1285,15 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         harvestedViaScroll: harvest.harvestedViaScroll,
         nextCursor,
         nextStartUrl,
+        diagnostics: {
+          rootSelector: mainRootDetails.matchedSelector,
+          rootCandidateCount: mainRootDetails.candidateCount,
+          composerPresent: Boolean(composerElement),
+          startedAtBoundary: harvest.started,
+          reachedEndBoundary: harvest.reachedEnd,
+          hitLimit: harvest.hitLimit,
+          ...harvest.diagnostics,
+        },
       },
     };
   }
