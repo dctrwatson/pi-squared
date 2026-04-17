@@ -1,12 +1,12 @@
 # Pi Slack Chrome extension
 
-Scaffold for the local Chrome side of the Pi Slack integration.
+Chrome-side component of the local Pi Slack integration.
 
 This directory also has its own lightweight `package.json` so any future browser-side tooling or dependencies stay isolated from the root package.
 
 ## Current state
 
-Connection scaffolding is implemented.
+The connection, pairing, approval, and Slack-read flow are implemented.
 
 Implemented so far:
 - MV3 manifest
