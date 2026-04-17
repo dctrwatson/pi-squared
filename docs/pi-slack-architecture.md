@@ -700,9 +700,11 @@ Launching through `pi-slack` changes Pi from a coding assistant into a Slack rep
 
 The custom system prompt emphasizes:
 
-- concise, direct, technically precise replies
+- concise, direct, technically precise replies for a highly capable SRE/BOFH audience
+- not omitting materially relevant caveats, constraints, uncertainty, or failure modes for the sake of brevity
 - using Slack tools when thread or channel context is needed
 - treating existing composer text as user intent, not as already-sent content
+- preserving key technical facts, decisions, blockers, owners, deadlines, unresolved risks, and notable missing information when summarizing
 - never claiming to have sent or inserted a Slack message
 - producing Slack-ready output for manual copy/paste
 

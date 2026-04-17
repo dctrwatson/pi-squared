@@ -114,7 +114,7 @@ Not implemented yet:
 
 ## Prompt behavior
 
-When launched via `pi-slack`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for concise, accurate SRE/BOFH-style communication.
+When launched via `pi-slack`, Pi no longer behaves like a coding agent. The extension overrides the turn system prompt so the session acts like a read-only Slack reply assistant for direct, technically precise SRE/BOFH-style communication that does not omit materially relevant caveats or operational details.
 
 The launcher also pins session storage to a dedicated Pi Slack subdirectory inside Pi's normal session storage, so normal project cwd-based session partitioning does not apply.
 
