@@ -1,12 +1,12 @@
 ---
 name: address-pr-feedback
-description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and posts responses on GitHub. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR.
+description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and posts responses on GitHub. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR. Use this skill when the user wants the feedback actually handled on GitHub, not merely analyzed or drafted.
 compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. The bundled helper script also requires Python 3. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
 # Address PR Feedback
 
-Use this skill to work through GitHub PR feedback methodically. The job is not "change code until the comments go away." The job is to decide what each comment is really asking for, make the smallest correct response, and leave the PR in a clean state.
+Use this skill to work through GitHub PR feedback methodically. The default expectation is execution, not rehearsal: handle the feedback on GitHub unless the user explicitly asks for analysis-only or a dry run. The job is not "change code until the comments go away." The job is to decide what each comment is really asking for, make the smallest correct response, and leave the PR in a clean state.
 
 Some comments should lead to code changes. Some should lead to a thoughtful reply. Some should be grouped into one patch because they are really the same underlying issue. Others should stay separate so the history stays easy to review.
 
