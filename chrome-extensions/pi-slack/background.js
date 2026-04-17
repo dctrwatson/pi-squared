@@ -356,13 +356,220 @@ function summarizeTabForApproval(tab) {
   ];
 }
 
-function classifyApprovalRequest(message) {
+function parseSlackTimestampToken(value) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return "";
+  if (/^\d+\.\d+$/.test(normalized)) return normalized;
+  if (/^p\d{16,}$/.test(normalized)) {
+    const digits = normalized.slice(1);
+    return `${digits.slice(0, -6)}.${digits.slice(-6)}`;
+  }
+  if (/^\d{16,}$/.test(normalized)) {
+    return `${normalized.slice(0, -6)}.${normalized.slice(-6)}`;
+  }
+  return normalized;
+}
+
+function parseSlackContextFromUrl(rawUrl) {
+  if (typeof rawUrl !== "string" || !rawUrl) return null;
+
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  const workspaceKey = url.hostname === "app.slack.com"
+    ? (segments[0] === "client" ? (segments[1] || "") : "")
+    : (url.hostname.endsWith(".slack.com") ? url.hostname.replace(/\.slack\.com$/i, "") : "");
+  const channelKey = url.searchParams.get("cid")
+    || url.searchParams.get("channel")
+    || (segments[0] === "client" ? (segments[2] || "") : "")
+    || (segments[0] === "archives" ? (segments[1] || "") : "")
+    || "";
+
+  let threadKey = parseSlackTimestampToken(
+    url.searchParams.get("thread_ts")
+      || url.searchParams.get("message_ts")
+      || url.searchParams.get("ts")
+      || "",
+  );
+
+  if (!threadKey && segments[0] === "archives" && segments[2]) {
+    threadKey = parseSlackTimestampToken(segments[2]);
+  }
+
+  if (!threadKey) {
+    const threadSegmentIndex = segments.findIndex((segment) => segment === "thread");
+    if (threadSegmentIndex >= 0 && segments[threadSegmentIndex + 1]) {
+      const rawThreadSegment = segments[threadSegmentIndex + 1];
+      const lastDash = rawThreadSegment.lastIndexOf("-");
+      threadKey = parseSlackTimestampToken(lastDash >= 0 ? rawThreadSegment.slice(lastDash + 1) : rawThreadSegment);
+    }
+  }
+
+  return {
+    url: url.toString(),
+    host: url.host,
+    workspaceKey,
+    channelKey,
+    threadKey,
+  };
+}
+
+function describeObservedSlackContext(context) {
+  if (!context) return "current Slack context unavailable";
+
+  const scope = [];
+  if (context.channelLabel) {
+    scope.push(context.channelLabel.startsWith("#") ? context.channelLabel : `#${context.channelLabel}`);
+  } else if (context.channelKey) {
+    scope.push(context.channelKey);
+  }
+  if (context.workspaceLabel) {
+    scope.push(context.workspaceLabel);
+  } else if (context.workspaceKey) {
+    scope.push(context.workspaceKey);
+  }
+
+  const location = scope.join(" in ");
+  if (context.type === "thread") {
+    return location ? `thread-bound to ${location}` : "thread-bound";
+  }
+  if (context.type === "channel") {
+    return location ? `channel-bound to ${location}` : "channel-bound";
+  }
+  if (location) {
+    return `tab-bound to ${location}`;
+  }
+
+  if (context.url) {
+    try {
+      const url = new URL(context.url);
+      return `tab-bound to ${url.host}${url.pathname}`;
+    } catch {
+      return `tab-bound to ${context.url}`;
+    }
+  }
+
+  return "tab-bound to the current Slack tab";
+}
+
+function buildObservedThreadApprovalContext(tab, extras = {}) {
+  if (!tab?.url) return null;
+  const parsed = parseSlackContextFromUrl(tab.url);
+  if (!parsed) return null;
+
+  const workspaceLabel = typeof extras.workspaceLabel === "string" && extras.workspaceLabel ? extras.workspaceLabel : "";
+  const channelLabel = typeof extras.channelLabel === "string" && extras.channelLabel ? extras.channelLabel : "";
+  const threadPermalink = typeof extras.threadPermalink === "string" && extras.threadPermalink ? extras.threadPermalink : "";
+  const workspaceKey = typeof extras.workspaceKey === "string" && extras.workspaceKey ? extras.workspaceKey : parsed.workspaceKey;
+  const channelKey = typeof extras.channelKey === "string" && extras.channelKey ? extras.channelKey : parsed.channelKey;
+  const threadKey = typeof extras.threadKey === "string" && extras.threadKey ? extras.threadKey : parsed.threadKey;
+  const type = threadKey ? "thread" : (workspaceKey && channelKey ? "channel" : "tab");
+
+  const context = {
+    type,
+    source: extras.source || "tab",
+    tabId: typeof tab.id === "number" ? tab.id : null,
+    url: parsed.url,
+    host: parsed.host,
+    workspaceKey,
+    workspaceLabel,
+    channelKey,
+    channelLabel,
+    threadKey,
+    threadPermalink,
+  };
+  context.summary = describeObservedSlackContext(context);
+  return context;
+}
+
+function buildApprovalContextSignature(context) {
+  if (!context) return "none";
+  return [
+    context.type || "tab",
+    context.workspaceKey || "",
+    context.channelKey || "",
+    context.threadKey || "",
+    context.threadPermalink || "",
+    context.tabId ?? "",
+    context.url || "",
+  ].join(":");
+}
+
+function policyMatchesObservedContext(policy, context) {
+  if (!policy?.context || !context) return false;
+  const policyContext = policy.context;
+
+  if (policyContext.type === "thread") {
+    if (
+      policyContext.threadPermalink
+      && context.threadPermalink
+      && policyContext.threadPermalink === context.threadPermalink
+    ) {
+      return true;
+    }
+    if (
+      policyContext.threadKey
+      && context.threadKey
+      && policyContext.threadKey === context.threadKey
+      && policyContext.workspaceKey === context.workspaceKey
+      && policyContext.channelKey === context.channelKey
+    ) {
+      return true;
+    }
+    if (policyContext.threadPermalink || policyContext.threadKey) {
+      return false;
+    }
+    return Boolean(
+      policyContext.tabId !== null
+      && context.tabId !== null
+      && policyContext.tabId === context.tabId
+      && policyContext.url
+      && context.url
+      && policyContext.url === context.url,
+    );
+  }
+
+  if (policyContext.type === "channel") {
+    return Boolean(
+      policyContext.workspaceKey
+      && context.workspaceKey
+      && policyContext.workspaceKey === context.workspaceKey
+      && policyContext.channelKey
+      && context.channelKey
+      && policyContext.channelKey === context.channelKey,
+    );
+  }
+
+  return Boolean(
+    policyContext.tabId !== null
+    && context.tabId !== null
+    && policyContext.tabId === context.tabId
+    && policyContext.url
+    && context.url
+    && policyContext.url === context.url,
+  );
+}
+
+function buildTemporaryApprovalSummary(scope, context) {
+  const duration = scope === "5m" ? "for 5 minutes" : "for this paired session";
+  if (!context) {
+    return `Auto-approve current-thread reads ${duration}`;
+  }
+  return `Auto-approve current-thread reads ${duration} · ${context.summary}`;
+}
+
+function classifyApprovalRequest(message, observedContext = null) {
   if (message.action === "getCurrentThread") {
     return {
       risk: "low",
-      signature: "getCurrentThread",
-      availableDecisions: ["allow_once", "allow_5m", "allow_session", "deny"],
-      policyEligible: true,
+      signature: `getCurrentThread:${buildApprovalContextSignature(observedContext)}`,
+      availableDecisions: observedContext ? ["allow_once", "allow_5m", "allow_session", "deny"] : ["allow_once", "deny"],
+      policyEligible: Boolean(observedContext),
     };
   }
 
@@ -423,6 +630,9 @@ function getApprovalPoliciesForUi() {
       createdAt: policy.createdAt,
       expiresAt: policy.expiresAt,
       summary: policy.summary,
+      contextType: policy.context?.type || "",
+      contextSummary: policy.context?.summary || "",
+      contextSource: policy.context?.source || "",
     }));
 }
 
@@ -446,7 +656,7 @@ function shouldClearPairingOnClose(event) {
   ].some((fragment) => reason.includes(fragment));
 }
 
-function createTemporaryApprovalPolicy(message, classification, scope) {
+function createTemporaryApprovalPolicy(message, classification, scope, observedContext) {
   const now = Date.now();
   const expiresAt = scope === "5m" ? now + 5 * 60_000 : null;
   return {
@@ -458,19 +668,19 @@ function createTemporaryApprovalPolicy(message, classification, scope) {
     expiresAt,
     sessionId: state.pairing?.sessionId ?? "",
     signature: classification.signature,
-    summary: scope === "5m"
-      ? `Auto-approve current-thread reads for 5 minutes`
-      : `Auto-approve current-thread reads for this paired session`,
+    context: observedContext,
+    summary: buildTemporaryApprovalSummary(scope, observedContext),
   };
 }
 
-function findMatchingApprovalPolicy(message, classification) {
+function findMatchingApprovalPolicy(message, classification, observedContext) {
   pruneExpiredApprovalPolicies();
-  if (!classification.policyEligible) return null;
+  if (!classification.policyEligible || !observedContext) return null;
   const sessionId = state.pairing?.sessionId ?? "";
   for (const policy of state.tempApprovalPolicies.values()) {
     if (policy.sessionId !== sessionId) continue;
     if (policy.action !== message.action) continue;
+    if (!policyMatchesObservedContext(policy, observedContext)) continue;
     return policy;
   }
   return null;
@@ -485,18 +695,23 @@ function noteAutoApproval(message, policy) {
   };
 }
 
-async function approvalSummaryForRequest(message) {
+async function approvalSummaryForRequest(message, requestContext = null) {
   if (message.action === "getCurrentThread") {
-    const tabs = await getSlackTabsDetailed();
+    const context = requestContext ?? await observeCurrentThreadApprovalContext();
+    const bindingLine = context.observedContext
+      ? `Temporary approvals for this request would be ${context.observedContext.summary}.`
+      : "Temporary approvals are unavailable until Chrome can observe a concrete Slack tab context for this request.";
     return {
       title: "Read current Slack thread",
       lines: [
-        ...summarizeTabForApproval(serializeTab(tabs.activeTab)),
-        `Slack tabs detected: ${tabs.count}`,
-        `Tab selection rule: ${tabs.selectionRule}`,
+        ...summarizeTabForApproval(context.activeTab),
+        `Slack tabs detected: ${context.slackTabCount}`,
+        `Tab selection rule: ${context.selectionRule}`,
         "Reads the currently open Slack thread from the selected Slack tab.",
         "Includes any unsent draft text in the thread composer.",
+        bindingLine,
       ],
+      observedContext: context.observedContext,
     };
   }
 
@@ -601,15 +816,21 @@ async function openApprovalWindow() {
 }
 
 async function requestUserApproval(message) {
-  const classification = classifyApprovalRequest(message);
-  const matchingPolicy = findMatchingApprovalPolicy(message, classification);
+  const requestContext = message.action === "getCurrentThread"
+    ? await observeCurrentThreadApprovalContext()
+    : null;
+  const classification = classifyApprovalRequest(message, requestContext?.observedContext ?? null);
+  const matchingPolicy = findMatchingApprovalPolicy(message, classification, requestContext?.observedContext ?? null);
   if (matchingPolicy) {
     noteAutoApproval(message, matchingPolicy);
     void updateActionAppearance();
-    return;
+    return {
+      decision: "auto_approved",
+      policyId: matchingPolicy.id,
+    };
   }
 
-  const summary = await approvalSummaryForRequest(message);
+  const summary = await approvalSummaryForRequest(message, requestContext);
   const existingApproval = [...state.pendingApprovals.values()].find((approval) => approval.signature === classification.signature);
   if (existingApproval) {
     existingApproval.requestCount += 1;
@@ -631,6 +852,7 @@ async function requestUserApproval(message) {
     risk: classification.risk,
     signature: classification.signature,
     availableDecisions: classification.availableDecisions,
+    observedContext: summary.observedContext ?? requestContext?.observedContext ?? null,
     requestCount: 1,
     waiters: [],
   };
@@ -661,10 +883,16 @@ function resolveApproval(id, decision) {
     ? decision
     : "deny";
 
-  if (normalizedDecision === "allow_5m" || normalizedDecision === "allow_session") {
+  let createdPolicy = null;
+  if ((normalizedDecision === "allow_5m" || normalizedDecision === "allow_session") && approval.observedContext) {
     const scope = normalizedDecision === "allow_5m" ? "5m" : "session";
-    const policy = createTemporaryApprovalPolicy({ action: approval.action }, { risk: approval.risk, signature: approval.signature, policyEligible: true }, scope);
-    state.tempApprovalPolicies.set(policy.id, policy);
+    createdPolicy = createTemporaryApprovalPolicy(
+      { action: approval.action },
+      { risk: approval.risk, signature: approval.signature, policyEligible: true },
+      scope,
+      approval.observedContext,
+    );
+    state.tempApprovalPolicies.set(createdPolicy.id, createdPolicy);
   }
 
   if (normalizedDecision === "deny") {
@@ -673,7 +901,10 @@ function resolveApproval(id, decision) {
     }
   } else {
     for (const waiter of approval.waiters) {
-      waiter.resolve();
+      waiter.resolve({
+        decision: normalizedDecision,
+        policyId: createdPolicy?.id ?? null,
+      });
     }
   }
   void updateActionAppearance();
@@ -975,6 +1206,40 @@ async function getSlackTabs() {
     activeTab: serializeTab(details.activeTab),
     selectionRule: details.selectionRule,
   };
+}
+
+async function observeCurrentThreadApprovalContext() {
+  const details = await getSlackTabsDetailed();
+  const activeTab = serializeTab(details.activeTab);
+  return {
+    activeTab,
+    slackTabCount: details.count,
+    selectionRule: details.selectionRule,
+    observedContext: buildObservedThreadApprovalContext(activeTab),
+  };
+}
+
+function strengthenPolicyContextFromThreadResult(policyId, activeTab, payload) {
+  if (!policyId) return;
+  const policy = state.tempApprovalPolicies.get(policyId);
+  if (!policy || policy.action !== "getCurrentThread") return;
+
+  const threadPermalink = typeof payload?.rootMessage?.permalinkUrl === "string" ? payload.rootMessage.permalinkUrl : "";
+  const parsedPermalink = parseSlackContextFromUrl(threadPermalink);
+  const baseTab = activeTab && typeof activeTab === "object" ? activeTab : null;
+  const nextContext = buildObservedThreadApprovalContext(baseTab, {
+    source: threadPermalink ? "thread_result" : "tab",
+    workspaceKey: typeof payload?.workspace === "string" ? payload.workspace : (parsedPermalink?.workspaceKey || ""),
+    workspaceLabel: typeof payload?.workspace === "string" ? payload.workspace : "",
+    channelKey: parsedPermalink?.channelKey || "",
+    channelLabel: typeof payload?.channel === "string" ? payload.channel : "",
+    threadKey: parsedPermalink?.threadKey || "",
+    threadPermalink,
+  });
+
+  if (!nextContext) return;
+  policy.context = nextContext;
+  policy.summary = buildTemporaryApprovalSummary(policy.scope, nextContext);
 }
 
 async function resolveActiveSlackTab() {
@@ -1475,7 +1740,7 @@ async function handleRequestMessage(socket, message) {
     }
 
     if (message.action === "getCurrentThread") {
-      await requestUserApproval(message);
+      const approvalResult = await requestUserApproval(message);
       const result = await withExecutionTimeout(
         message.action,
         sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" }),
@@ -1491,6 +1756,7 @@ async function handleRequestMessage(socket, message) {
         return;
       }
 
+      strengthenPolicyContextFromThreadResult(approvalResult?.policyId ?? null, result.activeTab, result.response.payload);
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload: {

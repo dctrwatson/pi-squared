@@ -353,11 +353,12 @@ Approval flow:
 
 1. Pi sends a request over the authenticated bridge
 2. the background worker classifies the request by scope/risk
-3. if a matching temporary approval policy exists for a low-scope current-thread read, Chrome auto-approves it in memory
+3. if a matching temporary approval policy exists for a low-scope current-thread read, and the observed Slack context still matches that policy, Chrome auto-approves it in memory
 4. otherwise the background worker creates a pending approval entry
 5. Chrome opens or focuses `approve.html`
 6. the user chooses **Allow once** or **Deny**
 7. for low-scope current-thread reads only, the user may also choose **Allow for 5 min** or **Allow for session**
+   - these temporary approvals are bound to the observed Slack context, such as the current thread, channel, or tab context Chrome can verify
 8. only after approval does the background worker read Slack DOM state and return the result
 
 High-scope reads such as paginated channel summaries remain one-time approvals and are never auto-approved.
@@ -445,7 +446,8 @@ It shows:
 - timing metadata such as request age and timeout
 - **Allow once** and **Deny** controls for all requests
 - **Allow for 5 min** and **Allow for session** controls for low-scope current-thread reads only
-- currently active temporary approval policies with a reset control
+- explicit context-binding notes for temporary current-thread approvals
+- currently active temporary approval policies with their observed binding context and a reset control
 
 The extension action icon turns yellow and shows a badge count while approvals are pending.
 

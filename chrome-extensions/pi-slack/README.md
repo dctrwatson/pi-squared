@@ -15,7 +15,7 @@ Implemented so far:
 - stale-pairing invalidation when the Pi session rotates or rejects the current pairing
 - ping response handling for the Pi bridge
 - Chrome-side approval gate for every Slack read request
-- short-lived temporary approval policies for current-thread reads only
+- short-lived, context-bound temporary approval policies for current-thread reads only
 - active Slack tab routing for current-thread reads
 - temporary Slack tab routing for channel-range reads from permalinks
 - temporary Slack tab reuse for expanding thread replies during channel summarization

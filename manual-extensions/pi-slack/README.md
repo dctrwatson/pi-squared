@@ -47,7 +47,8 @@ Recommended launcher script:
 
    Chrome will connect to that specific session and ask you to approve each Slack read request.
    Current-thread reads can optionally be temporarily auto-approved from the approval window, but
-   larger channel reads remain one-time approvals.
+   those temporary approvals are bound to the observed Slack context (for example the same thread or
+   channel) and larger channel reads remain one-time approvals.
 
    See `chrome-extensions/pi-slack/README.md` for Chrome loading instructions.
 

@@ -73,6 +73,12 @@ function renderApproval(approval) {
   return wrapper;
 }
 
+function describeContextSource(source) {
+  if (source === "thread_result") return "completed thread read";
+  if (source === "tab") return "active Slack tab";
+  return source || "unknown";
+}
+
 function renderPolicy(policy) {
   const wrapper = document.createElement("div");
   wrapper.className = "policy";
@@ -90,6 +96,8 @@ function renderPolicy(policy) {
   const lines = [
     `Action: ${policy.action}`,
     `Scope: ${policy.scope}`,
+    ...(policy.contextSummary ? [`Binding: ${policy.contextSummary}`] : []),
+    ...(policy.contextSource ? [`Observed from: ${describeContextSource(policy.contextSource)}`] : []),
   ];
   for (const line of lines) {
     const item = document.createElement("li");
