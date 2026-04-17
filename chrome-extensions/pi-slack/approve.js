@@ -1,5 +1,6 @@
 const approvalsEl = document.getElementById("approvals");
 const policiesEl = document.getElementById("policies");
+const recentActivityEl = document.getElementById("recent-activity");
 
 function formatTimestamp(timestamp) {
   if (!timestamp) return "unknown";
@@ -22,6 +23,11 @@ async function resolveApproval(id, decision) {
 
 async function clearPolicies() {
   await chrome.runtime.sendMessage({ type: "pi-slack:clear-approval-policies" });
+  await refresh();
+}
+
+async function clearActivityHistory() {
+  await chrome.runtime.sendMessage({ type: "pi-slack:clear-activity-history" });
   await refresh();
 }
 
@@ -115,10 +121,45 @@ function renderPolicy(policy) {
   return wrapper;
 }
 
+function renderRecentActivity(activity) {
+  recentActivityEl.replaceChildren();
+  if (activity.length === 0) {
+    recentActivityEl.className = "empty";
+    recentActivityEl.textContent = "No recent activity yet.";
+    return;
+  }
+
+  recentActivityEl.className = "";
+  const clearButton = document.createElement("button");
+  clearButton.type = "button";
+  clearButton.textContent = "Clear activity history";
+  clearButton.addEventListener("click", () => {
+    void clearActivityHistory();
+  });
+  recentActivityEl.appendChild(clearButton);
+
+  for (const entry of activity.slice(0, 10)) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "policy";
+
+    const title = document.createElement("h2");
+    title.textContent = entry.summary || entry.action;
+    wrapper.appendChild(title);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${formatTimestamp(entry.at)} · ${entry.kind || "activity"}`;
+    wrapper.appendChild(meta);
+
+    recentActivityEl.appendChild(wrapper);
+  }
+}
+
 async function refresh() {
   const state = await chrome.runtime.sendMessage({ type: "pi-slack:get-approval-state" });
   const pending = Array.isArray(state?.pending) ? state.pending : [];
   const policies = Array.isArray(state?.policies) ? state.policies : [];
+  const activity = Array.isArray(state?.recentActivity) ? state.recentActivity : [];
 
   approvalsEl.replaceChildren();
   if (pending.length === 0) {
@@ -149,6 +190,8 @@ async function refresh() {
       policiesEl.appendChild(renderPolicy(policy));
     }
   }
+
+  renderRecentActivity(activity);
 }
 
 void refresh();

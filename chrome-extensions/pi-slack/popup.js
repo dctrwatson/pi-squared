@@ -6,6 +6,9 @@ const resetPairingButton = document.getElementById("reset-pairing");
 const testConnectionButton = document.getElementById("test-connection");
 const openApprovalsButton = document.getElementById("open-approvals");
 const clearPoliciesButton = document.getElementById("clear-policies");
+const clearActivityButton = document.getElementById("clear-activity");
+const activePoliciesEl = document.getElementById("active-policies");
+const recentActivityEl = document.getElementById("recent-activity");
 
 function setStatusText(text) {
   statusEl.textContent = text;
@@ -18,6 +21,52 @@ function setResult(text) {
 function formatTimestamp(timestamp) {
   if (!timestamp) return "never";
   return new Date(timestamp).toLocaleString();
+}
+
+function formatExpiry(expiresAt) {
+  if (expiresAt === null || expiresAt === undefined) return "until pairing/session reset";
+  return formatTimestamp(expiresAt);
+}
+
+function renderActivePolicies(status) {
+  const policies = Array.isArray(status.activeApprovalPolicies) ? status.activeApprovalPolicies : [];
+  activePoliciesEl.replaceChildren();
+
+  if (policies.length === 0) {
+    activePoliciesEl.textContent = "No active temporary approvals.";
+    return;
+  }
+
+  if ((status.sessionScopedTemporaryApprovalCount ?? 0) > 0) {
+    const warning = document.createElement("div");
+    warning.className = "list-item warning";
+    warning.textContent = `Warning: ${status.sessionScopedTemporaryApprovalCount} session-scoped temporary approval${status.sessionScopedTemporaryApprovalCount === 1 ? " is" : "s are"} active.`;
+    activePoliciesEl.appendChild(warning);
+  }
+
+  for (const policy of policies) {
+    const item = document.createElement("div");
+    item.className = "list-item";
+    item.textContent = `${policy.summary} · expires ${formatExpiry(policy.expiresAt)}`;
+    activePoliciesEl.appendChild(item);
+  }
+}
+
+function renderRecentActivity(status) {
+  const activity = Array.isArray(status.recentActivity) ? status.recentActivity.slice(0, 8) : [];
+  recentActivityEl.replaceChildren();
+
+  if (activity.length === 0) {
+    recentActivityEl.textContent = "No recent activity yet.";
+    return;
+  }
+
+  for (const entry of activity) {
+    const item = document.createElement("div");
+    item.className = "list-item";
+    item.textContent = `${formatTimestamp(entry.at)} · ${entry.summary}`;
+    recentActivityEl.appendChild(item);
+  }
 }
 
 function formatStatus(status) {
@@ -54,6 +103,10 @@ function formatStatus(status) {
   lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
   lines.push(`Heartbeat: ${formatTimestamp(status.lastHeartbeatSentAt)}`);
 
+  if ((status.sessionScopedTemporaryApprovalCount ?? 0) > 0) {
+    lines.push(`WARNING: session-scoped temporary approvals active: ${status.sessionScopedTemporaryApprovalCount}`);
+  }
+
   if (status.lastAutoApproval?.summary) {
     lines.push(`Last auto-approved: ${status.lastAutoApproval.summary} at ${formatTimestamp(status.lastAutoApproval.at)}`);
   }
@@ -68,6 +121,8 @@ function formatStatus(status) {
 async function refreshStatus() {
   const status = await chrome.runtime.sendMessage({ type: "pi-slack:get-status" });
   setStatusText(formatStatus(status));
+  renderActivePolicies(status);
+  renderRecentActivity(status);
 }
 
 savePairingButton.addEventListener("click", async () => {
@@ -108,6 +163,16 @@ clearPoliciesButton.addEventListener("click", async () => {
   await refreshStatus();
 });
 
+clearActivityButton.addEventListener("click", async () => {
+  await chrome.runtime.sendMessage({ type: "pi-slack:clear-activity-history" });
+  setResult("Activity history cleared.");
+  await refreshStatus();
+});
+
 refreshStatus().catch((error) => {
   setStatusText(`Failed to load status: ${String(error)}`);
 });
+
+setInterval(() => {
+  void refreshStatus();
+}, 1000);

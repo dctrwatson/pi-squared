@@ -11,6 +11,7 @@ const CHANNEL_RANGE_PAGE_SIZE = 16;
 const CHANNEL_SUMMARY_THREAD_LIMIT = 50;
 const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 100;
 const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 2_000;
+const RECENT_ACTIVITY_LIMIT = 20;
 const ICON_SIZES = [16, 32, 48, 128];
 const HEARTBEAT_ALARM = "pi-slack-heartbeat";
 const RECONNECT_ALARM = "pi-slack-reconnect";
@@ -35,6 +36,7 @@ const state = {
   pendingApprovals: new Map(),
   tempApprovalPolicies: new Map(),
   lastAutoApproval: null,
+  recentActivity: [],
   pendingAbortControllers: new Map(),
 };
 
@@ -692,9 +694,62 @@ function getApprovalPoliciesForUi() {
     }));
 }
 
+function pushRecentActivity(kind, action, summary) {
+  const entry = {
+    id: `${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
+    at: Date.now(),
+    kind,
+    action,
+    summary,
+  };
+  state.recentActivity = [...state.recentActivity, entry].slice(-RECENT_ACTIVITY_LIMIT);
+}
+
+function clearRecentActivity() {
+  state.recentActivity = [];
+}
+
+function getRecentActivityForUi() {
+  return [...state.recentActivity].sort((a, b) => b.at - a.at);
+}
+
+function summarizeSlackPayloadLocation(payload) {
+  const channel = typeof payload?.channel === "string" && payload.channel ? payload.channel : "";
+  const workspace = typeof payload?.workspace === "string" && payload.workspace ? payload.workspace : "";
+  if (channel && workspace) return `${channel} in ${workspace}`;
+  return channel || workspace || "Slack";
+}
+
+function summarizeReadActivity(action, payload) {
+  const location = summarizeSlackPayloadLocation(payload);
+  const messageCount = Array.isArray(payload?.messages) ? payload.messages.length : null;
+
+  if (action === "getCurrentThread") {
+    return `Read current thread from ${location}${messageCount !== null ? ` (${messageCount} message(s))` : ""}`;
+  }
+  if (action === "getChannelRange") {
+    return `Read channel range from ${location}${messageCount !== null ? ` (${messageCount} message(s))` : ""}`;
+  }
+  if (action === "getChannelRangeAll") {
+    const threadMode = payload?.threadSummariesIncluded ? "thread expansion enabled" : "thread expansion disabled";
+    return `Read channel summary from ${location}${messageCount !== null ? ` (${messageCount} message(s), ${threadMode})` : ""}`;
+  }
+  if (action === "debugCurrentThreadScan") {
+    return `Ran thread debug scan on ${location}`;
+  }
+  if (action === "debugCurrentChannelScan") {
+    return `Ran channel debug scan on ${location}`;
+  }
+  return `Completed ${String(action)}.`;
+}
+
 function clearTemporaryApprovalPolicies() {
+  const clearedCount = state.tempApprovalPolicies.size;
   state.tempApprovalPolicies.clear();
   state.lastAutoApproval = null;
+  if (clearedCount > 0) {
+    pushRecentActivity("policies_cleared", "clear-approval-policies", `Cleared ${clearedCount} temporary approval polic${clearedCount === 1 ? "y" : "ies"}.`);
+  }
   void updateActionAppearance();
 }
 
@@ -749,6 +804,7 @@ function noteAutoApproval(message, policy) {
     at: Date.now(),
     summary: policy.summary,
   };
+  pushRecentActivity("auto_approved", message.action, `Auto-approved ${message.action} via ${policy.summary}.`);
 }
 
 async function approvalSummaryForRequest(message, requestContext = null) {
@@ -920,6 +976,7 @@ async function requestUserApproval(message) {
   if (existingApproval) {
     existingApproval.requestCount += 1;
     existingApproval.lines = [...existingApproval.lines.filter((line) => !line.startsWith("Repeated requests:")), `Repeated requests: ${existingApproval.requestCount}`];
+    pushRecentActivity("approval_repeated", message.action, `Coalesced repeated approval request for ${existingApproval.title}.`);
     void updateActionAppearance();
     return await new Promise((resolve, reject) => {
       existingApproval.waiters.push({ requestId: message.id, resolve, reject });
@@ -947,6 +1004,7 @@ async function requestUserApproval(message) {
     approval.waiters.push({ requestId: message.id, resolve, reject });
     approval.timeout = setTimeout(() => {
       state.pendingApprovals.delete(approval.id);
+      pushRecentActivity("approval_timeout", approval.action, `Approval timed out for ${approval.title}.`);
       for (const waiter of approval.waiters) {
         waiter.reject(new BridgeActionError("approval_timeout", "Slack read approval timed out in Chrome."));
       }
@@ -954,6 +1012,7 @@ async function requestUserApproval(message) {
     }, APPROVAL_TIMEOUT_MS);
 
     state.pendingApprovals.set(approval.id, approval);
+    pushRecentActivity("approval_requested", approval.action, `Approval requested: ${approval.title}.`);
     void updateActionAppearance();
     void openApprovalWindow();
   });
@@ -982,10 +1041,18 @@ function resolveApproval(id, decision) {
   }
 
   if (normalizedDecision === "deny") {
+    pushRecentActivity("approval_denied", approval.action, `Denied ${approval.title}.`);
     for (const waiter of approval.waiters) {
       waiter.reject(new BridgeActionError("user_denied", "User denied this Slack read request in Chrome."));
     }
   } else {
+    pushRecentActivity(
+      "approval_allowed",
+      approval.action,
+      createdPolicy
+        ? `Allowed ${approval.title} with temporary policy: ${createdPolicy.summary}.`
+        : `Allowed ${approval.title} once.`,
+    );
     for (const waiter of approval.waiters) {
       waiter.resolve({
         decision: normalizedDecision,
@@ -1861,17 +1928,20 @@ async function handleRequestMessage(socket, message) {
         sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" }),
       );
       if (!result.response.ok) {
+        const errorPayload = result.response.error ?? {
+          code: "thread_read_failed",
+          message: "The Slack content script failed to read the current thread.",
+        };
+        pushRecentActivity("read_failed", message.action, `Current thread read failed: ${errorPayload.message}`);
         sendSocketResponse(socket, message.id, {
           ok: false,
-          error: result.response.error ?? {
-            code: "thread_read_failed",
-            message: "The Slack content script failed to read the current thread.",
-          },
+          error: errorPayload,
         });
         return;
       }
 
       strengthenPolicyContextFromThreadResult(approvalResult?.policyId ?? null, result.activeTab, result.response.payload);
+      pushRecentActivity("read_completed", message.action, summarizeReadActivity(message.action, result.response.payload));
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload: {
@@ -1898,6 +1968,7 @@ async function handleRequestMessage(socket, message) {
         message.action,
         getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cursor),
       );
+      pushRecentActivity("read_completed", message.action, summarizeReadActivity(message.action, payload));
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload,
@@ -1924,6 +1995,7 @@ async function handleRequestMessage(socket, message) {
           getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads, controller.signal),
           controller,
         );
+        pushRecentActivity("read_completed", message.action, summarizeReadActivity(message.action, payload));
         sendSocketResponse(socket, message.id, {
           ok: true,
           payload,
@@ -1941,16 +2013,19 @@ async function handleRequestMessage(socket, message) {
         sendMessageToActiveSlackTab({ type: "pi-slack:debug-thread-scan" }),
       );
       if (!result.response.ok) {
+        const errorPayload = result.response.error ?? {
+          code: "thread_debug_failed",
+          message: "The Slack content script failed to build a thread debug scan.",
+        };
+        pushRecentActivity("read_failed", message.action, `Thread debug scan failed: ${errorPayload.message}`);
         sendSocketResponse(socket, message.id, {
           ok: false,
-          error: result.response.error ?? {
-            code: "thread_debug_failed",
-            message: "The Slack content script failed to build a thread debug scan.",
-          },
+          error: errorPayload,
         });
         return;
       }
 
+      pushRecentActivity("read_completed", message.action, summarizeReadActivity(message.action, result.response.payload));
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload: {
@@ -1970,16 +2045,19 @@ async function handleRequestMessage(socket, message) {
         sendMessageToActiveSlackTab({ type: "pi-slack:debug-channel-scan" }),
       );
       if (!result.response.ok) {
+        const errorPayload = result.response.error ?? {
+          code: "channel_debug_failed",
+          message: "The Slack content script failed to build a channel debug scan.",
+        };
+        pushRecentActivity("read_failed", message.action, `Channel debug scan failed: ${errorPayload.message}`);
         sendSocketResponse(socket, message.id, {
           ok: false,
-          error: result.response.error ?? {
-            code: "channel_debug_failed",
-            message: "The Slack content script failed to build a channel debug scan.",
-          },
+          error: errorPayload,
         });
         return;
       }
 
+      pushRecentActivity("read_completed", message.action, summarizeReadActivity(message.action, result.response.payload));
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload: {
@@ -2001,9 +2079,11 @@ async function handleRequestMessage(socket, message) {
     });
   } catch (error) {
     state.lastError = error instanceof Error ? error.message : String(error);
+    const errorPayload = toErrorPayload(error);
+    pushRecentActivity("read_failed", message.action, `${String(message.action)} failed: ${errorPayload.message}`);
     sendSocketResponse(socket, message.id, {
       ok: false,
-      error: toErrorPayload(error),
+      error: errorPayload,
     });
   }
 }
@@ -2218,6 +2298,8 @@ async function getStatus() {
   const pairing = state.pairing ?? await getPairing();
   const tabs = await getSlackTabs();
   const policies = getApprovalPoliciesForUi();
+  const recentActivity = getRecentActivityForUi();
+  const sessionScopedTemporaryApprovalCount = policies.filter((policy) => policy.scope === "session").length;
 
   return {
     connected: state.connected,
@@ -2228,7 +2310,10 @@ async function getStatus() {
     pairSessionId: pairing?.sessionId ?? "",
     pendingApprovalCount: state.pendingApprovals.size,
     temporaryApprovalPolicyCount: policies.length,
+    sessionScopedTemporaryApprovalCount,
     lastAutoApproval: state.lastAutoApproval,
+    activeApprovalPolicies: policies,
+    recentActivity,
     slackTabCount: tabs.count,
     activeTab: tabs.activeTab,
     selectionRule: tabs.selectionRule,
@@ -2268,6 +2353,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "session" || !(PAIRING_KEY in changes)) return;
   state.pairing = changes[PAIRING_KEY]?.newValue ?? null;
   clearTemporaryApprovalPolicies();
+  clearRecentActivity();
   void updateActionAppearance();
   void ensureConnected();
 });
@@ -2320,7 +2406,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "pi-slack:get-approval-state") {
-    sendResponse({ pending: getPendingApprovalsForUi(), policies: getApprovalPoliciesForUi() });
+    sendResponse({ pending: getPendingApprovalsForUi(), policies: getApprovalPoliciesForUi(), recentActivity: getRecentActivityForUi() });
     return undefined;
   }
 
@@ -2338,6 +2424,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "pi-slack:clear-approval-policies") {
     clearTemporaryApprovalPolicies();
+    sendResponse({ ok: true });
+    return undefined;
+  }
+
+  if (message.type === "pi-slack:clear-activity-history") {
+    clearRecentActivity();
     sendResponse({ ok: true });
     return undefined;
   }

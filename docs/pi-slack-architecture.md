@@ -412,6 +412,8 @@ It supports:
 - resetting the stored pairing
 - opening the approval window
 - clearing temporary approval policies
+- viewing active temporary approvals and recent Slack-read / approval activity
+- clearing recent activity history
 - running a simple connection test
 
 Developer-oriented extractor diagnostics are exposed through Pi commands rather than the popup:
@@ -458,6 +460,7 @@ It shows:
 - **Allow for 5 min** and **Allow for session** controls for low-scope current-thread reads only
 - explicit context-binding notes for temporary current-thread approvals
 - currently active temporary approval policies with their observed binding context and a reset control
+- recent approval and Slack-read activity, including auto-approvals, decisions, completed reads, and failures
 
 The extension action icon turns yellow and shows a badge count while approvals are pending.
 

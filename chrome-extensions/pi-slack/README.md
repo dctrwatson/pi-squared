@@ -25,7 +25,7 @@ Implemented so far:
 - extractor fail-closed checks for ambiguous identity, boundary, and message-order cases
 - reply-count detection on channel messages so threaded discussions can be expanded for summaries
 - composer draft extraction for reply-context capture
-- popup for status, per-session pairing, temporary approval reset, approval window access, and test action
+- popup for status, per-session pairing, temporary approval reset, recent activity visibility, approval window access, and test action
 
 Not implemented yet:
 - any browser-side write-back tooling
