@@ -1,8 +1,14 @@
 const approvalsEl = document.getElementById("approvals");
+const policiesEl = document.getElementById("policies");
 
 function formatTimestamp(timestamp) {
   if (!timestamp) return "unknown";
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatExpiry(expiresAt) {
+  if (expiresAt === null || expiresAt === undefined) return "until pairing/session reset";
+  return formatTimestamp(expiresAt);
 }
 
 async function resolveApproval(id, decision) {
@@ -14,9 +20,29 @@ async function resolveApproval(id, decision) {
   await refresh();
 }
 
+async function clearPolicies() {
+  await chrome.runtime.sendMessage({ type: "pi-slack:clear-approval-policies" });
+  await refresh();
+}
+
+function makeDecisionButton(label, decision, approval) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", () => {
+    void resolveApproval(approval.id, decision);
+  });
+  return button;
+}
+
 function renderApproval(approval) {
   const wrapper = document.createElement("div");
-  wrapper.className = "approval";
+  wrapper.className = `approval risk-${approval.risk || "medium"}`;
+
+  const risk = document.createElement("div");
+  risk.className = "risk";
+  risk.textContent = `${approval.risk || "medium"} scope`;
+  wrapper.appendChild(risk);
 
   const title = document.createElement("h2");
   title.textContent = approval.title;
@@ -24,7 +50,7 @@ function renderApproval(approval) {
 
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `Requested ${formatTimestamp(approval.createdAt)} · expires ${formatTimestamp(approval.expiresAt)}`;
+  meta.textContent = `Requested ${formatTimestamp(approval.createdAt)} · expires ${formatTimestamp(approval.expiresAt)} · repeated requests ${approval.requestCount || 1}`;
   wrapper.appendChild(meta);
 
   const list = document.createElement("ul");
@@ -37,41 +63,77 @@ function renderApproval(approval) {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-
-  const allow = document.createElement("button");
-  allow.type = "button";
-  allow.textContent = "Allow once";
-  allow.addEventListener("click", () => {
-    void resolveApproval(approval.id, "allow");
-  });
-  actions.appendChild(allow);
-
-  const deny = document.createElement("button");
-  deny.type = "button";
-  deny.textContent = "Deny";
-  deny.addEventListener("click", () => {
-    void resolveApproval(approval.id, "deny");
-  });
-  actions.appendChild(deny);
-
+  for (const decision of approval.availableDecisions || ["allow_once", "deny"]) {
+    if (decision === "allow_once") actions.appendChild(makeDecisionButton("Allow once", decision, approval));
+    if (decision === "allow_5m") actions.appendChild(makeDecisionButton("Allow for 5 min", decision, approval));
+    if (decision === "allow_session") actions.appendChild(makeDecisionButton("Allow for session", decision, approval));
+    if (decision === "deny") actions.appendChild(makeDecisionButton("Deny", decision, approval));
+  }
   wrapper.appendChild(actions);
+  return wrapper;
+}
+
+function renderPolicy(policy) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "policy";
+
+  const title = document.createElement("h2");
+  title.textContent = policy.summary || policy.action;
+  wrapper.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `Created ${formatTimestamp(policy.createdAt)} · expires ${formatExpiry(policy.expiresAt)} · ${policy.risk || "medium"} scope`;
+  wrapper.appendChild(meta);
+
+  const list = document.createElement("ul");
+  const lines = [
+    `Action: ${policy.action}`,
+    `Scope: ${policy.scope}`,
+  ];
+  for (const line of lines) {
+    const item = document.createElement("li");
+    item.textContent = line;
+    list.appendChild(item);
+  }
+  wrapper.appendChild(list);
+
   return wrapper;
 }
 
 async function refresh() {
   const state = await chrome.runtime.sendMessage({ type: "pi-slack:get-approval-state" });
   const pending = Array.isArray(state?.pending) ? state.pending : [];
+  const policies = Array.isArray(state?.policies) ? state.policies : [];
 
   approvalsEl.replaceChildren();
   if (pending.length === 0) {
     approvalsEl.className = "empty";
     approvalsEl.textContent = "No pending approvals.";
-    return;
+  } else {
+    approvalsEl.className = "";
+    for (const approval of pending) {
+      approvalsEl.appendChild(renderApproval(approval));
+    }
   }
 
-  approvalsEl.className = "";
-  for (const approval of pending) {
-    approvalsEl.appendChild(renderApproval(approval));
+  policiesEl.replaceChildren();
+  if (policies.length === 0) {
+    policiesEl.className = "empty";
+    policiesEl.textContent = "No temporary approval policies.";
+  } else {
+    policiesEl.className = "";
+    const clearButton = document.createElement("button");
+    clearButton.type = "button";
+    clearButton.textContent = "Clear all temporary approvals";
+    clearButton.addEventListener("click", () => {
+      void clearPolicies();
+    });
+    policiesEl.appendChild(clearButton);
+
+    for (const policy of policies) {
+      policiesEl.appendChild(renderPolicy(policy));
+    }
   }
 }
 

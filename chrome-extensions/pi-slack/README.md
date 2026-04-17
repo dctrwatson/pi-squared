@@ -14,6 +14,7 @@ Implemented so far:
 - background service worker with per-session WebSocket pairing and nonce/HMAC handshake
 - ping response handling for the Pi bridge
 - Chrome-side approval gate for every Slack read request
+- short-lived temporary approval policies for current-thread reads only
 - active Slack tab routing for current-thread reads
 - temporary Slack tab routing for channel-range reads from permalinks
 - temporary Slack tab reuse for expanding thread replies during channel summarization
@@ -22,7 +23,7 @@ Implemented so far:
 - Slack content script with channel-range extraction from message permalinks
 - reply-count detection on channel messages so threaded discussions can be expanded for summaries
 - composer draft extraction for reply-context capture
-- popup for status, per-session pairing, approval window access, and test action
+- popup for status, per-session pairing, temporary approval reset, approval window access, and test action
 
 Not implemented yet:
 - any browser-side write-back tooling

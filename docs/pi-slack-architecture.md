@@ -335,21 +335,27 @@ This removes the previous behavior where Chrome sent a long-lived secret as the 
 
 ### Approval gate
 
-Every Slack read request from Pi requires explicit approval in Chrome before the browser will execute it.
+Every Slack read request from Pi requires explicit approval in Chrome before the browser will execute it, unless a short-lived in-memory approval policy is active for a low-scope current-thread read.
 
 Applies to:
 
 - `getCurrentThread`
 - `getChannelRange`
 - `getChannelRangeAll`
+- debug scans
 
 Approval flow:
 
 1. Pi sends a request over the authenticated bridge
-2. the background worker creates a pending approval entry
-3. Chrome opens or focuses `approve.html`
-4. the user chooses **Allow once** or **Deny**
-5. only after approval does the background worker read Slack DOM state and return the result
+2. the background worker classifies the request by scope/risk
+3. if a matching temporary approval policy exists for a low-scope current-thread read, Chrome auto-approves it in memory
+4. otherwise the background worker creates a pending approval entry
+5. Chrome opens or focuses `approve.html`
+6. the user chooses **Allow once** or **Deny**
+7. for low-scope current-thread reads only, the user may also choose **Allow for 5 min** or **Allow for session**
+8. only after approval does the background worker read Slack DOM state and return the result
+
+High-scope reads such as paginated channel summaries remain one-time approvals and are never auto-approved.
 
 If the user denies the request, Chrome returns a structured error such as `user_denied`. If the user never responds, Chrome returns `approval_timeout`. Once approval is granted, Chrome applies a separate execution timeout for the actual Slack read and returns `execution_timeout` if that phase runs too long.
 
@@ -392,6 +398,7 @@ It supports:
 - entering and saving the current session pairing code
 - resetting the stored pairing
 - opening the approval window
+- clearing temporary approval policies
 - running a simple connection test
 
 Developer-oriented extractor diagnostics are exposed through Pi commands rather than the popup:
@@ -429,8 +436,11 @@ It shows:
 
 - each pending Slack read request
 - a concise summary of what will be read
+- request risk/scope labels such as low, medium, and high scope
 - timing metadata such as request age and timeout
-- **Allow once** and **Deny** controls
+- **Allow once** and **Deny** controls for all requests
+- **Allow for 5 min** and **Allow for session** controls for low-scope current-thread reads only
+- currently active temporary approval policies with a reset control
 
 The extension action icon turns yellow and shows a badge count while approvals are pending.
 

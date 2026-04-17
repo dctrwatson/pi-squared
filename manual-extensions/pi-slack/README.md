@@ -46,6 +46,8 @@ Recommended launcher script:
    extension), paste the pairing code into the pairing field, and press **Save pairing**.
 
    Chrome will connect to that specific session and ask you to approve each Slack read request.
+   Current-thread reads can optionally be temporarily auto-approved from the approval window, but
+   larger channel reads remain one-time approvals.
 
    See `chrome-extensions/pi-slack/README.md` for Chrome loading instructions.
 

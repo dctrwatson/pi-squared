@@ -5,6 +5,7 @@ const savePairingButton = document.getElementById("save-pairing");
 const resetPairingButton = document.getElementById("reset-pairing");
 const testConnectionButton = document.getElementById("test-connection");
 const openApprovalsButton = document.getElementById("open-approvals");
+const clearPoliciesButton = document.getElementById("clear-policies");
 
 function setStatusText(text) {
   statusEl.textContent = text;
@@ -27,6 +28,7 @@ function formatStatus(status) {
     `Pairing configured: ${status.hasPairing ? "yes" : "no"}`,
     `Endpoint: ${status.wsUrl || "(none)"}`,
     `Pending approvals: ${status.pendingApprovalCount}`,
+    `Temporary approvals: ${status.temporaryApprovalPolicyCount ?? 0}`,
     `Slack tabs: ${status.slackTabCount}`,
   ];
 
@@ -51,6 +53,10 @@ function formatStatus(status) {
   lines.push(`Hello sent: ${formatTimestamp(status.lastHelloSentAt)}`);
   lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
   lines.push(`Heartbeat: ${formatTimestamp(status.lastHeartbeatSentAt)}`);
+
+  if (status.lastAutoApproval?.summary) {
+    lines.push(`Last auto-approved: ${status.lastAutoApproval.summary} at ${formatTimestamp(status.lastAutoApproval.at)}`);
+  }
 
   if (status.lastError) {
     lines.push(`Last error: ${status.lastError}`);
@@ -94,6 +100,12 @@ testConnectionButton.addEventListener("click", async () => {
 openApprovalsButton.addEventListener("click", async () => {
   const result = await chrome.runtime.sendMessage({ type: "pi-slack:open-approval-window" });
   setResult(result?.ok ? "Approval window opened." : (result?.error || "Failed to open approvals."));
+});
+
+clearPoliciesButton.addEventListener("click", async () => {
+  await chrome.runtime.sendMessage({ type: "pi-slack:clear-approval-policies" });
+  setResult("Temporary approvals cleared.");
+  await refreshStatus();
 });
 
 refreshStatus().catch((error) => {

@@ -33,6 +33,8 @@ const state = {
   handshake: null,
   approvalWindowId: null,
   pendingApprovals: new Map(),
+  tempApprovalPolicies: new Map(),
+  lastAutoApproval: null,
   pendingAbortControllers: new Map(),
 };
 
@@ -354,6 +356,121 @@ function summarizeTabForApproval(tab) {
   ];
 }
 
+function classifyApprovalRequest(message) {
+  if (message.action === "getCurrentThread") {
+    return {
+      risk: "low",
+      signature: "getCurrentThread",
+      availableDecisions: ["allow_once", "allow_5m", "allow_session", "deny"],
+      policyEligible: true,
+    };
+  }
+
+  if (message.action === "getChannelRange") {
+    const limit = Number.isInteger(message.payload?.limit) ? message.payload.limit : null;
+    return {
+      risk: limit && limit <= 25 ? "medium" : "high",
+      signature: `getChannelRange:${message.payload?.startUrl || ""}:${message.payload?.endUrl || ""}:${limit ?? ""}`,
+      availableDecisions: ["allow_once", "deny"],
+      policyEligible: false,
+    };
+  }
+
+  if (message.action === "getChannelRangeAll") {
+    return {
+      risk: "high",
+      signature: `getChannelRangeAll:${message.payload?.startUrl || ""}:${message.payload?.endUrl || ""}:${message.payload?.maxMessages || ""}:${message.payload?.includeThreads !== false}`,
+      availableDecisions: ["allow_once", "deny"],
+      policyEligible: false,
+    };
+  }
+
+  if (message.action === "debugCurrentThreadScan" || message.action === "debugCurrentChannelScan") {
+    return {
+      risk: "medium",
+      signature: message.action,
+      availableDecisions: ["allow_once", "deny"],
+      policyEligible: false,
+    };
+  }
+
+  return {
+    risk: "medium",
+    signature: String(message.action),
+    availableDecisions: ["allow_once", "deny"],
+    policyEligible: false,
+  };
+}
+
+function pruneExpiredApprovalPolicies() {
+  const now = Date.now();
+  for (const [id, policy] of state.tempApprovalPolicies) {
+    if (policy.expiresAt !== null && policy.expiresAt <= now) {
+      state.tempApprovalPolicies.delete(id);
+    }
+  }
+}
+
+function getApprovalPoliciesForUi() {
+  pruneExpiredApprovalPolicies();
+  return [...state.tempApprovalPolicies.values()]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((policy) => ({
+      id: policy.id,
+      action: policy.action,
+      scope: policy.scope,
+      risk: policy.risk,
+      createdAt: policy.createdAt,
+      expiresAt: policy.expiresAt,
+      summary: policy.summary,
+    }));
+}
+
+function clearTemporaryApprovalPolicies() {
+  state.tempApprovalPolicies.clear();
+  state.lastAutoApproval = null;
+  void updateActionAppearance();
+}
+
+function createTemporaryApprovalPolicy(message, classification, scope) {
+  const now = Date.now();
+  const expiresAt = scope === "5m" ? now + 5 * 60_000 : null;
+  return {
+    id: `${scope}:${message.action}:${now}`,
+    action: message.action,
+    scope,
+    risk: classification.risk,
+    createdAt: now,
+    expiresAt,
+    sessionId: state.pairing?.sessionId ?? "",
+    signature: classification.signature,
+    summary: scope === "5m"
+      ? `Auto-approve current-thread reads for 5 minutes`
+      : `Auto-approve current-thread reads for this paired session`,
+  };
+}
+
+function findMatchingApprovalPolicy(message, classification) {
+  pruneExpiredApprovalPolicies();
+  if (!classification.policyEligible) return null;
+  const sessionId = state.pairing?.sessionId ?? "";
+  for (const policy of state.tempApprovalPolicies.values()) {
+    if (policy.sessionId !== sessionId) continue;
+    if (policy.action !== message.action) continue;
+    return policy;
+  }
+  return null;
+}
+
+function noteAutoApproval(message, policy) {
+  state.lastAutoApproval = {
+    action: message.action,
+    scope: policy.scope,
+    at: Date.now(),
+    summary: policy.summary,
+  };
+}
+
 async function approvalSummaryForRequest(message) {
   if (message.action === "getCurrentThread") {
     const tabs = await getSlackTabsDetailed();
@@ -442,6 +559,9 @@ function getPendingApprovalsForUi() {
       lines: approval.lines,
       createdAt: approval.createdAt,
       expiresAt: approval.expiresAt,
+      risk: approval.risk,
+      availableDecisions: approval.availableDecisions,
+      requestCount: approval.requestCount,
     }));
 }
 
@@ -467,7 +587,25 @@ async function openApprovalWindow() {
 }
 
 async function requestUserApproval(message) {
+  const classification = classifyApprovalRequest(message);
+  const matchingPolicy = findMatchingApprovalPolicy(message, classification);
+  if (matchingPolicy) {
+    noteAutoApproval(message, matchingPolicy);
+    void updateActionAppearance();
+    return;
+  }
+
   const summary = await approvalSummaryForRequest(message);
+  const existingApproval = [...state.pendingApprovals.values()].find((approval) => approval.signature === classification.signature);
+  if (existingApproval) {
+    existingApproval.requestCount += 1;
+    existingApproval.lines = [...existingApproval.lines.filter((line) => !line.startsWith("Repeated requests:")), `Repeated requests: ${existingApproval.requestCount}`];
+    void updateActionAppearance();
+    return await new Promise((resolve, reject) => {
+      existingApproval.waiters.push({ requestId: message.id, resolve, reject });
+    });
+  }
+
   const approval = {
     id: message.id,
     action: message.action,
@@ -476,19 +614,20 @@ async function requestUserApproval(message) {
     createdAt: Date.now(),
     expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
     timeout: null,
-    resolve: null,
-    reject: null,
+    risk: classification.risk,
+    signature: classification.signature,
+    availableDecisions: classification.availableDecisions,
+    requestCount: 1,
+    waiters: [],
   };
 
   return await new Promise((resolve, reject) => {
-    approval.resolve = resolve;
-    approval.reject = reject;
+    approval.waiters.push({ requestId: message.id, resolve, reject });
     approval.timeout = setTimeout(() => {
       state.pendingApprovals.delete(approval.id);
-      if (state.pendingApprovals.size === 0) {
-        void updateActionAppearance();
+      for (const waiter of approval.waiters) {
+        waiter.reject(new BridgeActionError("approval_timeout", "Slack read approval timed out in Chrome."));
       }
-      reject(new BridgeActionError("approval_timeout", "Slack read approval timed out in Chrome."));
       void updateActionAppearance();
     }, APPROVAL_TIMEOUT_MS);
 
@@ -498,15 +637,26 @@ async function requestUserApproval(message) {
   });
 }
 
-function resolveApproval(id, allow) {
+function resolveApproval(id, decision) {
   const approval = state.pendingApprovals.get(id);
   if (!approval) return false;
   clearTimeout(approval.timeout);
   state.pendingApprovals.delete(id);
-  if (allow) {
-    approval.resolve();
+
+  if (decision === "allow_5m" || decision === "allow_session") {
+    const scope = decision === "allow_5m" ? "5m" : "session";
+    const policy = createTemporaryApprovalPolicy({ action: approval.action }, { risk: approval.risk, signature: approval.signature, policyEligible: true }, scope);
+    state.tempApprovalPolicies.set(policy.id, policy);
+  }
+
+  if (decision === "deny") {
+    for (const waiter of approval.waiters) {
+      waiter.reject(new BridgeActionError("user_denied", "User denied this Slack read request in Chrome."));
+    }
   } else {
-    approval.reject(new BridgeActionError("user_denied", "User denied this Slack read request in Chrome."));
+    for (const waiter of approval.waiters) {
+      waiter.resolve();
+    }
   }
   void updateActionAppearance();
   return true;
@@ -549,7 +699,9 @@ async function withExecutionTimeout(action, operation, controller) {
 function rejectAllApprovals(reason) {
   for (const approval of state.pendingApprovals.values()) {
     clearTimeout(approval.timeout);
-    approval.reject(new BridgeActionError("approval_cancelled", reason));
+    for (const waiter of approval.waiters) {
+      waiter.reject(new BridgeActionError("approval_cancelled", reason));
+    }
   }
   state.pendingApprovals.clear();
   void updateActionAppearance();
@@ -1530,11 +1682,18 @@ async function handleSocketMessage(socket, event) {
   }
 
   if (parsed.type === "cancel" && typeof parsed.id === "string") {
-    const approval = state.pendingApprovals.get(parsed.id);
+    let approval = state.pendingApprovals.get(parsed.id);
+    if (!approval) {
+      approval = [...state.pendingApprovals.values()].find((candidate) =>
+        candidate.waiters.some((waiter) => waiter.requestId === parsed.id),
+      );
+    }
     if (approval) {
       clearTimeout(approval.timeout);
-      state.pendingApprovals.delete(parsed.id);
-      approval.reject(new BridgeActionError("approval_cancelled", "Pi Slack cancelled the pending Chrome approval request."));
+      state.pendingApprovals.delete(approval.id);
+      for (const waiter of approval.waiters) {
+        waiter.reject(new BridgeActionError("approval_cancelled", "Pi Slack cancelled the pending Chrome approval request."));
+      }
       void updateActionAppearance();
       return;
     }
@@ -1631,6 +1790,7 @@ async function ensureConnected() {
       }
       state.temporaryTabIds.clear();
       rejectAllApprovals("Pi Slack disconnected while Chrome approval was pending.");
+      clearTemporaryApprovalPolicies();
       state.reconnectAttempt += 1;
       if (event.reason) {
         state.lastError = `Socket closed: ${event.reason}`;
@@ -1650,6 +1810,7 @@ async function getStatus() {
   await ensureConnected();
   const pairing = state.pairing ?? await getPairing();
   const tabs = await getSlackTabs();
+  const policies = getApprovalPoliciesForUi();
 
   return {
     connected: state.connected,
@@ -1659,6 +1820,8 @@ async function getStatus() {
     hasPairing: Boolean(pairing),
     pairSessionId: pairing?.sessionId ?? "",
     pendingApprovalCount: state.pendingApprovals.size,
+    temporaryApprovalPolicyCount: policies.length,
+    lastAutoApproval: state.lastAutoApproval,
     slackTabCount: tabs.count,
     activeTab: tabs.activeTab,
     selectionRule: tabs.selectionRule,
@@ -1697,6 +1860,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "session" || !(PAIRING_KEY in changes)) return;
   state.pairing = changes[PAIRING_KEY]?.newValue ?? null;
+  clearTemporaryApprovalPolicies();
   void updateActionAppearance();
   void ensureConnected();
 });
@@ -1714,6 +1878,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then(async () => {
         const pairing = parsePairingCode(message.pairingCode);
         await setPairing(pairing);
+        clearTemporaryApprovalPolicies();
         clearReconnectTimer();
         closeSocket();
         await ensureConnected();
@@ -1731,6 +1896,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         clearReconnectTimer();
         closeSocket();
         rejectAllApprovals("Pairing reset in Chrome.");
+        clearTemporaryApprovalPolicies();
         for (const tabId of state.temporaryTabIds) {
           chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
         }
@@ -1747,7 +1913,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "pi-slack:get-approval-state") {
-    sendResponse({ pending: getPendingApprovalsForUi() });
+    sendResponse({ pending: getPendingApprovalsForUi(), policies: getApprovalPoliciesForUi() });
     return undefined;
   }
 
@@ -1759,7 +1925,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "pi-slack:resolve-approval") {
-    sendResponse({ ok: resolveApproval(String(message.id ?? ""), message.decision === "allow") });
+    sendResponse({ ok: resolveApproval(String(message.id ?? ""), String(message.decision ?? "deny")) });
+    return undefined;
+  }
+
+  if (message.type === "pi-slack:clear-approval-policies") {
+    clearTemporaryApprovalPolicies();
+    sendResponse({ ok: true });
     return undefined;
   }
 
