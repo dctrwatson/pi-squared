@@ -29,15 +29,16 @@ Recommended launcher script:
 
    The extension starts a localhost WebSocket bridge on a session-specific port.
 
-2. **Reveal the pairing code.**
+2. **Copy the pairing code.**
 
-   Inside the Pi session run:
+   On fresh startup, Pi automatically displays the current pairing code in the UI.
+   If you need to show it again later, run:
 
    ```
-   /slack-status --show-pairing
+   /slack-pair
    ```
 
-   This displays the pairing code for the live `pi-slack` session. Keep the terminal output
+   You can also use `/slack-status --show-pairing` for the full status view. Keep the terminal output
    confidential until that session exits.
 
 3. **Configure Chrome.**
@@ -102,8 +103,9 @@ Not implemented yet:
 ## Useful commands
 
 - `/slack-status` — show bridge status
-- `/slack-status --show-pairing` — reveal the pairing code for Chrome setup (`--show-token` remains a compatibility alias)
-- `/slack-rotate-pairing` — rotate the live pairing code and force Chrome to re-pair
+- `/slack-pair` — reveal the current pairing code for Chrome setup
+- `/slack-status --show-pairing` — reveal the pairing code together with full bridge status (`--show-token` remains a compatibility alias)
+- `/slack-rotate-pairing` — rotate the live pairing code, immediately show the new code, and force Chrome to re-pair
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]` — read channel messages from a Slack message link, either as a bounded window (`--next`) or as a paginated span suitable for summarization

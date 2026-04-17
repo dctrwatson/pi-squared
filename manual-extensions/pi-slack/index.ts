@@ -509,6 +509,37 @@ function formatStatus(showPairing: boolean): string {
 	return lines.join("\n");
 }
 
+function formatPairingMessage(heading?: string): string {
+	state.pairingRevealedAt = Date.now();
+	const lines: string[] = [];
+	if (heading) {
+		lines.push(heading, "");
+	}
+	lines.push(
+		"WARNING: the pairing code grants read access to this Pi Slack session until it is rotated or the session exits. Keep it confidential.",
+		"",
+		"Paste this into the Pi Slack Chrome extension popup:",
+		state.pairingCode,
+		"",
+		`Endpoint: ${state.wsUrl}`,
+		`Session: ${state.sessionId}`,
+	);
+	return lines.join("\n");
+}
+
+function revealPairing(
+	ctx: { hasUI: boolean; ui?: { notify(message: string, type?: "info" | "warning" | "error"): void } },
+	heading?: string,
+): void {
+	const message = formatPairingMessage(heading);
+	if (ctx.hasUI && ctx.ui) {
+		ctx.ui.notify(message, "info");
+		return;
+	}
+	console.error("WARNING: pairing code displayed — keep this output confidential until the Pi Slack session exits.");
+	writeStatus(message);
+}
+
 function buildSlackSystemPrompt(): string {
 	return [
 		"You are Pi Slack, a communications assistant for a distinguished SRE / BOFH.",
@@ -1530,12 +1561,15 @@ export default function piSlack(pi: ExtensionAPI) {
 
 		if (!ctx.hasUI) return;
 
-		ctx.ui.notify(
-			state.reusedPairingOnLastStart
-				? `Pi Slack bridge listening on ${state.wsUrl}. Existing Slack pairing was preserved across /new; Chrome should reconnect automatically. Chrome will still prompt before each Slack read.`
-				: `Pi Slack bridge listening on ${state.wsUrl}. Run /slack-status --show-pairing to pair Chrome for this session. Chrome will prompt before each Slack read.`,
-			"info",
-		);
+		if (state.reusedPairingOnLastStart) {
+			ctx.ui.notify(
+				`Pi Slack bridge listening on ${state.wsUrl}. Existing Slack pairing was preserved across /new; Chrome should reconnect automatically. Chrome will still prompt before each Slack read.`,
+				"info",
+			);
+			return;
+		}
+
+		revealPairing(ctx, `Pi Slack bridge listening on ${state.wsUrl}. Pair Chrome for this startup:`);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1852,12 +1886,7 @@ export default function piSlack(pi: ExtensionAPI) {
 				}
 				rejectAllPending("Pi Slack pairing rotated.");
 				rotatePairing("manual rotation command");
-				const message = "Pi Slack pairing rotated. Run /slack-status --show-pairing and re-pair Chrome.";
-				if (ctx.hasUI) {
-					ctx.ui.notify(message, "info");
-				} else {
-					writeStatus(message);
-				}
+				revealPairing(ctx, "Pi Slack pairing rotated. Paste the new pairing code into Chrome to reconnect:");
 			} catch (error) {
 				const message = `Pi Slack pairing rotation failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
@@ -1870,7 +1899,7 @@ export default function piSlack(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-status", {
-		description: "Show Pi Slack bridge status (use --show-pairing to reveal the one-session pairing code)",
+		description: "Show Pi Slack bridge status (use --show-pairing to reveal the pairing code)",
 		handler: async (args, ctx) => {
 			const showPairing = args.includes("--show-pairing") || args.includes("--show-token");
 			const message = formatStatus(showPairing);
@@ -1881,6 +1910,23 @@ export default function piSlack(pi: ExtensionAPI) {
 					console.error("WARNING: pairing code displayed — keep this output confidential until the Pi Slack session exits.");
 				}
 				writeStatus(message);
+			}
+		},
+	});
+
+	pi.registerCommand("slack-pair", {
+		description: "Reveal the current Pi Slack pairing code for Chrome setup",
+		handler: async (_args, ctx) => {
+			try {
+				await ensureBridgeStarted();
+				revealPairing(ctx, "Current Pi Slack pairing code:");
+			} catch (error) {
+				const message = `Pi Slack pairing reveal failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
 			}
 		},
 	});

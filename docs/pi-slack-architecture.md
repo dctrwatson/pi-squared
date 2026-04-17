@@ -159,7 +159,8 @@ On session start, the extension:
   - `slack_read_thread`
   - `slack_read_channel`
 - sets a default session name of `Pi Slack` if none exists
-- shows the bridge endpoint and reminds the user to reveal the pairing code for Chrome setup
+- on fresh startup, automatically reveals the pairing code in the UI for Chrome setup
+- on `/new`, preserves the existing pairing instead of revealing a new one
 
 On shutdown, it:
 
@@ -199,6 +200,7 @@ Overrides:
 The extension currently registers these commands:
 
 - `/slack-status`
+- `/slack-pair`
 - `/slack-status --show-pairing`
 - `/slack-status --show-token` — compatibility alias for `--show-pairing`
 - `/slack-rotate-pairing`
@@ -223,7 +225,13 @@ Instead, each live `pi-slack` startup creates:
 
 Within the same live `pi-slack` process, `/new` preserves that pairing so the user can clear model context without re-pairing Chrome.
 
-The pairing code is revealed from Pi with:
+On fresh startup, Pi reveals the pairing code automatically in the UI. The user can reveal it again with:
+
+```text
+/slack-pair
+```
+
+For the full status view, including the pairing code, the user can also run:
 
 ```text
 /slack-status --show-pairing
@@ -531,12 +539,11 @@ This preparation loop is what makes workspace-host permalinks and app handoff pa
 ### Pairing and connection
 
 1. User launches `pi-slack`
-2. Pi extension starts the local bridge on a session-specific port
-3. User runs `/slack-status --show-pairing`
-4. User pastes the pairing code into the Chrome popup
-5. Chrome connects to the bridge URL from that pairing code
-6. Chrome and Pi complete the nonce/HMAC handshake
-7. The extension action icon turns green once authenticated
+2. Pi extension starts the local bridge on a session-specific port and shows the pairing code in the UI
+3. User pastes the pairing code into the Chrome popup
+4. Chrome connects to the bridge URL from that pairing code
+5. Chrome and Pi complete the nonce/HMAC handshake
+6. The extension action icon turns green once authenticated
 
 If the user later runs `/new` in the same `pi-slack` process, Pi restarts the session while preserving the current pairing and bridge port so Chrome reconnects automatically.
 
@@ -721,6 +728,7 @@ Authentication is scoped to a live Pi Slack session.
 
 - Pi generates a fresh session id and session secret at startup
 - Pi exposes those through a pairing code for the current live startup only
+- Pi reveals that code automatically on fresh startup and again after manual rotation
 - Chrome stores the pairing in `chrome.storage.session`
 - Chrome proves knowledge of the session secret without sending it as plaintext in the first message
 - Pi can rotate the pairing on demand with `/slack-rotate-pairing`
