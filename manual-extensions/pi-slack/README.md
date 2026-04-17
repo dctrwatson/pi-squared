@@ -31,7 +31,7 @@ Recommended launcher script:
 
 2. **Copy the pairing code.**
 
-   On fresh startup, Pi automatically adds the current pairing code to the session UI so it is easy to copy.
+   On fresh startup, Pi automatically opens a temporary editor containing just the current pairing code so it is easy to copy.
    If you need to show it again later, run:
 
    ```
@@ -102,7 +102,7 @@ Not implemented yet:
 ## Useful commands
 
 - `/slack-status` — show bridge status
-- `/slack-pair` — reveal the current pairing code for Chrome setup in the session UI for easy copy
+- `/slack-pair` — open a temporary editor containing the current pairing code for easy copy
 - `/slack-rotate-pairing` — rotate the live pairing code, immediately show the new code, and force Chrome to re-pair
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message

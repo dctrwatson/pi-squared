@@ -159,7 +159,7 @@ On session start, the extension:
   - `slack_read_thread`
   - `slack_read_channel`
 - sets a default session name of `Pi Slack` if none exists
-- on fresh startup, automatically reveals the pairing code in the UI for Chrome setup
+- on fresh startup, automatically opens a temporary editor containing the pairing code for Chrome setup
 - on `/new`, preserves the existing pairing instead of revealing a new one
 
 On shutdown, it:
@@ -223,7 +223,7 @@ Instead, each live `pi-slack` startup creates:
 
 Within the same live `pi-slack` process, `/new` preserves that pairing so the user can clear model context without re-pairing Chrome.
 
-On fresh startup, Pi reveals the pairing code automatically in the session UI so it is easy to copy. The user can reveal it again with:
+On fresh startup, Pi opens a temporary editor containing the pairing code so it is easy to copy without storing it in session history. The user can reveal it again with:
 
 ```text
 /slack-pair
@@ -531,7 +531,7 @@ This preparation loop is what makes workspace-host permalinks and app handoff pa
 ### Pairing and connection
 
 1. User launches `pi-slack`
-2. Pi extension starts the local bridge on a session-specific port and shows the pairing code in the UI
+2. Pi extension starts the local bridge on a session-specific port and opens a temporary editor with the pairing code
 3. User pastes the pairing code into the Chrome popup
 4. Chrome connects to the bridge URL from that pairing code
 5. Chrome and Pi complete the nonce/HMAC handshake
