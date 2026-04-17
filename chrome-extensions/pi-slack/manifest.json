@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pi Slack (Scaffold)",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Scaffold for the local Pi Slack Chrome bridge.",
   "permissions": [
     "storage",

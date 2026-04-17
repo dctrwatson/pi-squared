@@ -1,7 +1,7 @@
 {
   "name": "pi-slack-chrome-extension",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Repo-local Chrome extension package for Pi Slack",
   "type": "module",
   "scripts": {

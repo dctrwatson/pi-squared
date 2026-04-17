@@ -119,6 +119,10 @@ Override:
 
 This gives `pi-slack` stable session storage independent of the current working directory.
 
+### Trust boundary
+
+The launcher passes any extra arguments verbatim to `pi` via `"$@"`. An additional `-e` flag (e.g. `pi-slack -e /tmp/x.ts`) would load a second extension alongside the Slack extension. That extension runs with full Node.js access and could read the token file or inspect in-memory bridge state. Only use extra `-e` flags with extensions you fully trust. This is not a supported usage and is outside the normal operating model.
+
 ## Pi extension architecture
 
 File: `manual-extensions/pi-slack/index.ts`
@@ -248,13 +252,14 @@ Permissions:
 - `storage`
 - `tabs`
 - `scripting`
+- `alarms` — used for the alarm-based heartbeat and reconnect scheduler so both survive MV3 service worker eviction
 
 Host permissions:
 
 - `https://app.slack.com/*`
 - `https://*.slack.com/*`
 
-The second pattern exists because Slack permalinks and browser fallback flows may use workspace-specific Slack hosts in addition to `app.slack.com`.
+The broad host-permission pattern exists because Slack permalinks and browser fallback flows may use workspace-specific hosts. Content scripts are auto-injected only on `https://app.slack.com/*`; non-`app.slack.com` tabs are covered on demand via `chrome.scripting.executeScript` in `ensureContentScriptLoaded`.
 
 ### Background service worker
 
@@ -579,6 +584,7 @@ Known limitations:
 - no browser-side write-back exists
 - no workspace app or Slack API integration exists
 - channel and thread extraction are best-effort against a virtualized DOM, not a first-party message API
+- Slack content is untrusted and prompt-injection-capable; structural delimiters and a system-prompt instruction are the current mitigations, not guarantees
 
 ## Summary
 

@@ -15,6 +15,40 @@ Recommended launcher script:
 ./bin/pi-slack
 ```
 
+> **Trust boundary.** The launcher passes any extra arguments verbatim to `pi`. An extra `-e` flag
+> (e.g. `pi-slack -e /tmp/x.ts`) would load an additional extension that could read the shared-secret
+> token file or inspect bridge state. Only use extra `-e` flags with extensions you fully trust.
+
+## First-run setup
+
+1. **Launch the bridge.**
+
+   ```sh
+   bin/pi-slack
+   ```
+
+   On first launch the extension creates a shared-secret token at `~/.config/pi-slack/token` and
+   prints the bridge URL.
+
+2. **Reveal the token.**
+
+   Inside the Pi session run:
+
+   ```
+   /slack-status --show-token
+   ```
+
+   This displays the full token. Keep the terminal output confidential — anyone with access to it
+   can authenticate to your local bridge.
+
+3. **Configure Chrome.**
+
+   Open the Pi Slack Chrome extension popup (`chrome-extensions/pi-slack` loaded as an unpacked
+   extension), paste the token into the token field, and press **Save**. The icon turns green when
+   the connection is authenticated.
+
+   See `chrome-extensions/pi-slack/README.md` for Chrome loading instructions.
+
 You can symlink that into a directory on your `PATH`, for example:
 
 ```sh
