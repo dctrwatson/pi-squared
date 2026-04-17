@@ -694,6 +694,31 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     };
   }
 
+  function buildExtractionWarnings(diagnostics, context) {
+    const warnings = [];
+    if (!diagnostics || typeof diagnostics !== "object") return warnings;
+
+    if (!diagnostics.rootSelector) {
+      warnings.push(`${context}: no strong root selector matched; extraction may be using a weak fallback.`);
+    }
+    if (diagnostics.fallbackTextCount > 0) {
+      warnings.push(`${context}: ${diagnostics.fallbackTextCount} message row(s) required fallback text extraction.`);
+    }
+    if (diagnostics.backfilledAuthorCount > 0) {
+      warnings.push(`${context}: ${diagnostics.backfilledAuthorCount} message row(s) required author backfill.`);
+    }
+    if (diagnostics.finalMessageCount > 0 && diagnostics.permalinkCount < diagnostics.finalMessageCount) {
+      warnings.push(`${context}: only ${diagnostics.permalinkCount}/${diagnostics.finalMessageCount} extracted message row(s) had a trusted permalink.`);
+    }
+    if (diagnostics.finalMessageCount > 0 && diagnostics.messageTsCount < diagnostics.finalMessageCount) {
+      warnings.push(`${context}: only ${diagnostics.messageTsCount}/${diagnostics.finalMessageCount} extracted message row(s) had a parsed Slack timestamp.`);
+    }
+    if (diagnostics.candidateRowCount > 0 && diagnostics.filteredRowCount === 0) {
+      warnings.push(`${context}: candidate message rows were found, but none survived filtering.`);
+    }
+    return warnings;
+  }
+
   function extractMessagesDetailed(root, composerElement, initialAuthor) {
     const messageElements = findMessageElements(root, composerElement);
     const rawMessages = [];
@@ -922,6 +947,10 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         error: {
           code: "no_thread_open",
           message: "No visible Slack thread pane is open.",
+          diagnostics: {
+            rootSelector: threadRootDetails.matchedSelector,
+            rootCandidateCount: threadRootDetails.candidateCount,
+          },
         },
       };
     }
@@ -929,6 +958,13 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const composerElement = findComposer(threadRoot);
     const composerDraftText = composerElement ? getElementText(composerElement) : "";
     const harvest = await harvestThreadMessages(threadRoot, composerElement);
+    const diagnostics = {
+      rootSelector: threadRootDetails.matchedSelector,
+      rootCandidateCount: threadRootDetails.candidateCount,
+      composerPresent: Boolean(composerElement),
+      ...harvest.diagnostics,
+    };
+    const warnings = buildExtractionWarnings(diagnostics, "thread");
     const messages = harvest.messages;
 
     if (messages.length === 0) {
@@ -937,6 +973,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         error: {
           code: "no_thread_messages",
           message: "A thread pane is open, but no thread messages could be extracted.",
+          diagnostics,
+          warnings,
         },
       };
     }
@@ -958,12 +996,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         composerDraftText: composerDraftText || undefined,
         reportedMessageCount,
         harvestedViaScroll: harvest.harvestedViaScroll,
-        diagnostics: {
-          rootSelector: threadRootDetails.matchedSelector,
-          rootCandidateCount: threadRootDetails.candidateCount,
-          composerPresent: Boolean(composerElement),
-          ...harvest.diagnostics,
-        },
+        diagnostics,
+        extractionWarnings: warnings,
       },
     };
   }
@@ -1234,6 +1268,10 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         error: {
           code: "no_channel_view",
           message: "No visible Slack channel view is open.",
+          diagnostics: {
+            rootSelector: mainRootDetails.matchedSelector,
+            rootCandidateCount: mainRootDetails.candidateCount,
+          },
         },
       };
     }
@@ -1242,6 +1280,16 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const initialAuthor = typeof seedAuthor === "string" && seedAuthor ? seedAuthor : undefined;
     const composerElement = findComposer(mainRoot);
     const harvest = await harvestChannelRangeMessages(mainRoot, composerElement, startTs, endTs, limit, cursorTs, initialAuthor);
+    const diagnostics = {
+      rootSelector: mainRootDetails.matchedSelector,
+      rootCandidateCount: mainRootDetails.candidateCount,
+      composerPresent: Boolean(composerElement),
+      startedAtBoundary: harvest.started,
+      reachedEndBoundary: harvest.reachedEnd,
+      hitLimit: harvest.hitLimit,
+      ...harvest.diagnostics,
+    };
+    const warnings = buildExtractionWarnings(diagnostics, "channel_range");
     if (!harvest.started) {
       return {
         ok: false,
@@ -1250,6 +1298,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
           message: cursorTs
             ? "No channel messages found after the pagination cursor."
             : "Could not find the starting Slack message in the loaded channel view.",
+          diagnostics,
+          warnings,
         },
       };
     }
@@ -1260,6 +1310,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         error: {
           code: "no_channel_messages",
           message: "No channel messages could be extracted from the requested range.",
+          diagnostics,
+          warnings,
         },
       };
     }
@@ -1285,15 +1337,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         harvestedViaScroll: harvest.harvestedViaScroll,
         nextCursor,
         nextStartUrl,
-        diagnostics: {
-          rootSelector: mainRootDetails.matchedSelector,
-          rootCandidateCount: mainRootDetails.candidateCount,
-          composerPresent: Boolean(composerElement),
-          startedAtBoundary: harvest.started,
-          reachedEndBoundary: harvest.reachedEnd,
-          hitLimit: harvest.hitLimit,
-          ...harvest.diagnostics,
-        },
+        diagnostics,
+        extractionWarnings: warnings,
       },
     };
   }
