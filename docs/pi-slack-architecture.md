@@ -175,11 +175,16 @@ Default values in the implementation:
 - port: OS-assigned ephemeral port by default
 - protocol version: `1`
 - hello timeout: 5 seconds
-- approval timeout budget added to request timeouts: 60 seconds
-- default request timeout: 70 seconds total
-- thread read timeout: 80 seconds total
-- bounded channel range timeout: 120 seconds total
-- paginated channel range timeout: 240 seconds total
+- approval timeout: 60 seconds
+- request timeout buffer: 5 seconds
+- default execution timeout: 10 seconds
+- thread execution timeout: 20 seconds
+- bounded channel range execution timeout: 60 seconds
+- paginated channel range execution timeout: 180 seconds
+- total Pi-side wait budget for default requests: 75 seconds
+- total Pi-side wait budget for thread reads: 85 seconds
+- total Pi-side wait budget for bounded channel reads: 125 seconds
+- total Pi-side wait budget for paginated channel reads: 245 seconds
 
 Overrides:
 
@@ -344,7 +349,7 @@ Approval flow:
 4. the user chooses **Allow once** or **Deny**
 5. only after approval does the background worker read Slack DOM state and return the result
 
-If the user denies the request, Chrome returns a structured error such as `user_denied`. If the user never responds, Chrome returns `approval_timeout`.
+If the user denies the request, Chrome returns a structured error such as `user_denied`. If the user never responds, Chrome returns `approval_timeout`. Once approval is granted, Chrome applies a separate execution timeout for the actual Slack read and returns `execution_timeout` if that phase runs too long.
 
 ### Active Slack tab selection
 
@@ -594,6 +599,7 @@ Responses use a structured error shape with a code and message. Common error cod
 - `user_denied`
 - `approval_timeout`
 - `approval_cancelled`
+- `execution_timeout`
 
 ## Model-facing normalization
 

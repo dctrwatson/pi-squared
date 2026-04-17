@@ -11,10 +11,11 @@ const DEFAULT_PORT = 27183;
 const PROTOCOL_VERSION = 1;
 const HELLO_TIMEOUT_MS = 5_000;
 const USER_APPROVAL_TIMEOUT_MS = 60_000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 10_000 + USER_APPROVAL_TIMEOUT_MS;
-const THREAD_REQUEST_TIMEOUT_MS = 20_000 + USER_APPROVAL_TIMEOUT_MS;
-const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000 + USER_APPROVAL_TIMEOUT_MS;
-const CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS = 180_000 + USER_APPROVAL_TIMEOUT_MS;
+const REQUEST_TIMEOUT_BUFFER_MS = 5_000;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 10_000;
+const THREAD_EXECUTION_TIMEOUT_MS = 20_000;
+const CHANNEL_RANGE_EXECUTION_TIMEOUT_MS = 60_000;
+const CHANNEL_RANGE_ALL_EXECUTION_TIMEOUT_MS = 180_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const MAX_UNAUTHENTICATED_SOCKETS = 8; // T08: cap on pre-hello connections
 const PAIRING_CODE_PREFIX = "pi-slack-pair:";
@@ -952,17 +953,21 @@ function closeSocket(socket: WebSocket, code: number, reason: string): void {
 	}
 }
 
-function getChromeRequestTimeoutMs(action: string): number {
+function getChromeExecutionTimeoutMs(action: string): number {
 	switch (action) {
 		case "getCurrentThread":
-			return THREAD_REQUEST_TIMEOUT_MS;
+			return THREAD_EXECUTION_TIMEOUT_MS;
 		case "getChannelRange":
-			return CHANNEL_RANGE_REQUEST_TIMEOUT_MS;
+			return CHANNEL_RANGE_EXECUTION_TIMEOUT_MS;
 		case "getChannelRangeAll":
-			return CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS;
+			return CHANNEL_RANGE_ALL_EXECUTION_TIMEOUT_MS;
 		default:
-			return DEFAULT_REQUEST_TIMEOUT_MS;
+			return DEFAULT_EXECUTION_TIMEOUT_MS;
 	}
+}
+
+function getChromeRequestTimeoutMs(action: string): number {
+	return USER_APPROVAL_TIMEOUT_MS + getChromeExecutionTimeoutMs(action) + REQUEST_TIMEOUT_BUFFER_MS;
 }
 
 async function requestChrome(action: string, payload: Record<string, unknown> = {}): Promise<ResponseMessage> {
@@ -987,7 +992,10 @@ async function requestChrome(action: string, payload: Record<string, unknown> = 
 			try {
 				state.activeChrome?.socket.send(serialize({ type: "cancel", id }));
 			} catch { /* ignore — Chrome may be disconnected */ }
-			reject(new Error(`Timed out waiting for Chrome response to ${action} after ${Math.round(timeoutMs / 1000)}s.`));
+			reject(new Error(
+				`Timed out waiting for Chrome response to ${action} after ${Math.round(timeoutMs / 1000)}s total ` +
+				`(approval ${Math.round(USER_APPROVAL_TIMEOUT_MS / 1000)}s + execution ${Math.round(getChromeExecutionTimeoutMs(action) / 1000)}s + buffer ${Math.round(REQUEST_TIMEOUT_BUFFER_MS / 1000)}s).`,
+			));
 		}, timeoutMs);
 
 		state.pendingRequests.set(id, {

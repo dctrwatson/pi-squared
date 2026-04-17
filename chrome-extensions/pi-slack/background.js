@@ -3,6 +3,10 @@ const PAIRING_CODE_PREFIX = "pi-slack-pair:";
 const PROTOCOL_VERSION = 1;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const APPROVAL_TIMEOUT_MS = 60_000;
+const DEFAULT_EXECUTION_TIMEOUT_MS = 10_000;
+const THREAD_EXECUTION_TIMEOUT_MS = 20_000;
+const CHANNEL_RANGE_EXECUTION_TIMEOUT_MS = 60_000;
+const CHANNEL_RANGE_ALL_EXECUTION_TIMEOUT_MS = 180_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const CHANNEL_SUMMARY_THREAD_LIMIT = 50;
 const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 100;
@@ -482,6 +486,40 @@ function resolveApproval(id, allow) {
   }
   void updateActionAppearance();
   return true;
+}
+
+function getExecutionTimeoutMs(action) {
+  switch (action) {
+    case "getCurrentThread":
+      return THREAD_EXECUTION_TIMEOUT_MS;
+    case "getChannelRange":
+      return CHANNEL_RANGE_EXECUTION_TIMEOUT_MS;
+    case "getChannelRangeAll":
+      return CHANNEL_RANGE_ALL_EXECUTION_TIMEOUT_MS;
+    default:
+      return DEFAULT_EXECUTION_TIMEOUT_MS;
+  }
+}
+
+async function withExecutionTimeout(action, operation, controller) {
+  const timeoutMs = getExecutionTimeoutMs(action);
+  let timeoutId;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          if (controller) controller.abort();
+          reject(new BridgeActionError(
+            "execution_timeout",
+            `Slack request ${action} timed out in Chrome after approval after ${Math.round(timeoutMs / 1000)}s.`,
+          ));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function rejectAllApprovals(reason) {
@@ -1244,7 +1282,10 @@ async function handleRequestMessage(socket, message) {
 
     if (message.action === "getCurrentThread") {
       await requestUserApproval(message);
-      const result = await sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" });
+      const result = await withExecutionTimeout(
+        message.action,
+        sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" }),
+      );
       if (!result.response.ok) {
         sendSocketResponse(socket, message.id, {
           ok: false,
@@ -1278,7 +1319,10 @@ async function handleRequestMessage(socket, message) {
       }
 
       await requestUserApproval(message);
-      const payload = await getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cursor);
+      const payload = await withExecutionTimeout(
+        message.action,
+        getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cursor),
+      );
       sendSocketResponse(socket, message.id, {
         ok: true,
         payload,
@@ -1300,7 +1344,11 @@ async function handleRequestMessage(socket, message) {
       const controller = new AbortController();
       state.pendingAbortControllers.set(message.id, controller);
       try {
-        const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads, controller.signal);
+        const payload = await withExecutionTimeout(
+          message.action,
+          getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads, controller.signal),
+          controller,
+        );
         sendSocketResponse(socket, message.id, {
           ok: true,
           payload,
