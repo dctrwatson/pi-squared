@@ -132,6 +132,7 @@ interface BridgeState {
 	allowNoOriginClients: boolean;
 	pairingRotatedAt: number;
 	pairingRevealedAt?: number;
+	reusedPairingOnLastStart: boolean;
 	rotatePairingAfterDisconnectTimeout?: NodeJS.Timeout;
 	startupError?: string;
 	server?: WebSocketServer;
@@ -141,6 +142,20 @@ interface BridgeState {
 	lastPingAt?: number;
 	lastPongAt?: number;
 	lastPingRoundTripMs?: number;
+}
+
+interface PreservedBridgeState {
+	port: number;
+	sessionId: string;
+	sessionSecret: string;
+	pairingCode: string;
+	pairingRotatedAt: number;
+	pairingRevealedAt?: number;
+}
+
+interface PiSlackProcessState {
+	preservePairingOnNextSessionStart: boolean;
+	preservedBridgeState?: PreservedBridgeState;
 }
 
 interface SlackThreadMessage {
@@ -219,11 +234,37 @@ const state: BridgeState = {
 	pairingCode: "",
 	allowNoOriginClients: ALLOW_NO_ORIGIN_CLIENTS,
 	pairingRotatedAt: Date.now(),
+	reusedPairingOnLastStart: false,
 	pendingRequests: new Map(),
 	unauthenticatedSockets: 0,
 };
 
 let startupPromise: Promise<void> | undefined;
+
+function getProcessState(): PiSlackProcessState {
+	const globalKey = "__piSlackProcessState";
+	const globalState = globalThis as typeof globalThis & { [globalKey]?: PiSlackProcessState };
+	if (!globalState[globalKey]) {
+		globalState[globalKey] = {
+			preservePairingOnNextSessionStart: false,
+		};
+	}
+	return globalState[globalKey];
+}
+
+const processState = getProcessState();
+
+function captureBridgeStateForReuse(): PreservedBridgeState | undefined {
+	if (!state.server || state.lifecycle !== "listening" || !state.pairingCode) return undefined;
+	return {
+		port: state.port,
+		sessionId: state.sessionId,
+		sessionSecret: state.sessionSecret,
+		pairingCode: state.pairingCode,
+		pairingRotatedAt: state.pairingRotatedAt,
+		pairingRevealedAt: state.pairingRevealedAt,
+	};
+}
 
 function resolvePort(): number {
 	const raw = process.env.PI_SLACK_PORT;
@@ -1120,11 +1161,26 @@ function handleAuthenticatedMessage(socket: WebSocket, raw: RawData): void {
 async function startBridge(): Promise<void> {
 	state.lifecycle = "starting";
 	state.startupError = undefined;
-	state.port = resolvePort();
-	state.sessionId = randomUUID();
-	state.sessionSecret = createSessionSecret();
-	state.pairingCode = "";
-	state.pairingRotatedAt = Date.now();
+	state.reusedPairingOnLastStart = false;
+
+	const preservedBridgeState = processState.preservedBridgeState;
+	processState.preservedBridgeState = undefined;
+	if (preservedBridgeState) {
+		state.port = preservedBridgeState.port;
+		state.sessionId = preservedBridgeState.sessionId;
+		state.sessionSecret = preservedBridgeState.sessionSecret;
+		state.pairingCode = preservedBridgeState.pairingCode;
+		state.pairingRotatedAt = preservedBridgeState.pairingRotatedAt;
+		state.pairingRevealedAt = preservedBridgeState.pairingRevealedAt;
+		state.reusedPairingOnLastStart = true;
+	} else {
+		state.port = resolvePort();
+		state.sessionId = randomUUID();
+		state.sessionSecret = createSessionSecret();
+		state.pairingCode = "";
+		state.pairingRotatedAt = Date.now();
+		state.pairingRevealedAt = undefined;
+	}
 	clearPendingPairingRotation();
 
 	const server = new WebSocketServer({
@@ -1159,7 +1215,9 @@ async function startBridge(): Promise<void> {
 	state.server = server;
 	state.lifecycle = "listening";
 	state.wsUrl = `ws://${state.host}:${state.port}`;
-	state.pairingCode = encodePairingCode(createPairingPayload());
+	if (!state.reusedPairingOnLastStart || !state.pairingCode) {
+		state.pairingCode = encodePairingCode(createPairingPayload());
+	}
 
 	server.on("connection", (socket, request) => {
 		const remoteAddress = request.socket.remoteAddress;
@@ -1319,7 +1377,10 @@ async function startBridge(): Promise<void> {
 	});
 }
 
-async function stopBridge(): Promise<void> {
+async function stopBridge(options: { preservePairing?: boolean } = {}): Promise<void> {
+	processState.preservedBridgeState = options.preservePairing ? captureBridgeStateForReuse() : undefined;
+	processState.preservePairingOnNextSessionStart = false;
+
 	rejectAllPending("Pi Slack bridge is shutting down.");
 	clearPendingPairingRotation();
 
@@ -1332,6 +1393,8 @@ async function stopBridge(): Promise<void> {
 	state.server = undefined;
 	state.lifecycle = "stopped";
 	state.pairingCode = "";
+	state.pairingRevealedAt = undefined;
+	state.reusedPairingOnLastStart = false;
 	startupPromise = undefined;
 
 	if (!server) return;
@@ -1441,6 +1504,10 @@ export default function piSlack(pi: ExtensionAPI) {
 		};
 	});
 
+	pi.on("session_before_switch", async (event) => {
+		processState.preservePairingOnNextSessionStart = event.reason === "new";
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		try {
 			await ensureBridgeStarted();
@@ -1455,6 +1522,7 @@ export default function piSlack(pi: ExtensionAPI) {
 			return;
 		}
 
+		processState.preservePairingOnNextSessionStart = false;
 		pi.setActiveTools(["slack_read_thread", "slack_read_channel"]);
 		if (!pi.getSessionName()) {
 			pi.setSessionName("Pi Slack");
@@ -1463,13 +1531,15 @@ export default function piSlack(pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 
 		ctx.ui.notify(
-			`Pi Slack bridge listening on ${state.wsUrl}. Run /slack-status --show-pairing to pair Chrome for this session. Chrome will prompt before each Slack read.`,
+			state.reusedPairingOnLastStart
+				? `Pi Slack bridge listening on ${state.wsUrl}. Existing Slack pairing was preserved across /new; Chrome should reconnect automatically. Chrome will still prompt before each Slack read.`
+				: `Pi Slack bridge listening on ${state.wsUrl}. Run /slack-status --show-pairing to pair Chrome for this session. Chrome will prompt before each Slack read.`,
 			"info",
 		);
 	});
 
 	pi.on("session_shutdown", async () => {
-		await stopBridge();
+		await stopBridge({ preservePairing: processState.preservePairingOnNextSessionStart });
 	});
 
 	pi.registerMessageRenderer("slack-read", (message, options, theme) => {

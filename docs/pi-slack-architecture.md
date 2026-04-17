@@ -214,12 +214,14 @@ The extension currently registers these commands:
 
 Chrome does not persist a long-lived shared secret.
 
-Instead, each live `pi-slack` session creates:
+Instead, each live `pi-slack` startup creates:
 
 - a session id
 - a session secret
 - a session-specific bridge URL
-- a pairing code that encodes those values for the current session only
+- a pairing code that encodes those values for the current live startup only
+
+Within the same live `pi-slack` process, `/new` preserves that pairing so the user can clear model context without re-pairing Chrome.
 
 The pairing code is revealed from Pi with:
 
@@ -536,6 +538,8 @@ This preparation loop is what makes workspace-host permalinks and app handoff pa
 6. Chrome and Pi complete the nonce/HMAC handshake
 7. The extension action icon turns green once authenticated
 
+If the user later runs `/new` in the same `pi-slack` process, Pi restarts the session while preserving the current pairing and bridge port so Chrome reconnects automatically.
+
 ### Current thread read
 
 1. User asks Pi to read the current Slack thread
@@ -716,14 +720,14 @@ The WebSocket server uses `verifyClient` to require a `chrome-extension://` orig
 Authentication is scoped to a live Pi Slack session.
 
 - Pi generates a fresh session id and session secret at startup
-- Pi exposes those through a pairing code for the current session only
+- Pi exposes those through a pairing code for the current live startup only
 - Chrome stores the pairing in `chrome.storage.session`
 - Chrome proves knowledge of the session secret without sending it as plaintext in the first message
 - Pi can rotate the pairing on demand with `/slack-rotate-pairing`
 - Pi also rotates the pairing automatically after a configurable grace period if Chrome disconnects and does not return
 - Chrome invalidates stale pairing state when the Pi side rejects the current session as rotated or mismatched
 
-This means pairing must be repeated for each new `pi-slack` session and after pairing rotation.
+This means pairing must be repeated for each new `pi-slack` startup and after pairing rotation. Using `/new` inside the same live `pi-slack` instance preserves the current pairing so the user can clear agent context without re-pairing Chrome.
 
 ### Approval gate
 

@@ -45,7 +45,7 @@ Recommended launcher script:
    Open the Pi Slack Chrome extension popup (`chrome-extensions/pi-slack` loaded as an unpacked
    extension), paste the pairing code into the pairing field, and press **Save pairing**.
 
-   Chrome will connect to that specific session and ask you to approve each Slack read request.
+   Chrome will connect to that specific live `pi-slack` startup and ask you to approve each Slack read request.
    Current-thread reads can optionally be temporarily auto-approved from the approval window, but
    those temporary approvals are bound to the observed Slack context (for example the same thread or
    channel) and larger channel reads remain one-time approvals.
@@ -77,7 +77,8 @@ Implemented so far:
 - dedicated local `package.json`
 - dedicated local `tsconfig.json`
 - localhost WebSocket server on a session-specific port (or `PI_SLACK_PORT` override)
-- per-session pairing code generation
+- per-startup pairing code generation
+- `/new` preserves the current Slack pairing so you can clear Pi context without re-pairing Chrome
 - pairing rotation command and automatic post-disconnect pairing rotation grace period
 - nonce/HMAC Chrome handshake support
 - stricter default origin policy (`chrome-extension://` required unless `PI_SLACK_ALLOW_NO_ORIGIN=1`)
