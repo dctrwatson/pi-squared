@@ -16,8 +16,8 @@ Recommended launcher script:
 ```
 
 > **Trust boundary.** The launcher passes any extra arguments verbatim to `pi`. An extra `-e` flag
-> (e.g. `pi-slack -e /tmp/x.ts`) would load an additional extension that could read the shared-secret
-> token file or inspect bridge state. Only use extra `-e` flags with extensions you fully trust.
+> (e.g. `pi-slack -e /tmp/x.ts`) would load an additional extension that could inspect bridge state
+> or reveal the live session pairing code. Only use extra `-e` flags with extensions you fully trust.
 
 ## First-run setup
 
@@ -27,25 +27,25 @@ Recommended launcher script:
    bin/pi-slack
    ```
 
-   On first launch the extension creates a shared-secret token at `~/.config/pi-slack/token` and
-   prints the bridge URL.
+   The extension starts a localhost WebSocket bridge on a session-specific port.
 
-2. **Reveal the token.**
+2. **Reveal the pairing code.**
 
    Inside the Pi session run:
 
    ```
-   /slack-status --show-token
+   /slack-status --show-pairing
    ```
 
-   This displays the full token. Keep the terminal output confidential — anyone with access to it
-   can authenticate to your local bridge.
+   This displays the pairing code for the live `pi-slack` session. Keep the terminal output
+   confidential until that session exits.
 
 3. **Configure Chrome.**
 
    Open the Pi Slack Chrome extension popup (`chrome-extensions/pi-slack` loaded as an unpacked
-   extension), paste the token into the token field, and press **Save**. The icon turns green when
-   the connection is authenticated.
+   extension), paste the pairing code into the pairing field, and press **Save pairing**.
+
+   Chrome will connect to that specific session and ask you to approve each Slack read request.
 
    See `chrome-extensions/pi-slack/README.md` for Chrome loading instructions.
 
@@ -73,9 +73,9 @@ Implemented so far:
 - repo-local extension entrypoint
 - dedicated local `package.json`
 - dedicated local `tsconfig.json`
-- singleton localhost WebSocket server on `ws://127.0.0.1:27183`
-- local shared-secret creation/loading
-- Chrome hello/ack handshake support
+- localhost WebSocket server on a session-specific port (or `PI_SLACK_PORT` override)
+- per-session pairing code generation
+- nonce/HMAC Chrome handshake support
 - Slack-specific non-coding system prompt override
 - active tools restricted to `slack_read_thread` and `slack_read_channel`
 - automatic Slack-aware session naming for easier resume/history browsing
@@ -95,7 +95,7 @@ Not implemented yet:
 ## Useful commands
 
 - `/slack-status` — show bridge status
-- `/slack-status --show-token` — reveal the shared secret for Chrome setup
+- `/slack-status --show-pairing` — reveal the pairing code for Chrome setup (`--show-token` remains a compatibility alias)
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]` — read channel messages from a Slack message link, either as a bounded window (`--next`) or as a paginated span suitable for summarization

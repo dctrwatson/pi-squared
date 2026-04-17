@@ -1,8 +1,6 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import type { AddressInfo } from "node:net";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
@@ -12,30 +10,54 @@ const HOST = "127.0.0.1";
 const DEFAULT_PORT = 27183;
 const PROTOCOL_VERSION = 1;
 const HELLO_TIMEOUT_MS = 5_000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const THREAD_REQUEST_TIMEOUT_MS = 20_000;
-const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000;
-const CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS = 180_000;
+const USER_APPROVAL_TIMEOUT_MS = 60_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000 + USER_APPROVAL_TIMEOUT_MS;
+const THREAD_REQUEST_TIMEOUT_MS = 20_000 + USER_APPROVAL_TIMEOUT_MS;
+const CHANNEL_RANGE_REQUEST_TIMEOUT_MS = 60_000 + USER_APPROVAL_TIMEOUT_MS;
+const CHANNEL_RANGE_ALL_REQUEST_TIMEOUT_MS = 180_000 + USER_APPROVAL_TIMEOUT_MS;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const MAX_UNAUTHENTICATED_SOCKETS = 8; // T08: cap on pre-hello connections
-const DEFAULT_TOKEN_FILE = join(homedir(), ".config", "pi-slack", "token");
+const PAIRING_CODE_PREFIX = "pi-slack-pair:";
 
 type BridgeLifecycle = "stopped" | "starting" | "listening" | "error";
 
-interface HelloMessage {
-	type: "hello";
+interface ClientHelloMessage {
+	type: "client_hello";
 	role: "chrome";
 	version: number;
-	token: string;
+	sessionId: string;
+	clientNonce: string;
 	payload?: {
 		extensionVersion?: string;
 	};
+}
+
+interface ServerChallengeMessage {
+	type: "server_challenge";
+	role: "pi";
+	version: number;
+	sessionId: string;
+	serverNonce: string;
+	payload: {
+		instance: "pi-slack";
+		protocolVersion: number;
+	};
+}
+
+interface ClientProofMessage {
+	type: "client_proof";
+	role: "chrome";
+	version: number;
+	sessionId: string;
+	proof: string;
 }
 
 interface HelloAckMessage {
 	type: "hello_ack";
 	role: "pi";
 	version: number;
+	sessionId: string;
+	proof: string;
 	payload: {
 		instance: "pi-slack";
 		protocolVersion: number;
@@ -71,6 +93,14 @@ interface CancelMessage {
 	id: string;
 }
 
+interface PairingPayload {
+	version: number;
+	host: string;
+	port: number;
+	sessionId: string;
+	secret: string;
+}
+
 interface ActiveChromeConnection {
 	socket: WebSocket;
 	connectedAt: number;
@@ -93,9 +123,9 @@ interface BridgeState {
 	host: string;
 	port: number;
 	wsUrl: string;
-	tokenFile: string;
-	token: string;
-	tokenCreated: boolean;
+	sessionId: string;
+	sessionSecret: string;
+	pairingCode: string;
 	startupError?: string;
 	server?: WebSocketServer;
 	activeChrome?: ActiveChromeConnection;
@@ -152,10 +182,10 @@ const state: BridgeState = {
 	lifecycle: "stopped",
 	host: HOST,
 	port: resolvePort(),
-	wsUrl: `ws://${HOST}:${resolvePort()}`,
-	tokenFile: resolveTokenFile(),
-	token: "",
-	tokenCreated: false,
+	wsUrl: `ws://${HOST}:${DEFAULT_PORT}`,
+	sessionId: randomUUID(),
+	sessionSecret: createSessionSecret(),
+	pairingCode: "",
 	pendingRequests: new Map(),
 	unauthenticatedSockets: 0,
 };
@@ -164,21 +194,14 @@ let startupPromise: Promise<void> | undefined;
 
 function resolvePort(): number {
 	const raw = process.env.PI_SLACK_PORT;
-	if (!raw) return DEFAULT_PORT;
+	if (!raw) return 0;
 	const parsed = Number.parseInt(raw, 10);
 	if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) return DEFAULT_PORT;
 	return parsed;
 }
 
-function resolveTokenFile(): string {
-	const configured = process.env.PI_SLACK_TOKEN_FILE?.trim();
-	return configured ? configured : DEFAULT_TOKEN_FILE;
-}
-
-function maskToken(token: string): string {
-	if (!token) return "(missing)";
-	if (token.length <= 8) return "********";
-	return `${token.slice(0, 4)}…${token.slice(-4)}`;
+function createSessionSecret(): string {
+	return randomBytes(32).toString("hex");
 }
 
 function formatTimestamp(timestamp?: number): string {
@@ -190,13 +213,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-function isHelloMessage(value: unknown): value is HelloMessage {
+function isClientHelloMessage(value: unknown): value is ClientHelloMessage {
 	if (!isRecord(value)) return false;
 	return (
-		value.type === "hello" &&
+		value.type === "client_hello" &&
 		value.role === "chrome" &&
 		typeof value.version === "number" &&
-		typeof value.token === "string"
+		typeof value.sessionId === "string" &&
+		typeof value.clientNonce === "string"
+	);
+}
+
+function isClientProofMessage(value: unknown): value is ClientProofMessage {
+	if (!isRecord(value)) return false;
+	return (
+		value.type === "client_proof" &&
+		value.role === "chrome" &&
+		typeof value.version === "number" &&
+		typeof value.sessionId === "string" &&
+		typeof value.proof === "string"
 	);
 }
 
@@ -274,29 +309,62 @@ function rawDataToString(data: RawData): string {
 	return Buffer.from(data).toString("utf8");
 }
 
+function createNonce(byteLength = 16): string {
+	return randomBytes(byteLength).toString("hex");
+}
+
+function createPairingPayload(): PairingPayload {
+	return {
+		version: PROTOCOL_VERSION,
+		host: state.host,
+		port: state.port,
+		sessionId: state.sessionId,
+		secret: state.sessionSecret,
+	};
+}
+
+function encodePairingCode(payload: PairingPayload): string {
+	return `${PAIRING_CODE_PREFIX}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function computeHandshakeProof(sessionId: string, clientNonce: string, serverNonce: string, role: "chrome" | "pi"): string {
+	const input = [String(PROTOCOL_VERSION), sessionId, clientNonce, serverNonce, role].join("\n");
+	return createHmac("sha256", state.sessionSecret).update(input).digest("hex");
+}
+
+function proofsEqual(a: string, b: string): boolean {
+	const ab = Buffer.from(a, "utf8");
+	const bb = Buffer.from(b, "utf8");
+	if (ab.length !== bb.length) return false;
+	return timingSafeEqual(ab, bb);
+}
+
 function connectionSummary(): string {
 	if (!state.activeChrome) return "disconnected";
 	const version = state.activeChrome.extensionVersion ? ` (ext ${state.activeChrome.extensionVersion})` : "";
 	return `connected${version}`;
 }
 
-function formatStatus(showToken: boolean): string {
+function formatStatus(showPairing: boolean): string {
 	const lines: string[] = [];
-	if (showToken) {
-		// T04: Warn before revealing the shared secret.
+	if (showPairing) {
 		lines.push(
-			"WARNING: the shared secret is about to be displayed. Anyone with access to this terminal or its scrollback can read it.",
+			"WARNING: the pairing code grants read access to this Pi Slack session until the session exits. Keep it confidential.",
 			"",
 		);
 	}
 	lines.push(
 		`Pi Slack bridge: ${state.lifecycle}`,
 		`Endpoint: ${state.wsUrl}`,
-		`Token file: ${state.tokenFile}`,
-		`Token: ${showToken ? state.token : maskToken(state.token)}`,
+		`Session: ${state.sessionId}`,
 		`Chrome: ${connectionSummary()}`,
+		`Approval gate: Chrome must explicitly allow each Slack read`,
 		`Mode: read-only Slack assistant`,
 	);
+
+	if (showPairing && state.pairingCode) {
+		lines.push("", "Pairing code:", state.pairingCode);
+	}
 
 	if (state.activeChrome) {
 		lines.push(`Chrome connected at: ${formatTimestamp(state.activeChrome.connectedAt)}`);
@@ -305,7 +373,7 @@ function formatStatus(showToken: boolean): string {
 			lines.push(`Chrome remote address: ${state.activeChrome.remoteAddress}`);
 		}
 		if (state.activeChrome.extensionVersion) {
-			lines.push(`Chrome extension: ${state.activeChrome.extensionVersion}`); // T27
+			lines.push(`Chrome extension: ${state.activeChrome.extensionVersion}`);
 		}
 	}
 
@@ -771,49 +839,6 @@ function parseSlackReadChannelArgs(args: string): {
 	return { startUrl, endUrl, limit, maxMessages, includeThreads };
 }
 
-function createToken(): string {
-	return randomBytes(32).toString("hex"); // T09: 256-bit token
-}
-
-async function ensureSharedSecret(tokenFile: string): Promise<{ token: string; created: boolean }> {
-	const dir = dirname(tokenFile);
-	await mkdir(dir, { recursive: true, mode: 0o700 });
-	// T03: Tighten the directory permissions if we own it (best effort for pre-existing dirs).
-	if (dir.startsWith(homedir())) {
-		try { await chmod(dir, 0o700); } catch { /* ignore */ }
-	}
-
-	try {
-		const existing = (await readFile(tokenFile, "utf8")).trim();
-		if (existing) return { token: existing, created: false };
-	} catch (error) {
-		if (!isErrnoException(error) || error.code !== "ENOENT") {
-			throw error;
-		}
-	}
-
-	const token = createToken();
-
-	try {
-		await writeFile(tokenFile, `${token}\n`, {
-			encoding: "utf8",
-			mode: 0o600,
-			flag: "wx",
-		});
-		return { token, created: true };
-	} catch (error) {
-		if (isErrnoException(error) && error.code === "EEXIST") {
-			const existing = (await readFile(tokenFile, "utf8")).trim();
-			if (existing) return { token: existing, created: false };
-		}
-		throw error;
-	}
-}
-
-function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string"; // T11
-}
-
 // T12: Structured bridge error that preserves the Chrome-side error code.
 class BridgeError extends Error {
 	constructor(readonly code: string, message: string) {
@@ -822,15 +847,7 @@ class BridgeError extends Error {
 	}
 }
 
-// T02: Constant-time token comparison to mitigate timing side-channels.
-function tokensEqual(a: string, b: string): boolean {
-	const ab = Buffer.from(a, "utf8");
-	const bb = Buffer.from(b, "utf8");
-	if (ab.length !== bb.length) return false;
-	return timingSafeEqual(ab, bb);
-}
-
-function serialize(message: HelloAckMessage | RequestMessage | CancelMessage): string {
+function serialize(message: ServerChallengeMessage | HelloAckMessage | RequestMessage | CancelMessage): string {
 	return JSON.stringify(message);
 }
 
@@ -955,70 +972,13 @@ function handleAuthenticatedMessage(socket: WebSocket, raw: RawData): void {
 	}
 }
 
-function handleHello(socket: WebSocket, raw: RawData, remoteAddress?: string): void {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(rawDataToString(raw));
-	} catch {
-		closeSocket(socket, 1008, "Invalid hello JSON");
-		return;
-	}
-
-	if (!isHelloMessage(parsed)) {
-		closeSocket(socket, 1008, "Expected hello message");
-		return;
-	}
-
-	if (parsed.version !== PROTOCOL_VERSION) {
-		closeSocket(socket, 1008, "Protocol version mismatch");
-		return;
-	}
-
-	if (!tokensEqual(parsed.token, state.token)) {
-		closeSocket(socket, 1008, "Invalid token");
-		return;
-	}
-
-	// T15: Token and protocol-version checks already ran above; replacement only
-	// happens for a fully-authenticated hello from a different socket.
-	if (state.activeChrome && state.activeChrome.socket !== socket) {
-		const previousSocket = state.activeChrome.socket;
-		closeSocket(previousSocket, 1000, "Replaced by newer Chrome connection");
-		clearActiveChrome(previousSocket);
-	}
-
-	state.activeChrome = {
-		socket,
-		connectedAt: Date.now(),
-		authenticatedAt: Date.now(),
-		lastSeenAt: Date.now(),
-		extensionVersion:
-			isRecord(parsed.payload) && typeof parsed.payload.extensionVersion === "string"
-				? parsed.payload.extensionVersion
-				: undefined,
-		remoteAddress,
-	};
-
-	const ack: HelloAckMessage = {
-		type: "hello_ack",
-		role: "pi",
-		version: PROTOCOL_VERSION,
-		payload: {
-			instance: "pi-slack",
-			protocolVersion: PROTOCOL_VERSION,
-		},
-	};
-
-	socket.send(serialize(ack));
-}
-
 async function startBridge(): Promise<void> {
 	state.lifecycle = "starting";
 	state.startupError = undefined;
-
-	const tokenResult = await ensureSharedSecret(state.tokenFile);
-	state.token = tokenResult.token;
-	state.tokenCreated = tokenResult.created;
+	state.port = resolvePort();
+	state.sessionId = randomUUID();
+	state.sessionSecret = createSessionSecret();
+	state.pairingCode = "";
 
 	const server = new WebSocketServer({
 		host: state.host,
@@ -1045,13 +1005,32 @@ async function startBridge(): Promise<void> {
 		server.once("error", onError);
 	});
 
+	const address = server.address();
+	if (address && typeof address === "object") {
+		state.port = (address as AddressInfo).port;
+	}
 	state.server = server;
 	state.lifecycle = "listening";
 	state.wsUrl = `ws://${state.host}:${state.port}`;
+	state.pairingCode = encodePairingCode(createPairingPayload());
 
 	server.on("connection", (socket, request) => {
 		const remoteAddress = request.socket.remoteAddress;
 		let authenticated = false;
+		let decrementedUnauthenticated = false;
+		let clientNonce: string | undefined;
+		let serverNonce: string | undefined;
+		let extensionVersion: string | undefined;
+
+		const markAuthenticated = () => {
+			if (decrementedUnauthenticated) return;
+			decrementedUnauthenticated = true;
+			state.unauthenticatedSockets -= 1;
+		};
+
+		const failHandshake = (reason: string) => {
+			closeSocket(socket, 1008, reason);
+		};
 
 		// T08: Cap concurrent unauthenticated sockets.
 		state.unauthenticatedSockets += 1;
@@ -1068,28 +1047,117 @@ async function startBridge(): Promise<void> {
 		}, HELLO_TIMEOUT_MS);
 
 		socket.on("message", (raw) => {
-			if (!authenticated) {
-				handleHello(socket, raw, remoteAddress);
-				authenticated = state.activeChrome?.socket === socket;
-				if (authenticated) {
-					clearTimeout(helloTimer);
-					state.unauthenticatedSockets -= 1; // T08: authenticated
-				}
+			if (authenticated) {
+				handleAuthenticatedMessage(socket, raw);
 				return;
 			}
-			handleAuthenticatedMessage(socket, raw);
+
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(rawDataToString(raw));
+			} catch {
+				failHandshake("Invalid hello JSON");
+				return;
+			}
+
+			if (!clientNonce || !serverNonce) {
+				if (!isClientHelloMessage(parsed)) {
+					failHandshake("Expected client_hello");
+					return;
+				}
+				if (parsed.version !== PROTOCOL_VERSION) {
+					failHandshake("Protocol version mismatch");
+					return;
+				}
+				if (parsed.sessionId !== state.sessionId) {
+					failHandshake("Session mismatch");
+					return;
+				}
+
+				clientNonce = parsed.clientNonce;
+				serverNonce = createNonce();
+				extensionVersion =
+					isRecord(parsed.payload) && typeof parsed.payload.extensionVersion === "string"
+						? parsed.payload.extensionVersion
+						: undefined;
+
+				const challenge: ServerChallengeMessage = {
+					type: "server_challenge",
+					role: "pi",
+					version: PROTOCOL_VERSION,
+					sessionId: state.sessionId,
+					serverNonce,
+					payload: {
+						instance: "pi-slack",
+						protocolVersion: PROTOCOL_VERSION,
+					},
+				};
+				socket.send(serialize(challenge));
+				return;
+			}
+
+			if (!isClientProofMessage(parsed)) {
+				failHandshake("Expected client_proof");
+				return;
+			}
+			if (parsed.version !== PROTOCOL_VERSION || parsed.sessionId !== state.sessionId) {
+				failHandshake("Handshake mismatch");
+				return;
+			}
+
+			const expectedProof = computeHandshakeProof(state.sessionId, clientNonce, serverNonce, "chrome");
+			if (!proofsEqual(parsed.proof, expectedProof)) {
+				failHandshake("Invalid proof");
+				return;
+			}
+
+			if (state.activeChrome && state.activeChrome.socket !== socket) {
+				const previousSocket = state.activeChrome.socket;
+				closeSocket(previousSocket, 1000, "Replaced by newer Chrome connection");
+				clearActiveChrome(previousSocket);
+			}
+
+			state.activeChrome = {
+				socket,
+				connectedAt: Date.now(),
+				authenticatedAt: Date.now(),
+				lastSeenAt: Date.now(),
+				extensionVersion,
+				remoteAddress,
+			};
+
+			const ack: HelloAckMessage = {
+				type: "hello_ack",
+				role: "pi",
+				version: PROTOCOL_VERSION,
+				sessionId: state.sessionId,
+				proof: computeHandshakeProof(state.sessionId, clientNonce, serverNonce, "pi"),
+				payload: {
+					instance: "pi-slack",
+					protocolVersion: PROTOCOL_VERSION,
+				},
+			};
+
+			markAuthenticated();
+			authenticated = true;
+			clearTimeout(helloTimer);
+			socket.send(serialize(ack));
 		});
 
 		socket.on("close", () => {
 			clearTimeout(helloTimer);
-			if (!authenticated) {
-				state.unauthenticatedSockets -= 1; // T08: closed before auth
+			if (!authenticated && !decrementedUnauthenticated) {
+				state.unauthenticatedSockets -= 1;
 			}
 			clearActiveChrome(socket);
 		});
 
 		socket.on("error", () => {
 			clearTimeout(helloTimer);
+			if (!authenticated && !decrementedUnauthenticated) {
+				state.unauthenticatedSockets -= 1;
+				decrementedUnauthenticated = true;
+			}
 			clearActiveChrome(socket);
 		});
 	});
@@ -1097,7 +1165,7 @@ async function startBridge(): Promise<void> {
 	server.on("error", (error) => {
 		state.lifecycle = "error";
 		state.startupError = error.message;
-		rejectAllPending("Pi Slack bridge errored."); // T14
+		rejectAllPending("Pi Slack bridge errored.");
 		try { server.close(); } catch { /* ignore */ }
 		if (state.server === server) state.server = undefined;
 	});
@@ -1114,6 +1182,7 @@ async function stopBridge(): Promise<void> {
 	const server = state.server;
 	state.server = undefined;
 	state.lifecycle = "stopped";
+	state.pairingCode = "";
 	startupPromise = undefined;
 
 	if (!server) return;
@@ -1231,10 +1300,10 @@ export default function piSlack(pi: ExtensionAPI) {
 
 		if (!ctx.hasUI) return;
 
-		const tokenNote = state.tokenCreated
-			? ` New shared secret created at ${state.tokenFile}. Run /slack-status --show-token to reveal it for Chrome setup.`
-			: "";
-		ctx.ui.notify(`Pi Slack bridge listening on ${state.wsUrl}.${tokenNote}`, "info");
+		ctx.ui.notify(
+			`Pi Slack bridge listening on ${state.wsUrl}. Run /slack-status --show-pairing to pair Chrome for this session. Chrome will prompt before each Slack read.`,
+			"info",
+		);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1459,17 +1528,15 @@ export default function piSlack(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("slack-status", {
-		description: "Show Pi Slack bridge status (use --show-token to reveal the shared secret)",
+		description: "Show Pi Slack bridge status (use --show-pairing to reveal the one-session pairing code)",
 		handler: async (args, ctx) => {
-			// T25: Status is passive — does not start the bridge or create the token file.
-			const showToken = args.includes("--show-token");
-			const message = formatStatus(showToken);
+			const showPairing = args.includes("--show-pairing") || args.includes("--show-token");
+			const message = formatStatus(showPairing);
 			if (ctx.hasUI) {
 				ctx.ui.notify(message, "info");
 			} else {
-				if (showToken) {
-					// T04: Also emit to stderr so callers that capture stdout still get the warning.
-					console.error("WARNING: shared secret displayed — keep this output confidential.");
+				if (showPairing) {
+					console.error("WARNING: pairing code displayed — keep this output confidential until the Pi Slack session exits.");
 				}
 				writeStatus(message);
 			}
@@ -1492,7 +1559,7 @@ export default function piSlack(pi: ExtensionAPI) {
 			}
 
 			if (!state.activeChrome) {
-				const message = "Chrome extension is not connected yet. Load the Pi Slack Chrome extension, configure the shared secret, and try again.";
+				const message = "Chrome extension is not connected yet. Load the Pi Slack Chrome extension, paste the current pairing code, and try again.";
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "warning");
 				} else {

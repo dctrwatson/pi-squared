@@ -1,31 +1,35 @@
-const PI_SLACK_PORT = 27183;
-const PI_SLACK_WS_URL = `ws://127.0.0.1:${PI_SLACK_PORT}`;
-const TOKEN_KEY = "piSlackToken";
+const PAIRING_KEY = "piSlackPairing";
+const PAIRING_CODE_PREFIX = "pi-slack-pair:";
 const PROTOCOL_VERSION = 1;
-const RECONNECT_DELAY_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 20_000;
+const APPROVAL_TIMEOUT_MS = 60_000;
 const CHANNEL_RANGE_PAGE_SIZE = 16;
 const CHANNEL_SUMMARY_THREAD_LIMIT = 50;
 const CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT = 100;
 const CHANNEL_SUMMARY_THREAD_REPLY_LIMIT = 2_000;
 const ICON_SIZES = [16, 32, 48, 128];
-const HEARTBEAT_ALARM = "pi-slack-heartbeat"; // T22
-const RECONNECT_ALARM = "pi-slack-reconnect"; // T22
+const HEARTBEAT_ALARM = "pi-slack-heartbeat";
+const RECONNECT_ALARM = "pi-slack-reconnect";
+const APPROVAL_WINDOW_PATH = "approve.html";
 
 const state = {
   socket: null,
   socketState: "idle",
   connected: false,
   authenticated: false,
-  reconnectAttempt: 0, // T23
-  temporaryTabIds: new Set(), // T26
+  reconnectAttempt: 0,
+  temporaryTabIds: new Set(),
   lastError: "",
   lastHelloSentAt: 0,
   lastHelloAckAt: 0,
   lastHeartbeatSentAt: 0,
   lastPingAt: 0,
   lastPongAt: 0,
-  pendingAbortControllers: new Map(), // T16
+  pairing: null,
+  handshake: null,
+  approvalWindowId: null,
+  pendingApprovals: new Map(),
+  pendingAbortControllers: new Map(),
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -39,16 +43,84 @@ chrome.runtime.onStartup.addListener(() => {
   void ensureConnected();
 });
 
-async function getToken() {
-  const result = await chrome.storage.local.get(TOKEN_KEY);
-  return typeof result[TOKEN_KEY] === "string" ? result[TOKEN_KEY] : "";
+function wsUrlFromPairing(pairing) {
+  if (!pairing) return "";
+  return `ws://${pairing.host}:${pairing.port}`;
+}
+
+function decodeBase64Url(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  return atob(normalized + padding);
+}
+
+function parsePairingCode(input) {
+  const trimmed = String(input ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Pairing code is empty.");
+  }
+
+  const raw = trimmed.startsWith(PAIRING_CODE_PREFIX) ? trimmed.slice(PAIRING_CODE_PREFIX.length) : trimmed;
+  let parsed;
+  try {
+    parsed = JSON.parse(decodeBase64Url(raw));
+  } catch {
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error("Pairing code is not valid Pi Slack pairing data.");
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Pairing code is invalid.");
+  }
+
+  const host = typeof parsed.host === "string" ? parsed.host.trim() : "";
+  const port = Number.isInteger(parsed.port) ? parsed.port : Number.parseInt(String(parsed.port ?? ""), 10);
+  const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : "";
+  const secret = typeof parsed.secret === "string" ? parsed.secret.trim() : "";
+  const version = Number.isInteger(parsed.version) ? parsed.version : Number.parseInt(String(parsed.version ?? ""), 10);
+
+  if (version !== PROTOCOL_VERSION || host !== "127.0.0.1" || !Number.isInteger(port) || port < 1 || port > 65535 || !sessionId || !secret) {
+    throw new Error("Pairing code is missing required Pi Slack session fields.");
+  }
+
+  return { version, host, port, sessionId, secret };
+}
+
+async function getPairing() {
+  const result = await chrome.storage.session.get(PAIRING_KEY);
+  const value = result[PAIRING_KEY];
+  return value && typeof value === "object" ? value : null;
+}
+
+async function setPairing(pairing) {
+  await chrome.storage.session.set({ [PAIRING_KEY]: pairing });
+  state.pairing = pairing;
+}
+
+async function clearPairing() {
+  await chrome.storage.session.remove(PAIRING_KEY);
+  state.pairing = null;
 }
 
 function getAppearanceState() {
+  if (state.pendingApprovals.size > 0) {
+    return {
+      color: "#f59e0b",
+      title: `Pi Slack: ${state.pendingApprovals.size} approval${state.pendingApprovals.size === 1 ? "" : "s"} pending`,
+      badgeText: String(Math.min(9, state.pendingApprovals.size)),
+      badgeColor: "#f59e0b",
+    };
+  }
+
   if (state.authenticated && state.connected) {
     return {
       color: "#22c55e",
       title: "Pi Slack: connected",
+      badgeText: "",
+      badgeColor: "#22c55e",
     };
   }
 
@@ -56,6 +128,8 @@ function getAppearanceState() {
     return {
       color: "#6b7280",
       title: "Pi Slack: connecting",
+      badgeText: "",
+      badgeColor: "#6b7280",
     };
   }
 
@@ -63,12 +137,25 @@ function getAppearanceState() {
     return {
       color: "#ef4444",
       title: `Pi Slack: ${state.lastError}`,
+      badgeText: "",
+      badgeColor: "#ef4444",
+    };
+  }
+
+  if (state.pairing) {
+    return {
+      color: "#6b7280",
+      title: "Pi Slack: paired, waiting for session",
+      badgeText: "",
+      badgeColor: "#6b7280",
     };
   }
 
   return {
     color: "#6b7280",
     title: "Pi Slack: idle",
+    badgeText: "",
+    badgeColor: "#6b7280",
   };
 }
 
@@ -126,7 +213,8 @@ async function updateActionAppearance() {
 
   try {
     await chrome.action.setTitle({ title: appearance.title });
-    await chrome.action.setBadgeText({ text: "" });
+    await chrome.action.setBadgeText({ text: appearance.badgeText ?? "" });
+    await chrome.action.setBadgeBackgroundColor({ color: appearance.badgeColor ?? appearance.color });
 
     const imageData = {};
     let hasImageData = false;
@@ -159,6 +247,7 @@ function resetSocketState() {
   state.socketState = "idle";
   state.connected = false;
   state.authenticated = false;
+  state.handshake = null;
   void updateActionAppearance();
 }
 
@@ -175,11 +264,9 @@ function closeSocket() {
 async function scheduleReconnect() {
   clearReconnectTimer();
 
-  const token = await getToken();
-  if (!token) return;
+  const pairing = state.pairing ?? await getPairing();
+  if (!pairing) return;
 
-  // T22: Use chrome.alarms so reconnects survive service worker eviction.
-  // T23: Exponential backoff with jitter (cap 30 s).
   const delay = Math.min(30_000, 1_000 * 2 ** state.reconnectAttempt) + Math.floor(Math.random() * 500);
   chrome.alarms.create(RECONNECT_ALARM, { delayInMinutes: delay / 60_000 });
 }
@@ -223,6 +310,175 @@ function serializeTab(tab) {
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function utf8Bytes(value) {
+  return new TextEncoder().encode(value);
+}
+
+function toHex(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function computeHandshakeProof(secret, sessionId, clientNonce, serverNonce, role) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    utf8Bytes(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const payload = [String(PROTOCOL_VERSION), sessionId, clientNonce, serverNonce, role].join("\n");
+  const signature = await crypto.subtle.sign("HMAC", key, utf8Bytes(payload));
+  return toHex(new Uint8Array(signature));
+}
+
+function createNonce() {
+  return toHex(crypto.getRandomValues(new Uint8Array(16)));
+}
+
+function approvalSummaryForRequest(message) {
+  if (message.action === "getCurrentThread") {
+    return {
+      title: "Read current Slack thread",
+      lines: [
+        "Reads the currently open Slack thread from the active Slack tab.",
+        "Includes any unsent draft text in the thread composer.",
+      ],
+    };
+  }
+
+  if (message.action === "getChannelRange") {
+    const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "(missing)";
+    const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : "";
+    const limit = Number.isInteger(message.payload?.limit) ? message.payload.limit : null;
+    return {
+      title: "Read Slack channel range",
+      lines: [
+        `Start URL: ${startUrl}`,
+        ...(endUrl ? [`End URL: ${endUrl}`] : []),
+        ...(limit ? [`Requested next messages: ${limit}`] : []),
+        "Chrome may temporarily focus a Slack tab to harvest the range.",
+      ],
+    };
+  }
+
+  if (message.action === "getChannelRangeAll") {
+    const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "(missing)";
+    const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : "";
+    const maxMessages = Number.isInteger(message.payload?.maxMessages) ? message.payload.maxMessages : 500;
+    const includeThreads = message.payload?.includeThreads !== false;
+    return {
+      title: "Read Slack channel summary span",
+      lines: [
+        `Start URL: ${startUrl}`,
+        ...(endUrl ? [`End URL: ${endUrl}`] : []),
+        `Max messages: ${maxMessages}`,
+        `Expand threads: ${includeThreads ? "yes" : "no"}`,
+        "Chrome may temporarily focus Slack tabs and collect a larger message span.",
+      ],
+    };
+  }
+
+  return {
+    title: `Allow Pi Slack request: ${String(message.action)}`,
+    lines: ["The connected Pi Slack session is asking Chrome to process a request."],
+  };
+}
+
+function getPendingApprovalsForUi() {
+  return [...state.pendingApprovals.values()]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((approval) => ({
+      id: approval.id,
+      action: approval.action,
+      title: approval.title,
+      lines: approval.lines,
+      createdAt: approval.createdAt,
+      expiresAt: approval.expiresAt,
+    }));
+}
+
+async function openApprovalWindow() {
+  const url = chrome.runtime.getURL(APPROVAL_WINDOW_PATH);
+  if (typeof state.approvalWindowId === "number") {
+    try {
+      await chrome.windows.update(state.approvalWindowId, { focused: true });
+      return;
+    } catch {
+      state.approvalWindowId = null;
+    }
+  }
+
+  const created = await chrome.windows.create({
+    url,
+    type: "popup",
+    width: 460,
+    height: 560,
+    focused: true,
+  });
+  state.approvalWindowId = typeof created.id === "number" ? created.id : null;
+}
+
+async function requestUserApproval(message) {
+  const summary = approvalSummaryForRequest(message);
+  const approval = {
+    id: message.id,
+    action: message.action,
+    title: summary.title,
+    lines: summary.lines,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
+    timeout: null,
+    resolve: null,
+    reject: null,
+  };
+
+  return await new Promise((resolve, reject) => {
+    approval.resolve = resolve;
+    approval.reject = reject;
+    approval.timeout = setTimeout(() => {
+      state.pendingApprovals.delete(approval.id);
+      if (state.pendingApprovals.size === 0) {
+        void updateActionAppearance();
+      }
+      reject(new BridgeActionError("approval_timeout", "Slack read approval timed out in Chrome."));
+      void updateActionAppearance();
+    }, APPROVAL_TIMEOUT_MS);
+
+    state.pendingApprovals.set(approval.id, approval);
+    void updateActionAppearance();
+    void openApprovalWindow();
+  });
+}
+
+function resolveApproval(id, allow) {
+  const approval = state.pendingApprovals.get(id);
+  if (!approval) return false;
+  clearTimeout(approval.timeout);
+  state.pendingApprovals.delete(id);
+  if (allow) {
+    approval.resolve();
+  } else {
+    approval.reject(new BridgeActionError("user_denied", "User denied this Slack read request in Chrome."));
+  }
+  void updateActionAppearance();
+  return true;
+}
+
+function rejectAllApprovals(reason) {
+  for (const approval of state.pendingApprovals.values()) {
+    clearTimeout(approval.timeout);
+    approval.reject(new BridgeActionError("approval_cancelled", reason));
+  }
+  state.pendingApprovals.clear();
+  void updateActionAppearance();
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  if (state.approvalWindowId === windowId) {
+    state.approvalWindowId = null;
+  }
+});
 
 function isSlackUrl(url) {
   // T06: URL-parser allowlist instead of loose regex.
@@ -968,6 +1224,7 @@ async function handleRequestMessage(socket, message) {
     }
 
     if (message.action === "getCurrentThread") {
+      await requestUserApproval(message);
       const result = await sendMessageToActiveSlackTab({ type: "pi-slack:get-current-thread" });
       if (!result.response.ok) {
         sendSocketResponse(socket, message.id, {
@@ -1001,6 +1258,7 @@ async function handleRequestMessage(socket, message) {
         throw new BridgeActionError("invalid_request", "getChannelRange requires startUrl.");
       }
 
+      await requestUserApproval(message);
       const payload = await getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cursor);
       sendSocketResponse(socket, message.id, {
         ok: true,
@@ -1019,7 +1277,8 @@ async function handleRequestMessage(socket, message) {
         throw new BridgeActionError("invalid_request", "getChannelRangeAll requires startUrl.");
       }
 
-      const controller = new AbortController(); // T16
+      await requestUserApproval(message);
+      const controller = new AbortController();
       state.pendingAbortControllers.set(message.id, controller);
       try {
         const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads, controller.signal);
@@ -1028,7 +1287,7 @@ async function handleRequestMessage(socket, message) {
           payload,
         });
       } finally {
-        state.pendingAbortControllers.delete(message.id); // T16
+        state.pendingAbortControllers.delete(message.id);
       }
       return;
     }
@@ -1049,7 +1308,7 @@ async function handleRequestMessage(socket, message) {
   }
 }
 
-function handleSocketMessage(socket, event) {
+async function handleSocketMessage(socket, event) {
   let parsed;
   try {
     parsed = JSON.parse(typeof event.data === "string" ? event.data : String(event.data));
@@ -1060,36 +1319,94 @@ function handleSocketMessage(socket, event) {
 
   if (!parsed || typeof parsed !== "object") return;
 
+  if (parsed.type === "server_challenge") {
+    const pairing = state.pairing ?? await getPairing();
+    if (!pairing || !state.handshake) {
+      closeSocket(socket, 1008, "Unexpected server challenge");
+      return;
+    }
+    if (parsed.version !== PROTOCOL_VERSION || parsed.sessionId !== pairing.sessionId || typeof parsed.serverNonce !== "string") {
+      closeSocket(socket, 1008, "Invalid server challenge");
+      return;
+    }
+
+    state.handshake.serverNonce = parsed.serverNonce;
+    const proof = await computeHandshakeProof(
+      pairing.secret,
+      pairing.sessionId,
+      state.handshake.clientNonce,
+      parsed.serverNonce,
+      "chrome",
+    );
+    sendJson(socket, {
+      type: "client_proof",
+      role: "chrome",
+      version: PROTOCOL_VERSION,
+      sessionId: pairing.sessionId,
+      proof,
+    });
+    return;
+  }
+
   if (parsed.type === "hello_ack") {
+    const pairing = state.pairing ?? await getPairing();
+    const serverNonce = state.handshake?.serverNonce;
+    if (!pairing || !state.handshake || !serverNonce || parsed.version !== PROTOCOL_VERSION || parsed.sessionId !== pairing.sessionId || typeof parsed.proof !== "string") {
+      closeSocket(socket, 1008, "Invalid hello acknowledgement");
+      return;
+    }
+
+    const expectedProof = await computeHandshakeProof(
+      pairing.secret,
+      pairing.sessionId,
+      state.handshake.clientNonce,
+      serverNonce,
+      "pi",
+    );
+    if (parsed.proof !== expectedProof) {
+      closeSocket(socket, 1008, "Invalid server proof");
+      return;
+    }
+
     state.connected = true;
     state.authenticated = true;
     state.socketState = "authenticated";
     state.lastHelloAckAt = Date.now();
     state.lastError = "";
-    state.reconnectAttempt = 0; // T23: reset backoff on successful connection
-    startHeartbeat(); // T22: alarm-based
+    state.reconnectAttempt = 0;
+    state.handshake = null;
+    startHeartbeat();
     void updateActionAppearance();
     return;
   }
 
   if (parsed.type === "cancel" && typeof parsed.id === "string") {
-    // T16: Abort the corresponding pending request.
+    const approval = state.pendingApprovals.get(parsed.id);
+    if (approval) {
+      clearTimeout(approval.timeout);
+      state.pendingApprovals.delete(parsed.id);
+      approval.reject(new BridgeActionError("approval_cancelled", "Pi Slack cancelled the pending Chrome approval request."));
+      void updateActionAppearance();
+      return;
+    }
+
     const controller = state.pendingAbortControllers.get(parsed.id);
     if (controller) controller.abort();
     return;
   }
 
   if (parsed.type === "request" && typeof parsed.id === "string") {
-    handleRequestMessage(socket, parsed);
+    void handleRequestMessage(socket, parsed);
   }
 }
 
 async function ensureConnected() {
-  const token = (await getToken()).trim();
-  if (!token) {
+  const pairing = state.pairing ?? await getPairing();
+  state.pairing = pairing;
+  if (!pairing) {
     clearReconnectTimer();
     closeSocket();
-    state.lastError = "No shared secret configured.";
+    state.lastError = "No pairing configured for the current Pi Slack session.";
     void updateActionAppearance();
     return false;
   }
@@ -1119,7 +1436,7 @@ async function ensureConnected() {
 
   let socket;
   try {
-    socket = new WebSocket(PI_SLACK_WS_URL);
+    socket = new WebSocket(wsUrlFromPairing(pairing));
   } catch (error) {
     state.socketState = "error";
     state.lastError = error instanceof Error ? error.message : String(error);
@@ -1132,14 +1449,17 @@ async function ensureConnected() {
   state.socket = socket;
 
   socket.addEventListener("open", () => {
+    const clientNonce = createNonce();
+    state.handshake = { clientNonce, serverNonce: null };
     state.socketState = "open";
     state.lastHelloSentAt = Date.now();
     void updateActionAppearance();
     sendJson(socket, {
-      type: "hello",
+      type: "client_hello",
       role: "chrome",
       version: PROTOCOL_VERSION,
-      token,
+      sessionId: pairing.sessionId,
+      clientNonce,
       payload: {
         extensionVersion: chrome.runtime.getManifest().version,
       },
@@ -1147,7 +1467,7 @@ async function ensureConnected() {
   });
 
   socket.addEventListener("message", (event) => {
-    handleSocketMessage(socket, event);
+    void handleSocketMessage(socket, event);
   });
 
   socket.addEventListener("error", () => {
@@ -1157,12 +1477,12 @@ async function ensureConnected() {
 
   socket.addEventListener("close", (event) => {
     if (state.socket === socket) {
-      // T26: Clean up any open temporary Slack tabs on disconnect.
       for (const tabId of state.temporaryTabIds) {
         chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
       }
       state.temporaryTabIds.clear();
-      state.reconnectAttempt += 1; // T23: increment backoff counter
+      rejectAllApprovals("Pi Slack disconnected while Chrome approval was pending.");
+      state.reconnectAttempt += 1;
       if (event.reason) {
         state.lastError = `Socket closed: ${event.reason}`;
       } else if (event.code) {
@@ -1179,15 +1499,17 @@ async function ensureConnected() {
 
 async function getStatus() {
   await ensureConnected();
-  const token = await getToken();
+  const pairing = state.pairing ?? await getPairing();
   const tabs = await getSlackTabs();
 
   return {
     connected: state.connected,
     authenticated: state.authenticated,
     socketState: state.socketState,
-    wsUrl: PI_SLACK_WS_URL,
-    hasToken: token.length > 0,
+    wsUrl: pairing ? wsUrlFromPairing(pairing) : "",
+    hasPairing: Boolean(pairing),
+    pairSessionId: pairing?.sessionId ?? "",
+    pendingApprovalCount: state.pendingApprovals.size,
     slackTabCount: tabs.count,
     activeTab: tabs.activeTab,
     selectionRule: tabs.selectionRule,
@@ -1197,11 +1519,10 @@ async function getStatus() {
     lastPingAt: state.lastPingAt,
     lastPongAt: state.lastPongAt,
     lastError: state.lastError,
-    extensionVersion: chrome.runtime.getManifest().version, // T27
+    extensionVersion: chrome.runtime.getManifest().version,
   };
 }
 
-// T22: Alarm handler for heartbeat and reconnect — runs even after service worker eviction.
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM) {
     if (!state.authenticated || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
@@ -1225,7 +1546,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !(TOKEN_KEY in changes)) return;
+  if (areaName !== "session" || !(PAIRING_KEY in changes)) return;
+  state.pairing = changes[PAIRING_KEY]?.newValue ?? null;
   void updateActionAppearance();
   void ensureConnected();
 });
@@ -1238,29 +1560,58 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "pi-slack:set-token") {
-    const token = typeof message.token === "string" ? message.token.trim() : "";
-    chrome.storage.local.set({ [TOKEN_KEY]: token }).then(async () => {
-      await ensureConnected();
-      sendResponse({ ok: true });
+  if (message.type === "pi-slack:set-pairing") {
+    Promise.resolve()
+      .then(async () => {
+        const pairing = parsePairingCode(message.pairingCode);
+        await setPairing(pairing);
+        clearReconnectTimer();
+        closeSocket();
+        await ensureConnected();
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message.type === "pi-slack:reset-pairing") {
+    Promise.resolve()
+      .then(async () => {
+        clearReconnectTimer();
+        closeSocket();
+        rejectAllApprovals("Pairing reset in Chrome.");
+        for (const tabId of state.temporaryTabIds) {
+          chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
+        }
+        state.temporaryTabIds.clear();
+        await clearPairing();
+        state.lastError = "No pairing configured for the current Pi Slack session.";
+        void updateActionAppearance();
+        sendResponse({ ok: true });
+      })
+      .catch((error) => {
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message.type === "pi-slack:get-approval-state") {
+    sendResponse({ pending: getPendingApprovalsForUi() });
+    return undefined;
+  }
+
+  if (message.type === "pi-slack:open-approval-window") {
+    openApprovalWindow().then(() => sendResponse({ ok: true })).catch((error) => {
+      sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
     });
     return true;
   }
 
-  if (message.type === "pi-slack:reset-token") {
-    chrome.storage.local.remove(TOKEN_KEY).then(() => {
-      clearReconnectTimer();
-      closeSocket();
-      // T26: Clean up any open temporary Slack tabs.
-      for (const tabId of state.temporaryTabIds) {
-        chrome.tabs.remove(tabId).catch(() => { /* ignore */ });
-      }
-      state.temporaryTabIds.clear();
-      state.lastError = "No shared secret configured.";
-      void updateActionAppearance();
-      sendResponse({ ok: true });
-    });
-    return true;
+  if (message.type === "pi-slack:resolve-approval") {
+    sendResponse({ ok: resolveApproval(String(message.id ?? ""), message.decision === "allow") });
+    return undefined;
   }
 
   if (message.type === "pi-slack:test-connection") {
@@ -1268,9 +1619,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({
         ok: status.connected,
         message: status.connected
-          ? "Connected to pi-slack."
-          : status.lastError || "Not connected to pi-slack yet.",
-        wsUrl: PI_SLACK_WS_URL,
+          ? "Connected to the paired Pi Slack session."
+          : status.lastError || "Not connected to Pi Slack yet.",
+        wsUrl: status.wsUrl,
       });
     });
     return true;
