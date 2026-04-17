@@ -220,6 +220,58 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return "";
   }
 
+  function isSlackMessagePermalinkHref(href) {
+    if (!href) return false;
+    return Boolean(parseSlackTsFromUrl(href));
+  }
+
+  function isLikelyMessageBodyPermalinkAnchor(anchor) {
+    if (!(anchor instanceof HTMLAnchorElement)) return false;
+    if (anchor.querySelector("time")) return false;
+
+    const bodyContainer = anchor.closest([
+      '[data-qa="message-text"]',
+      '[data-qa*="message-text"]',
+      '[data-qa*="message_body"]',
+      '[data-qa*="message-body"]',
+      '[data-qa*="message_content"]',
+      '[data-qa*="message-content"]',
+      '[data-qa*="message_blocks"]',
+      '[data-qa*="message-blocks"]',
+      '[class*="message_body"]',
+      '[class*="message-body"]',
+      '[class*="message__body"]',
+      '[class*="message_content"]',
+      '[class*="message-content"]',
+      '[class*="message_blocks"]',
+      '[class*="message-blocks"]',
+      '[class*="p-rich_text"]',
+      '[class*="rich_text"]',
+      '[class*="rich-text"]',
+      '[data-stringify-type]',
+      'blockquote',
+      'pre',
+    ].join(", "));
+
+    return Boolean(bodyContainer);
+  }
+
+  function getPermalinkAnchorScore(anchor) {
+    if (!(anchor instanceof HTMLAnchorElement)) return Number.NEGATIVE_INFINITY;
+    const href = anchor.href || anchor.getAttribute("href") || "";
+    if (!isSlackMessagePermalinkHref(href)) return Number.NEGATIVE_INFINITY;
+
+    let score = 0;
+    if (anchor.querySelector("time")) score += 100;
+    if (anchor.closest('[data-qa*="timestamp"], [data-qa*="meta"], [data-qa*="header"], header')) score += 40;
+
+    const aria = [anchor.getAttribute("aria-label"), anchor.title].filter(Boolean).join(" ").toLowerCase();
+    if (/\b(time|timestamp|permalink|message)\b/.test(aria)) score += 20;
+
+    if (isLikelyMessageBodyPermalinkAnchor(anchor)) score -= 200;
+    return score;
+  }
+
   function extractMessagePermalinkUrl(messageElement) {
     const selectors = [
       'a[href*="/archives/"][href*="/p"]',
@@ -227,14 +279,20 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       'a[href*="message_ts="]',
     ];
 
-    for (const selector of selectors) {
-      const element = messageElement.querySelector(selector);
-      if (!(element instanceof HTMLAnchorElement)) continue;
-      const href = element.href || element.getAttribute("href");
-      if (href) return href;
+    const anchors = queryVisibleAll(messageElement, selectors).filter((element) => element instanceof HTMLAnchorElement);
+    let bestHref;
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const anchor of anchors) {
+      const href = anchor.href || anchor.getAttribute("href");
+      if (!href) continue;
+      const score = getPermalinkAnchorScore(anchor);
+      if (score <= bestScore) continue;
+      bestScore = score;
+      bestHref = href;
     }
 
-    return undefined;
+    return bestScore >= 0 ? bestHref : undefined;
   }
 
   function extractMessageTs(messageElement) {
