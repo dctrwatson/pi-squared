@@ -18,6 +18,16 @@ async function resolveApproval(id, decision) {
     id,
     decision,
   });
+
+  if (["allow_once", "allow_5m", "allow_session"].includes(decision)) {
+    const state = await chrome.runtime.sendMessage({ type: "pi-slack:get-approval-state" });
+    const pending = Array.isArray(state?.pending) ? state.pending : [];
+    if (pending.length === 0) {
+      window.close();
+      return;
+    }
+  }
+
   await refresh();
 }
 
