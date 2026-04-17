@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and drafts or posts responses. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR.
+description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and posts responses on GitHub. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR.
 compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. The bundled helper script also requires Python 3. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
@@ -169,9 +169,9 @@ Bad examples:
 
 If a comment turns out to be already satisfied after inspection, do not make a no-op commit. Reply and explain.
 
-## 5. Draft replies for every handled comment
+## 5. Reply on GitHub for every handled comment
 
-Unless the user explicitly asks you to post on GitHub, draft replies in the conversation instead of sending them.
+By default, post replies on GitHub rather than drafting them in the conversation. Only keep replies as drafts if the user explicitly asks for a dry run.
 
 When a single thread is long or has back-and-forth from multiple people, use the item renderer so you can read only that thread without losing context:
 
@@ -206,14 +206,16 @@ Keep replies short and direct. The reviewer should not have to reverse-engineer 
 
 > I can take this either as a small rename in this PR or as part of the larger config cleanup. Which direction do you want here?
 
-## 6. If the user explicitly wants comments posted
+## 6. Post comments on GitHub
 
-Posting comments is an external side effect, so do it only when the user asks.
+Posting replies is the default behavior for this skill.
 
 - For general PR conversation, use `gh pr comment`.
 - For inline review comments, use the GitHub pull-request review comment reply API so the response stays attached to the right thread.
+- If a reply refers to code changes, push the relevant commits first so the comment truthfully describes the branch state.
+- If several comments are handled by one commit, reply to each affected thread individually and mention the shared fix in natural language.
 
-If you are posting replies after making commits, push the relevant commits first so the comment truthfully describes the branch state.
+If the user asks for a preview first, draft the replies in the conversation before posting.
 
 ## 7. Final response to the user
 
@@ -231,14 +233,14 @@ Return a concise summary with these sections when applicable:
 ## Commits created
 - <sha or subject>: <what it addressed>
 
-## Draft replies
-- <comment/thread summary>: <reply text>
+## Replies posted
+- <comment/thread summary>: <what you posted>
 
 ## Remaining questions
 - <anything blocked or ambiguous>
 ```
 
-If you did not push or post replies yet, say so explicitly.
+If you intentionally did not push or post replies yet, say so explicitly.
 
 ## 8. Edge cases
 
