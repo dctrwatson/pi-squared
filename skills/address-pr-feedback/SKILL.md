@@ -26,7 +26,21 @@ The script prints `WORKDIR=`, `SUMMARY=`, and `NORMALIZED_JSON=` paths and write
 - `normalized-feedback.json` — normalized structured data for deeper inspection
 - raw API payloads such as `issue-comments.json`, `reviews.json`, and `review-comments.json`
 
-Read `feedback-summary.md` first, then inspect `normalized-feedback.json` or the raw payloads only if you need more detail.
+Read `feedback-summary.md` first, then build a planning worksheet from the normalized JSON:
+
+```bash
+python3 -B <skill_dir>/scripts/build-feedback-worklist.py <workdir>/normalized-feedback.json
+```
+
+That writes `feedback-worklist.md` and `feedback-worklist.json`. Read the Markdown worklist before deciding what to change.
+
+If you need full context for one specific thread or comment while drafting a reply or planning a patch, render just that item:
+
+```bash
+python3 -B <skill_dir>/scripts/render-feedback-item.py <workdir>/normalized-feedback.json <item-id>
+```
+
+Read `normalized-feedback.json` or the raw payloads only if you need more detail than the helper outputs provide.
 
 If you cannot use the helper, gather manually:
 
@@ -73,7 +87,7 @@ If the PR is very large or old and you suspect more than 100 items, fetch additi
 
 ## 3. Build a feedback plan before editing anything
 
-Turn the comments into a short action plan. For each feedback item, classify it as one of:
+Turn the comments into a short action plan. Use `feedback-worklist.md` as the checklist, then classify each feedback item as one of:
 
 1. **Reply only** — explanation, acknowledgment, or clarification is enough
 2. **Code change** — the current branch should change
@@ -159,6 +173,12 @@ If a comment turns out to be already satisfied after inspection, do not make a n
 
 Unless the user explicitly asks you to post on GitHub, draft replies in the conversation instead of sending them.
 
+When a single thread is long or has back-and-forth from multiple people, use the item renderer so you can read only that thread without losing context:
+
+```bash
+python3 -B <skill_dir>/scripts/render-feedback-item.py <workdir>/normalized-feedback.json <item-id>
+```
+
 Every handled comment should have a clear response path:
 
 - **Code change made:** say what changed and, when helpful, mention the test or reasoning
@@ -240,3 +260,5 @@ Do not mix unrelated local changes into review-response commits. Ask the user wh
 ## Helper files
 
 - `scripts/gather-pr-feedback.py` — resolves the PR, fetches general comments plus inline review threads, normalizes them, and writes a summary you can read before planning changes
+- `scripts/build-feedback-worklist.py` — turns normalized feedback into a planning worksheet with stable item IDs, sorted so unresolved inline threads are easy to tackle first
+- `scripts/render-feedback-item.py` — prints full context for one or more specific worklist items so you can draft a reply or inspect a thread without rereading the whole PR summary
