@@ -6,6 +6,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   const PRE_CONTEXT_SCROLL_STEPS = 8;
   const READY_POLL_MS = 250;
   const READY_TIMEOUT_MS = 10_000;
+  const THREAD_READY_TIMEOUT_MS = 20_000;
   const MIN_THREAD_IDENTITY_RATIO = 0.4;
   const MIN_CHANNEL_IDENTITY_RATIO = 0.5;
 
@@ -640,7 +641,40 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return (await waitForChannelRootDetails(timeoutMs)).root;
   }
 
-  async function waitForThreadRootDetails(timeoutMs = READY_TIMEOUT_MS) {
+  function isThreadLoadingText(text) {
+    const normalized = normalizeText(text).toLowerCase();
+    if (!normalized || !normalized.includes("loading")) return false;
+    if (/^loading(?:\s+\w+){0,6}(?:…|\.\.\.)?$/.test(normalized)) return true;
+    return /\bloading\b(?:\s+\w+){0,6}\s+\brepl(?:y|ies)\b/.test(normalized)
+      || /\brepl(?:y|ies)\b(?:\s+\w+){0,6}\s+\bloading\b/.test(normalized);
+  }
+
+  function threadRootNeedsMoreTime(threadRoot) {
+    if (!(threadRoot instanceof HTMLElement)) return true;
+    if (threadRoot.matches('[aria-busy="true"]') || threadRoot.querySelector('[aria-busy="true"]')) {
+      return true;
+    }
+
+    const composerElement = findComposer(threadRoot);
+    const messageElements = findMessageElements(threadRoot, composerElement);
+    if (messageElements.length === 0) return true;
+
+    const firstMessage = messageElements[0];
+    const firstText = extractMessageText(firstMessage, composerElement);
+    const firstHasIdentity = Boolean(extractMessageTs(firstMessage) || extractMessagePermalinkUrl(firstMessage));
+    if (isThreadLoadingText(firstText) && !firstHasIdentity) {
+      return true;
+    }
+
+    const statusElements = queryVisibleAll(threadRoot, ['[role="status"]', '[aria-live]']);
+    if (statusElements.some((element) => isThreadLoadingText(getElementText(element)))) {
+      return true;
+    }
+
+    return !firstHasIdentity && isThreadLoadingText(getElementText(threadRoot));
+  }
+
+  async function waitForThreadRootDetails(timeoutMs = THREAD_READY_TIMEOUT_MS) {
     const deadline = Date.now() + timeoutMs;
     let lastDetails = findThreadRootDetails();
 
@@ -648,7 +682,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       const details = findThreadRootDetails();
       if (details.root) {
         lastDetails = details;
-        if (countMessageLikeDescendants(details.root) > 0) {
+        if (countMessageLikeDescendants(details.root) > 0 && !threadRootNeedsMoreTime(details.root)) {
           return details;
         }
       }
@@ -658,7 +692,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return lastDetails.root ? lastDetails : findThreadRootDetails();
   }
 
-  async function waitForThreadRoot(timeoutMs = READY_TIMEOUT_MS) {
+  async function waitForThreadRoot(timeoutMs = THREAD_READY_TIMEOUT_MS) {
     return (await waitForThreadRootDetails(timeoutMs)).root;
   }
 
