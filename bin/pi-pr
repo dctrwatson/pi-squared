@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec pi --model openai/gpt-5.4-mini --thinking off --no-extensions --no-prompt-templates --no-session -p "create GitHub PR for this branch. $*"
+exec pi --model openai-codex/gpt-5.4-mini --thinking off --no-extensions --no-prompt-templates --no-session -p "create GitHub PR for this branch. $*"
