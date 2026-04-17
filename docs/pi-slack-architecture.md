@@ -361,7 +361,7 @@ Approval flow:
    - these temporary approvals are bound to the observed Slack context, such as the current thread, channel, or tab context Chrome can verify
 8. only after approval does the background worker read Slack DOM state and return the result
 
-High-scope reads such as paginated channel summaries remain one-time approvals and are never auto-approved.
+High-scope reads such as paginated channel summaries remain one-time approvals and are never auto-approved. Their approval prompts include exact scope details like permalink bounds, inferred Slack locations, pagination behavior, and whether linked threads will be expanded.
 
 If the user denies the request, Chrome returns a structured error such as `user_denied`. If the user never responds, Chrome returns `approval_timeout`. Once approval is granted, Chrome applies a separate execution timeout for the actual Slack read and returns `execution_timeout` if that phase runs too long.
 
@@ -391,6 +391,13 @@ The background worker:
 8. optionally revisits thread URLs in the same temporary tab to expand replies for summary mode
 9. closes the temporary tab
 10. restores the previously active tab context
+
+For approval clarity, broad-read prompts now spell out whether the request is:
+
+- a single bounded permalink span
+- a forward-only range from the start permalink
+- an open-ended paginated summary toward the present
+- a paginated summary that also expands linked threads
 
 This means permalink reads are not purely hidden background work; they temporarily take foreground focus and then restore it.
 
@@ -443,6 +450,7 @@ It shows:
 - each pending Slack read request
 - a concise summary of what will be read
 - request risk/scope labels such as low, medium, and high scope
+- exact broad-read scope details for channel reads, including start/end permalinks, inferred Slack locations, pagination behavior, and thread-expansion behavior
 - timing metadata such as request age and timeout
 - **Allow once** and **Deny** controls for all requests
 - **Allow for 5 min** and **Allow for session** controls for low-scope current-thread reads only

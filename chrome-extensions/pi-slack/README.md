@@ -14,7 +14,7 @@ Implemented so far:
 - background service worker with per-session WebSocket pairing and nonce/HMAC handshake
 - stale-pairing invalidation when the Pi session rotates or rejects the current pairing
 - ping response handling for the Pi bridge
-- Chrome-side approval gate for every Slack read request
+- Chrome-side approval gate for every Slack read request, with exact broad-read scope summaries for channel ranges and paginated summaries
 - short-lived, context-bound temporary approval policies for current-thread reads only
 - active Slack tab routing for current-thread reads
 - temporary Slack tab routing for channel-range reads from permalinks

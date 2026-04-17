@@ -41,7 +41,9 @@ function renderApproval(approval) {
 
   const risk = document.createElement("div");
   risk.className = "risk";
-  risk.textContent = `${approval.risk || "medium"} scope`;
+  risk.textContent = approval.scopeLabel
+    ? `${approval.risk || "medium"} · ${approval.scopeLabel}`
+    : `${approval.risk || "medium"} scope`;
   wrapper.appendChild(risk);
 
   const title = document.createElement("h2");
@@ -57,6 +59,10 @@ function renderApproval(approval) {
   for (const line of approval.lines || []) {
     const item = document.createElement("li");
     item.textContent = line;
+    if (String(line).startsWith("WARNING:")) {
+      item.style.color = "#991b1b";
+      item.style.fontWeight = "600";
+    }
     list.appendChild(item);
   }
   wrapper.appendChild(list);

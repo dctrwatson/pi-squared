@@ -563,10 +563,48 @@ function buildTemporaryApprovalSummary(scope, context) {
   return `Auto-approve current-thread reads ${duration} · ${context.summary}`;
 }
 
+function describeSlackLocation(context) {
+  if (!context) return "unknown Slack location";
+  const parts = [];
+  if (context.channelKey) parts.push(context.channelKey);
+  if (context.workspaceKey) parts.push(context.workspaceKey);
+  return parts.length > 0 ? parts.join(" in ") : context.host || context.url || "unknown Slack location";
+}
+
+function summarizeChannelRangeScope(startUrl, endUrl) {
+  const startContext = parseSlackContextFromUrl(startUrl);
+  const endContext = endUrl ? parseSlackContextFromUrl(endUrl) : null;
+  const sameWorkspace = Boolean(
+    startContext
+    && endContext
+    && startContext.workspaceKey
+    && endContext.workspaceKey
+    && startContext.workspaceKey === endContext.workspaceKey,
+  );
+  const sameChannel = Boolean(
+    startContext
+    && endContext
+    && startContext.channelKey
+    && endContext.channelKey
+    && startContext.channelKey === endContext.channelKey,
+  );
+
+  return {
+    startContext,
+    endContext,
+    sameWorkspace,
+    sameChannel,
+    crossesContext: Boolean(endContext) && (!sameWorkspace || !sameChannel),
+    startLocation: describeSlackLocation(startContext),
+    endLocation: endContext ? describeSlackLocation(endContext) : "",
+  };
+}
+
 function classifyApprovalRequest(message, observedContext = null) {
   if (message.action === "getCurrentThread") {
     return {
       risk: "low",
+      scopeLabel: "current thread",
       signature: `getCurrentThread:${buildApprovalContextSignature(observedContext)}`,
       availableDecisions: observedContext ? ["allow_once", "allow_5m", "allow_session", "deny"] : ["allow_once", "deny"],
       policyEligible: Boolean(observedContext),
@@ -575,8 +613,18 @@ function classifyApprovalRequest(message, observedContext = null) {
 
   if (message.action === "getChannelRange") {
     const limit = Number.isInteger(message.payload?.limit) ? message.payload.limit : null;
+    const hasEndUrl = typeof message.payload?.endUrl === "string" && Boolean(message.payload.endUrl);
+    const scope = summarizeChannelRangeScope(
+      typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "",
+      hasEndUrl ? message.payload.endUrl : "",
+    );
     return {
-      risk: limit && limit <= 25 ? "medium" : "high",
+      risk: scope.crossesContext || !hasEndUrl || !limit || limit > 25 ? "high" : "medium",
+      scopeLabel: scope.crossesContext
+        ? "cross-context channel range"
+        : hasEndUrl
+          ? (limit && limit <= 25 ? "bounded channel range" : "broad channel range")
+          : (limit && limit <= 25 ? "forward range from start permalink" : "open-ended forward range"),
       signature: `getChannelRange:${message.payload?.startUrl || ""}:${message.payload?.endUrl || ""}:${limit ?? ""}`,
       availableDecisions: ["allow_once", "deny"],
       policyEligible: false,
@@ -584,8 +632,14 @@ function classifyApprovalRequest(message, observedContext = null) {
   }
 
   if (message.action === "getChannelRangeAll") {
+    const hasEndUrl = typeof message.payload?.endUrl === "string" && Boolean(message.payload.endUrl);
+    const maxMessages = Number.isInteger(message.payload?.maxMessages) ? message.payload.maxMessages : 500;
+    const includeThreads = message.payload?.includeThreads !== false;
     return {
-      risk: "high",
+      risk: includeThreads || !hasEndUrl || maxMessages > 100 ? "high" : "medium",
+      scopeLabel: includeThreads
+        ? (hasEndUrl ? "paginated summary + thread expansion" : "open-ended paginated summary + thread expansion")
+        : (hasEndUrl ? "paginated channel summary" : "open-ended paginated channel summary"),
       signature: `getChannelRangeAll:${message.payload?.startUrl || ""}:${message.payload?.endUrl || ""}:${message.payload?.maxMessages || ""}:${message.payload?.includeThreads !== false}`,
       availableDecisions: ["allow_once", "deny"],
       policyEligible: false,
@@ -595,6 +649,7 @@ function classifyApprovalRequest(message, observedContext = null) {
   if (message.action === "debugCurrentThreadScan" || message.action === "debugCurrentChannelScan") {
     return {
       risk: "medium",
+      scopeLabel: "extractor diagnostics",
       signature: message.action,
       availableDecisions: ["allow_once", "deny"],
       policyEligible: false,
@@ -603,6 +658,7 @@ function classifyApprovalRequest(message, observedContext = null) {
 
   return {
     risk: "medium",
+    scopeLabel: "Slack request",
     signature: String(message.action),
     availableDecisions: ["allow_once", "deny"],
     policyEligible: false,
@@ -719,12 +775,25 @@ async function approvalSummaryForRequest(message, requestContext = null) {
     const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "(missing)";
     const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : "";
     const limit = Number.isInteger(message.payload?.limit) ? message.payload.limit : null;
+    const scope = summarizeChannelRangeScope(startUrl, endUrl);
     return {
       title: "Read Slack channel range",
       lines: [
-        `Start URL: ${startUrl}`,
-        ...(endUrl ? [`End URL: ${endUrl}`] : ["End URL: not set (bounded read starts at Start URL and stops after the requested count)."]),
-        ...(limit ? [`Requested next messages: ${limit}`] : ["Requested next messages: not specified"]),
+        `Start permalink: ${startUrl}`,
+        `Start location: ${scope.startLocation}`,
+        ...(endUrl
+          ? [`End permalink: ${endUrl}`, `End location: ${scope.endLocation}`]
+          : ["End permalink: not set (Chrome will continue forward from the start permalink)."]),
+        ...(limit
+          ? [`Requested next messages: ${limit}`]
+          : ["Requested next messages: not specified"]),
+        ...(endUrl
+          ? [scope.crossesContext
+              ? "WARNING: start and end permalinks resolve to different Slack contexts; review the range carefully before allowing it."
+              : "Scope: a single bounded permalink span in one Slack channel."]
+          : ["Scope: a forward range starting at the start permalink; this read is bounded only by the requested next-message count."]),
+        "Pagination: single extraction only; this request does not paginate beyond the requested range.",
+        "Thread expansion: disabled for this action.",
         "Chrome may temporarily focus a Slack tab to harvest the range.",
       ],
     };
@@ -734,16 +803,31 @@ async function approvalSummaryForRequest(message, requestContext = null) {
     const startUrl = typeof message.payload?.startUrl === "string" ? message.payload.startUrl : "(missing)";
     const endUrl = typeof message.payload?.endUrl === "string" ? message.payload.endUrl : "";
     const maxMessages = Number.isInteger(message.payload?.maxMessages) ? message.payload.maxMessages : 500;
+    const pageSize = Number.isInteger(message.payload?.pageSize) ? message.payload.pageSize : CHANNEL_RANGE_PAGE_SIZE;
     const includeThreads = message.payload?.includeThreads !== false;
+    const scope = summarizeChannelRangeScope(startUrl, endUrl);
     return {
       title: "Read Slack channel summary span",
       lines: [
-        `Start URL: ${startUrl}`,
-        ...(endUrl ? [`End URL: ${endUrl}`] : ["End URL: not set (read may continue from Start URL to the present)."]),
-        `Max messages: ${maxMessages}`,
-        `Expand threads: ${includeThreads ? "yes" : "no"}`,
+        `Start permalink: ${startUrl}`,
+        `Start location: ${scope.startLocation}`,
+        ...(endUrl
+          ? [`End permalink: ${endUrl}`, `End location: ${scope.endLocation}`]
+          : ["End permalink: not set (Chrome may continue from the start permalink toward the present until the max-message cap is reached)."]),
+        `Max messages across all pages: ${maxMessages}`,
+        `Page size: ${pageSize}`,
+        `Expand linked threads: ${includeThreads ? "yes" : "no"}`,
+        ...(endUrl
+          ? [scope.crossesContext
+              ? "WARNING: start and end permalinks resolve to different Slack contexts; review the summary span carefully before allowing it."
+              : "Scope: paginated harvesting of one permalink-bounded Slack channel span."]
+          : ["Scope: open-ended paginated harvesting from the start permalink toward the present."]),
+        `Pagination: enabled; Chrome may perform multiple range reads until it reaches the end permalink or ${maxMessages} messages.`,
+        ...(includeThreads
+          ? ["Thread expansion: enabled; Chrome may revisit linked thread URLs and collect replies while building the summary."]
+          : ["Thread expansion: disabled; channel messages will be summarized without revisiting linked thread URLs."]),
         "Chrome may temporarily focus Slack tabs and collect a larger message span.",
-        "This is a higher-scope read than the current-thread tool.",
+        "This is a higher-scope read than the current-thread tool or a single bounded range read.",
       ],
     };
   }
@@ -789,6 +873,7 @@ function getPendingApprovalsForUi() {
       createdAt: approval.createdAt,
       expiresAt: approval.expiresAt,
       risk: approval.risk,
+      scopeLabel: approval.scopeLabel,
       availableDecisions: approval.availableDecisions,
       requestCount: approval.requestCount,
     }));
@@ -850,6 +935,7 @@ async function requestUserApproval(message) {
     expiresAt: Date.now() + APPROVAL_TIMEOUT_MS,
     timeout: null,
     risk: classification.risk,
+    scopeLabel: classification.scopeLabel,
     signature: classification.signature,
     availableDecisions: classification.availableDecisions,
     observedContext: summary.observedContext ?? requestContext?.observedContext ?? null,
