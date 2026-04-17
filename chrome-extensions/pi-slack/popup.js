@@ -38,6 +38,9 @@ function formatStatus(status) {
     lines.push(`Tab rule: ${status.selectionRule}`);
   }
 
+  if (status.extensionVersion) {
+    lines.push(`Extension: v${status.extensionVersion}`); // T27
+  }
   lines.push(`Hello sent: ${formatTimestamp(status.lastHelloSentAt)}`);
   lines.push(`Hello ack: ${formatTimestamp(status.lastHelloAckAt)}`);
   lines.push(`Heartbeat: ${formatTimestamp(status.lastHeartbeatSentAt)}`);

@@ -66,6 +66,11 @@ interface ResponseMessage {
 	};
 }
 
+interface CancelMessage {
+	type: "cancel";
+	id: string;
+}
+
 interface ActiveChromeConnection {
 	socket: WebSocket;
 	connectedAt: number;
@@ -276,20 +281,31 @@ function connectionSummary(): string {
 }
 
 function formatStatus(showToken: boolean): string {
-	const lines = [
+	const lines: string[] = [];
+	if (showToken) {
+		// T04: Warn before revealing the shared secret.
+		lines.push(
+			"WARNING: the shared secret is about to be displayed. Anyone with access to this terminal or its scrollback can read it.",
+			"",
+		);
+	}
+	lines.push(
 		`Pi Slack bridge: ${state.lifecycle}`,
 		`Endpoint: ${state.wsUrl}`,
 		`Token file: ${state.tokenFile}`,
 		`Token: ${showToken ? state.token : maskToken(state.token)}`,
 		`Chrome: ${connectionSummary()}`,
 		`Mode: read-only Slack assistant`,
-	];
+	);
 
 	if (state.activeChrome) {
 		lines.push(`Chrome connected at: ${formatTimestamp(state.activeChrome.connectedAt)}`);
 		lines.push(`Chrome last seen: ${formatTimestamp(state.activeChrome.lastSeenAt)}`);
 		if (state.activeChrome.remoteAddress) {
 			lines.push(`Chrome remote address: ${state.activeChrome.remoteAddress}`);
+		}
+		if (state.activeChrome.extensionVersion) {
+			lines.push(`Chrome extension: ${state.activeChrome.extensionVersion}`); // T27
 		}
 	}
 
@@ -631,9 +647,14 @@ function formatAllMessagesForSummary(snapshot: SlackChannelRangeSnapshot, charBu
 	}
 
 	const msgs = snapshot.messages;
-	const totalEstimated = msgs.reduce((sum, m) => sum + estimateSummaryMessageChars(m), 0);
+	// T17: Root message is always formatted at full fidelity; only the remaining messages are scaled.
+	const rootMsg = msgs[0];
+	const rootEstimated = rootMsg ? estimateSummaryMessageChars(rootMsg) : 0;
+	const restEstimated = msgs.slice(1).reduce((sum, m) => sum + estimateSummaryMessageChars(m), 0);
+	const totalEstimated = rootEstimated + restEstimated;
 	const condensed = totalEstimated > charBudget;
-	const ratio = condensed ? charBudget / totalEstimated : 1;
+	const restBudget = condensed ? Math.max(0, charBudget - rootEstimated) : restEstimated;
+	const ratio = restEstimated > 0 && condensed ? restBudget / restEstimated : 1;
 	const maxPerMessage = condensed ? Math.max(80, Math.floor(1_200 * ratio)) : 1_200;
 	const maxPerReply = condensed ? Math.max(60, Math.floor(900 * ratio)) : 900;
 
@@ -648,8 +669,11 @@ function formatAllMessagesForSummary(snapshot: SlackChannelRangeSnapshot, charBu
 			header += getExpandedThreadReplies(message).length > 0 ? ` [thread: ${replyLabel}]` : ` [thread: ${replyLabel}; not expanded]`;
 		}
 
-		lines.push("", header, truncateText(message.text, maxPerMessage));
-		formatExpandedThreadReplies(lines, index + 1, message, maxPerReply);
+		// T17: Root message formatted at full fidelity regardless of condensing.
+		const msgMax = index === 0 ? 1_200 : maxPerMessage;
+		const replyMax = index === 0 ? 900 : maxPerReply;
+		lines.push("", header, truncateText(message.text, msgMax));
+		formatExpandedThreadReplies(lines, index + 1, message, replyMax);
 	}
 	lines.push("</untrusted-slack-content>"); // T05
 
@@ -787,7 +811,15 @@ async function ensureSharedSecret(tokenFile: string): Promise<{ token: string; c
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error;
+	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string"; // T11
+}
+
+// T12: Structured bridge error that preserves the Chrome-side error code.
+class BridgeError extends Error {
+	constructor(readonly code: string, message: string) {
+		super(message);
+		this.name = "BridgeError";
+	}
 }
 
 // T02: Constant-time token comparison to mitigate timing side-channels.
@@ -798,7 +830,7 @@ function tokensEqual(a: string, b: string): boolean {
 	return timingSafeEqual(ab, bb);
 }
 
-function serialize(message: HelloAckMessage | RequestMessage): string {
+function serialize(message: HelloAckMessage | RequestMessage | CancelMessage): string {
 	return JSON.stringify(message);
 }
 
@@ -855,6 +887,10 @@ async function requestChrome(action: string, payload: Record<string, unknown> = 
 	return await new Promise<ResponseMessage>((resolve, reject) => {
 		const timeout = setTimeout(() => {
 			state.pendingRequests.delete(id);
+			// T16: Notify Chrome to abort this request before rejecting.
+			try {
+				state.activeChrome?.socket.send(serialize({ type: "cancel", id }));
+			} catch { /* ignore — Chrome may be disconnected */ }
 			reject(new Error(`Timed out waiting for Chrome response to ${action} after ${Math.round(timeoutMs / 1000)}s.`));
 		}, timeoutMs);
 
@@ -893,7 +929,7 @@ function handleResponse(message: ResponseMessage): void {
 	}
 
 	const reason = message.error?.message ?? `Chrome returned an error for ${pending.action}.`;
-	pending.reject(new Error(reason));
+	pending.reject(new BridgeError(message.error?.code ?? "bridge_error", reason)); // T12
 }
 
 function handleAuthenticatedMessage(socket: WebSocket, raw: RawData): void {
@@ -943,6 +979,8 @@ function handleHello(socket: WebSocket, raw: RawData, remoteAddress?: string): v
 		return;
 	}
 
+	// T15: Token and protocol-version checks already ran above; replacement only
+	// happens for a fully-authenticated hello from a different socket.
 	if (state.activeChrome && state.activeChrome.socket !== socket) {
 		const previousSocket = state.activeChrome.socket;
 		closeSocket(previousSocket, 1000, "Replaced by newer Chrome connection");
@@ -1059,6 +1097,9 @@ async function startBridge(): Promise<void> {
 	server.on("error", (error) => {
 		state.lifecycle = "error";
 		state.startupError = error.message;
+		rejectAllPending("Pi Slack bridge errored."); // T14
+		try { server.close(); } catch { /* ignore */ }
+		if (state.server === server) state.server = undefined;
 	});
 }
 
@@ -1103,27 +1144,27 @@ async function readCurrentSlackThread(): Promise<SlackThreadSnapshot> {
 	await ensureBridgeStarted();
 	const response = await requestChrome("getCurrentThread");
 	if (!isSlackThreadSnapshot(response.payload)) {
-		throw new Error("Chrome returned an invalid Slack thread payload.");
+		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack thread payload.");
 	}
 	if (response.payload.messages.length === 0) {
-		throw new Error("Chrome returned an empty Slack thread.");
+		throw new BridgeError("empty_thread", "Chrome returned an empty Slack thread."); // T12
 	}
 	return response.payload;
 }
 
-async function readSlackChannelRange(startUrl: string, endUrl?: string, limit?: number, cursor?: string): Promise<SlackChannelRangeSnapshot> {
+// T13: cursor param removed — no caller passed it. Expose via CLI if continuation reads are needed later.
+async function readSlackChannelRange(startUrl: string, endUrl?: string, limit?: number): Promise<SlackChannelRangeSnapshot> {
 	await ensureBridgeStarted();
 	const response = await requestChrome("getChannelRange", {
 		startUrl,
-		...(cursor ? { cursor } : {}),
 		...(endUrl ? { endUrl } : {}),
 		...(limit !== undefined ? { limit } : {}),
 	});
 	if (!isSlackChannelRangeSnapshot(response.payload)) {
-		throw new Error("Chrome returned an invalid Slack channel range payload.");
+		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack channel range payload.");
 	}
 	if (response.payload.messages.length === 0) {
-		throw new Error("Chrome returned an empty Slack channel range.");
+		throw new BridgeError("empty_channel_range", "Chrome returned an empty Slack channel range."); // T12
 	}
 	return response.payload;
 }
@@ -1143,10 +1184,10 @@ async function readSlackChannelRangeAll(
 		pageSize: CHANNEL_RANGE_PAGE_SIZE,
 	});
 	if (!isSlackChannelRangeSnapshot(response.payload)) {
-		throw new Error("Chrome returned an invalid Slack channel range payload.");
+		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack channel range payload.");
 	}
 	if (response.payload.messages.length === 0) {
-		throw new Error("Chrome returned an empty Slack channel range.");
+		throw new BridgeError("empty_channel_range", "Chrome returned an empty Slack channel range."); // T12
 	}
 	return response.payload;
 }
@@ -1420,23 +1461,16 @@ export default function piSlack(pi: ExtensionAPI) {
 	pi.registerCommand("slack-status", {
 		description: "Show Pi Slack bridge status (use --show-token to reveal the shared secret)",
 		handler: async (args, ctx) => {
-			try {
-				await ensureBridgeStarted();
-			} catch {
-				const failure = startupFailureMessage();
-				if (ctx.hasUI) {
-					ctx.ui.notify(failure, "error");
-				} else {
-					console.error(failure);
-				}
-				return;
-			}
-
+			// T25: Status is passive — does not start the bridge or create the token file.
 			const showToken = args.includes("--show-token");
 			const message = formatStatus(showToken);
 			if (ctx.hasUI) {
 				ctx.ui.notify(message, "info");
 			} else {
+				if (showToken) {
+					// T04: Also emit to stderr so callers that capture stdout still get the warning.
+					console.error("WARNING: shared secret displayed — keep this output confidential.");
+				}
 				writeStatus(message);
 			}
 		},

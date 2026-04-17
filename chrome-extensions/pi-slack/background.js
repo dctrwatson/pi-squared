@@ -25,6 +25,7 @@ const state = {
   lastHeartbeatSentAt: 0,
   lastPingAt: 0,
   lastPongAt: 0,
+  pendingAbortControllers: new Map(), // T16
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -242,9 +243,11 @@ function normalizeSlackTs(ts) {
   if (/^\d{10}\.\d{6}$/.test(trimmed)) return trimmed;
   const digits = trimmed.replace(/\D/g, "");
   if (digits.length === 16) {
-    return `${digits.slice(0, 10)}.${digits.slice(10)}`;
+    const normalized = `${digits.slice(0, 10)}.${digits.slice(10)}`;
+    return /^\d{10}\.\d{6}$/.test(normalized) ? normalized : ""; // T20
   }
-  return trimmed.replace(/[^\d.]/g, "");
+  const cleaned = trimmed.replace(/[^\d.]/g, "");
+  return /^\d{10}\.\d{6}$/.test(cleaned) ? cleaned : ""; // T20
 }
 
 function parseSlackWorkspaceHostFromUrl(url) {
@@ -750,12 +753,14 @@ async function getChannelRangeFromTemporarySlackTab(startUrl, endUrl, limit, cur
 }
 
 function makeMessageKey(message) {
-  return [
-    normalizeSlackTs(typeof message?.messageTs === "string" ? message.messageTs : ""),
-    typeof message?.permalinkUrl === "string" ? message.permalinkUrl : "",
-    typeof message?.timestamp === "string" ? message.timestamp : "",
-    typeof message?.text === "string" ? message.text.slice(0, 240) : "",
-  ].join("\u241f");
+  // T21: Prefer messageTs as sole key so edited messages (text changes, ts unchanged) deduplicate correctly.
+  const ts = typeof message?.messageTs === "string" && message.messageTs
+    ? normalizeSlackTs(message.messageTs)
+    : "";
+  if (ts) return `ts:${ts}`;
+  const perma = typeof message?.permalinkUrl === "string" ? message.permalinkUrl : "";
+  if (perma) return `url:${perma}`;
+  return `txt:${(typeof message?.text === "string" ? message.text : "").slice(0, 240)}`;
 }
 
 function buildThreadUrlFromMessage(message) {
@@ -834,7 +839,7 @@ async function readThreadSnapshotFromTemporarySlackTab(tabId, threadUrl) {
   return payload;
 }
 
-async function expandThreadsOnChannelMessages(tabId, messages, options = {}) {
+async function expandThreadsOnChannelMessages(tabId, messages, options = {}, signal) {
   const maxThreadRoots = Number.isInteger(options.maxThreadRoots) ? options.maxThreadRoots : CHANNEL_SUMMARY_THREAD_LIMIT;
   const maxThreadMessages = Number.isInteger(options.maxThreadMessages) ? options.maxThreadMessages : CHANNEL_SUMMARY_THREAD_MESSAGE_LIMIT;
   let remainingReplies = Number.isInteger(options.maxThreadReplies) ? options.maxThreadReplies : CHANNEL_SUMMARY_THREAD_REPLY_LIMIT;
@@ -843,6 +848,7 @@ async function expandThreadsOnChannelMessages(tabId, messages, options = {}) {
   let failedThreadCount = 0;
 
   for (const message of messages) {
+    if (signal?.aborted) { omittedThreadCount += 1; continue; } // T16: bail if Pi timed out
     const replyCount = Number.isInteger(message?.replyCount) ? message.replyCount : 0;
     if (!replyCount) continue;
 
@@ -888,6 +894,7 @@ async function getChannelRangeAllFromTemporarySlackTab(
   maxMessages = 500,
   pageSize = CHANNEL_RANGE_PAGE_SIZE,
   includeThreads = false,
+  signal, // T16
 ) {
   return await withTemporarySlackTab(startUrl, async ({ tabId, getCurrentTab }) => {
     let firstPayload = null;
@@ -896,6 +903,7 @@ async function getChannelRangeAllFromTemporarySlackTab(
     let seedAuthor;
 
     while (allMessages.length < maxMessages) {
+      if (signal?.aborted) break; // T16: stop pagination if Pi timed out
       const limit = Math.min(pageSize, maxMessages - allMessages.length);
       let payload;
 
@@ -932,7 +940,7 @@ async function getChannelRangeAllFromTemporarySlackTab(
 
     const messages = allMessages.slice(0, maxMessages);
     const threadExpansion = includeThreads
-      ? await expandThreadsOnChannelMessages(tabId, messages)
+      ? await expandThreadsOnChannelMessages(tabId, messages, {}, signal) // T16: pass abort signal
       : { expandedThreadCount: 0, omittedThreadCount: 0, failedThreadCount: 0 };
 
     return {
@@ -1011,11 +1019,17 @@ async function handleRequestMessage(socket, message) {
         throw new BridgeActionError("invalid_request", "getChannelRangeAll requires startUrl.");
       }
 
-      const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads);
-      sendSocketResponse(socket, message.id, {
-        ok: true,
-        payload,
-      });
+      const controller = new AbortController(); // T16
+      state.pendingAbortControllers.set(message.id, controller);
+      try {
+        const payload = await getChannelRangeAllFromTemporarySlackTab(startUrl, endUrl, maxMessages, pageSize, includeThreads, controller.signal);
+        sendSocketResponse(socket, message.id, {
+          ok: true,
+          payload,
+        });
+      } finally {
+        state.pendingAbortControllers.delete(message.id); // T16
+      }
       return;
     }
 
@@ -1055,6 +1069,13 @@ function handleSocketMessage(socket, event) {
     state.reconnectAttempt = 0; // T23: reset backoff on successful connection
     startHeartbeat(); // T22: alarm-based
     void updateActionAppearance();
+    return;
+  }
+
+  if (parsed.type === "cancel" && typeof parsed.id === "string") {
+    // T16: Abort the corresponding pending request.
+    const controller = state.pendingAbortControllers.get(parsed.id);
+    if (controller) controller.abort();
     return;
   }
 
@@ -1176,6 +1197,7 @@ async function getStatus() {
     lastPingAt: state.lastPingAt,
     lastPongAt: state.lastPongAt,
     lastError: state.lastError,
+    extensionVersion: chrome.runtime.getManifest().version, // T27
   };
 }
 

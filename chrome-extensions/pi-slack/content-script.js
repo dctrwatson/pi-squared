@@ -184,13 +184,15 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       const parsed = new URL(url, window.location.href);
       const messageTs = parsed.searchParams.get("message_ts");
       if (messageTs) {
-        return messageTs.replace(/[^\d.]/g, "");
+        const cleaned = messageTs.replace(/[^\d.]/g, "");
+        return /^\d{10}\.\d{6}$/.test(cleaned) ? cleaned : undefined; // T20
       }
 
       const archiveMatch = parsed.pathname.match(/\/(?:archives|messages)\/[^/]+\/p(\d{16})/i);
       if (archiveMatch && archiveMatch[1]) {
         const digits = archiveMatch[1];
-        return `${digits.slice(0, 10)}.${digits.slice(10)}`;
+        const ts = `${digits.slice(0, 10)}.${digits.slice(10)}`;
+        return /^\d{10}\.\d{6}$/.test(ts) ? ts : undefined; // T20
       }
     } catch {
       return undefined;
@@ -250,6 +252,15 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   }
 
   function extractReplyCount(messageElement) {
+    // T18: Prefer elements that are clearly a thread-reply affordance before the broader selector sweep.
+    const threadLink = messageElement.querySelector(
+      'a[href*="thread_ts="], a[href*="/thread/"], [data-qa*="reply_bar"], [data-qa*="reply_count"]',
+    );
+    if (threadLink) {
+      const n = parseReplyCountFromText(getElementText(threadLink));
+      if (n !== undefined) return n;
+    }
+
     const selectors = [
       '[data-qa*="reply"]',
       '[aria-label*="reply" i]',
@@ -541,7 +552,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   function extractMessages(root, composerElement) {
     const messageElements = findMessageElements(root, composerElement);
     const messages = messageElements
-      .map((element, index) => {
+      .map((element) => {
         const text = extractMessageText(element, composerElement);
         if (!text) return null;
         return {
@@ -551,16 +562,24 @@ if (!globalThis.__piSlackContentScriptLoaded) {
           messageTs: extractMessageTs(element),
           permalinkUrl: extractMessagePermalinkUrl(element),
           replyCount: extractReplyCount(element),
-          isRoot: index === 0,
         };
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      // T19: Drop system-event rows (join/leave notices, etc.) that carry no identity fields.
+      .filter((m) => m.author || m.timestamp || m.permalinkUrl || m.messageTs);
 
-    return backfillMissingAuthors(messages);
+    // T19: Apply isRoot after filtering so the first real message is the root.
+    const withRoot = messages.map((m, index) => ({ ...m, isRoot: index === 0 }));
+    return backfillMissingAuthors(withRoot);
   }
 
   function makeMessageKey(message) {
-    return [message.messageTs || "", message.permalinkUrl || "", message.timestamp || "", message.text.slice(0, 240)].join("\u241f");
+    // T21: Prefer messageTs as sole key so edited messages deduplicate correctly.
+    const ts = message.messageTs && /^\d{10}\.\d{6}$/.test(message.messageTs) ? message.messageTs : "";
+    if (ts) return `ts:${ts}`;
+    const perma = message.permalinkUrl || "";
+    if (perma) return `url:${perma}`;
+    return `txt:${(message.text || "").slice(0, 240)}`;
   }
 
   function collectMessagesInto(map, messages) {

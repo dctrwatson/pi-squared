@@ -447,6 +447,16 @@ Only one authenticated Chrome connection is kept active at a time. A newer valid
 - `getChannelRange`
 - `getChannelRangeAll`
 
+### Cancellation
+
+When Pi's request timeout fires it sends a Pi→Chrome message:
+
+```json
+{ "type": "cancel", "id": "<request-uuid>" }
+```
+
+Chrome looks up the matching `AbortController` in `pendingAbortControllers` and calls `.abort()`. Pagination loops and thread-expansion loops check the signal between iterations and bail early, still closing the temporary tab and restoring the active tab context.
+
 ### Events
 
 Chrome currently emits heartbeat events. Pi accepts them but does not currently surface them as a higher-level feature.
@@ -510,6 +520,18 @@ The custom system prompt emphasizes:
 Session names are also updated from read results so saved sessions are easier to identify in history.
 
 ## Security and ownership model
+
+### Browser origin enforcement
+
+The WebSocket server uses `verifyClient` to reject any connection whose `Origin` header is present but does not match `chrome-extension://`. No-origin clients (CLI tools, wscat) are still accepted. This is a defense-in-depth measure on top of the shared-secret handshake.
+
+### Prompt injection
+
+Slack message bodies are untrusted third-party content and are wrapped in `<untrusted-slack-content>` delimiters in every model-facing text block. The system prompt instructs the model to treat that region as data, never as instructions, and to refuse requests to call tools on behalf of Slack content. Composer draft text receives the same treatment. This is a structural mitigation, not a guarantee — outputs should be reviewed before use.
+
+### Token storage
+
+`chrome.storage.local` is unencrypted on disk per Chrome's model. The Pi-side token directory is created with mode `0700` and the token file with mode `0600`. Users on shared machines should be aware of both constraints.
 
 ### Local-only bridge
 
