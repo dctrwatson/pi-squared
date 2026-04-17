@@ -166,6 +166,8 @@ interface SlackExtractionDiagnostics {
 	backfilledAuthorCount?: number;
 	permalinkCount?: number;
 	messageTsCount?: number;
+	identityMessageCount?: number;
+	outOfOrderTsCount?: number;
 	fallbackTextCount?: number;
 	startedAtBoundary?: boolean;
 	reachedEndBoundary?: boolean;
@@ -311,6 +313,8 @@ function isSlackExtractionDiagnostics(value: unknown): value is SlackExtractionD
 		(value.backfilledAuthorCount === undefined || typeof value.backfilledAuthorCount === "number") &&
 		(value.permalinkCount === undefined || typeof value.permalinkCount === "number") &&
 		(value.messageTsCount === undefined || typeof value.messageTsCount === "number") &&
+		(value.identityMessageCount === undefined || typeof value.identityMessageCount === "number") &&
+		(value.outOfOrderTsCount === undefined || typeof value.outOfOrderTsCount === "number") &&
 		(value.fallbackTextCount === undefined || typeof value.fallbackTextCount === "number") &&
 		(value.startedAtBoundary === undefined || typeof value.startedAtBoundary === "boolean") &&
 		(value.reachedEndBoundary === undefined || typeof value.reachedEndBoundary === "boolean") &&
@@ -726,6 +730,8 @@ function appendExtractionNotes(lines: string[], snapshot: { extractionWarnings?:
 	if (diagnostics.finalMessageCount !== undefined) details.push(`messages=${diagnostics.finalMessageCount}`);
 	if (diagnostics.permalinkCount !== undefined) details.push(`permalinks=${diagnostics.permalinkCount}`);
 	if (diagnostics.messageTsCount !== undefined) details.push(`messageTs=${diagnostics.messageTsCount}`);
+	if (diagnostics.identityMessageCount !== undefined) details.push(`identity=${diagnostics.identityMessageCount}`);
+	if (diagnostics.outOfOrderTsCount) details.push(`out_of_order_ts=${diagnostics.outOfOrderTsCount}`);
 	if (diagnostics.fallbackTextCount) details.push(`fallback_text=${diagnostics.fallbackTextCount}`);
 	if (diagnostics.backfilledAuthorCount) details.push(`author_backfill=${diagnostics.backfilledAuthorCount}`);
 	if (details.length > 0) {

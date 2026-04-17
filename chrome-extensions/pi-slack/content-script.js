@@ -6,6 +6,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   const PRE_CONTEXT_SCROLL_STEPS = 8;
   const READY_POLL_MS = 250;
   const READY_TIMEOUT_MS = 10_000;
+  const MIN_THREAD_IDENTITY_RATIO = 0.4;
+  const MIN_CHANNEL_IDENTITY_RATIO = 0.5;
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -677,6 +679,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     target.backfilledAuthorCount = Math.max(target.backfilledAuthorCount, source.backfilledAuthorCount ?? 0);
     target.permalinkCount = Math.max(target.permalinkCount, source.permalinkCount ?? 0);
     target.messageTsCount = Math.max(target.messageTsCount, source.messageTsCount ?? 0);
+    target.identityMessageCount = Math.max(target.identityMessageCount, source.identityMessageCount ?? 0);
+    target.outOfOrderTsCount = Math.max(target.outOfOrderTsCount, source.outOfOrderTsCount ?? 0);
     target.fallbackTextCount = Math.max(target.fallbackTextCount, source.fallbackTextCount ?? 0);
   }
 
@@ -690,8 +694,96 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       backfilledAuthorCount: 0,
       permalinkCount: 0,
       messageTsCount: 0,
+      identityMessageCount: 0,
+      outOfOrderTsCount: 0,
       fallbackTextCount: 0,
     };
+  }
+
+  function countIdentityBackedMessages(messages) {
+    return messages.reduce((count, message) => (
+      count + ((message?.messageTs || message?.permalinkUrl) ? 1 : 0)
+    ), 0);
+  }
+
+  function countOutOfOrderMessageTs(messages) {
+    let previousTs = "";
+    let outOfOrderCount = 0;
+
+    for (const message of messages) {
+      const ts = typeof message?.messageTs === "string" ? message.messageTs : "";
+      if (!ts) continue;
+      if (previousTs && ts < previousTs) {
+        outOfOrderCount += 1;
+      }
+      previousTs = ts;
+    }
+
+    return outOfOrderCount;
+  }
+
+  function evaluateThreadExtractionConfidence(messages, diagnostics) {
+    const reasons = [];
+    const identityCount = countIdentityBackedMessages(messages);
+    const outOfOrderTsCount = countOutOfOrderMessageTs(messages);
+
+    if (messages.length >= 2 && !messages[0]?.messageTs && !messages[0]?.permalinkUrl) {
+      reasons.push("the thread root message had no trusted permalink or Slack timestamp");
+    }
+    if (messages.length >= 4 && identityCount < Math.max(2, Math.ceil(messages.length * MIN_THREAD_IDENTITY_RATIO))) {
+      reasons.push(`only ${identityCount}/${messages.length} message(s) had trusted identity fields`);
+    }
+    if (messages.length >= 4 && outOfOrderTsCount > 0) {
+      reasons.push(`${outOfOrderTsCount} extracted message timestamp(s) were out of order`);
+    }
+    if (messages.length >= 4 && (diagnostics?.messageTsCount ?? 0) === 0 && (diagnostics?.permalinkCount ?? 0) === 0) {
+      reasons.push("no extracted thread rows had a trusted permalink or Slack timestamp");
+    }
+
+    return reasons.length === 0
+      ? { ok: true }
+      : {
+          ok: false,
+          code: outOfOrderTsCount > 0 ? "message_order_ambiguous" : "message_identity_ambiguous",
+          message: `Thread extraction confidence was too low: ${reasons.join("; ")}.`,
+          reasons,
+          identityCount,
+          outOfOrderTsCount,
+        };
+  }
+
+  function evaluateChannelExtractionConfidence(messages, diagnostics, options = {}) {
+    const reasons = [];
+    const identityCount = countIdentityBackedMessages(messages);
+    const outOfOrderTsCount = countOutOfOrderMessageTs(messages);
+    const cursorTs = typeof options.cursorTs === "string" ? options.cursorTs : "";
+    const endTs = typeof options.endTs === "string" ? options.endTs : "";
+
+    if (messages.length >= 4 && identityCount < Math.max(2, Math.ceil(messages.length * MIN_CHANNEL_IDENTITY_RATIO))) {
+      reasons.push(`only ${identityCount}/${messages.length} message(s) had trusted identity fields`);
+    }
+    if (messages.length >= 4 && outOfOrderTsCount > 0) {
+      reasons.push(`${outOfOrderTsCount} extracted message timestamp(s) were out of order`);
+    }
+    if (cursorTs && messages.some((message) => message?.messageTs && message.messageTs <= cursorTs)) {
+      reasons.push("the extracted page did not advance beyond the requested pagination cursor");
+    }
+    if (endTs && diagnostics?.reachedEndBoundary !== true && diagnostics?.hitLimit !== true) {
+      reasons.push("the requested end permalink was not reached and no explicit limit explained the early stop");
+    }
+
+    return reasons.length === 0
+      ? { ok: true }
+      : {
+          ok: false,
+          code: endTs && diagnostics?.reachedEndBoundary !== true && diagnostics?.hitLimit !== true
+            ? "boundary_ambiguous"
+            : (outOfOrderTsCount > 0 ? "message_order_ambiguous" : "message_identity_ambiguous"),
+          message: `Channel extraction confidence was too low: ${reasons.join("; ")}.`,
+          reasons,
+          identityCount,
+          outOfOrderTsCount,
+        };
   }
 
   function buildExtractionWarnings(diagnostics, context) {
@@ -712,6 +804,12 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     }
     if (diagnostics.finalMessageCount > 0 && diagnostics.messageTsCount < diagnostics.finalMessageCount) {
       warnings.push(`${context}: only ${diagnostics.messageTsCount}/${diagnostics.finalMessageCount} extracted message row(s) had a parsed Slack timestamp.`);
+    }
+    if (diagnostics.finalMessageCount > 0 && diagnostics.identityMessageCount < diagnostics.finalMessageCount) {
+      warnings.push(`${context}: only ${diagnostics.identityMessageCount}/${diagnostics.finalMessageCount} extracted message row(s) had either a trusted permalink or Slack timestamp.`);
+    }
+    if (diagnostics.outOfOrderTsCount > 0) {
+      warnings.push(`${context}: ${diagnostics.outOfOrderTsCount} extracted message timestamp(s) appeared out of order.`);
     }
     if (diagnostics.candidateRowCount > 0 && diagnostics.filteredRowCount === 0) {
       warnings.push(`${context}: candidate message rows were found, but none survived filtering.`);
@@ -771,6 +869,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         backfilledAuthorCount: backfilled.backfilledAuthorCount,
         permalinkCount,
         messageTsCount,
+        identityMessageCount: countIdentityBackedMessages(backfilled.messages),
+        outOfOrderTsCount: countOutOfOrderMessageTs(backfilled.messages),
         fallbackTextCount,
       },
     };
@@ -927,6 +1027,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const messages = backfilled.messages;
     diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
     diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, messages.length);
+    diagnostics.identityMessageCount = Math.max(diagnostics.identityMessageCount, countIdentityBackedMessages(messages));
+    diagnostics.outOfOrderTsCount = Math.max(diagnostics.outOfOrderTsCount, countOutOfOrderMessageTs(messages));
     messages.forEach((message, index) => {
       message.isRoot = index === 0;
     });
@@ -982,6 +1084,18 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const documentMeta = parseDocumentTitle();
     const channel = findChannelName() || undefined;
     const reportedMessageCount = findReportedMessageCount(threadRoot);
+    const confidence = evaluateThreadExtractionConfidence(messages, diagnostics);
+    if (!confidence.ok) {
+      return {
+        ok: false,
+        error: {
+          code: confidence.code,
+          message: confidence.message,
+          diagnostics,
+          warnings: [...warnings, ...confidence.reasons.map((reason) => `thread: ${reason}.`)],
+        },
+      };
+    }
 
     return {
       ok: true,
@@ -1100,6 +1214,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       const backfilled = backfillMissingAuthorsWithCount([...collected.values()].filter(withinBounds), authorBeforeStart);
       diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
       diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, backfilled.messages.length);
+      diagnostics.identityMessageCount = Math.max(diagnostics.identityMessageCount, countIdentityBackedMessages(backfilled.messages));
+      diagnostics.outOfOrderTsCount = Math.max(diagnostics.outOfOrderTsCount, countOutOfOrderMessageTs(backfilled.messages));
       return {
         messages: backfilled.messages,
         harvestedViaScroll: false,
@@ -1134,6 +1250,8 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     const backfilled = backfillMissingAuthorsWithCount([...collected.values()].filter(withinBounds), authorBeforeStart);
     diagnostics.backfilledAuthorCount = Math.max(diagnostics.backfilledAuthorCount, backfilled.backfilledAuthorCount);
     diagnostics.finalMessageCount = Math.max(diagnostics.finalMessageCount, backfilled.messages.length);
+    diagnostics.identityMessageCount = Math.max(diagnostics.identityMessageCount, countIdentityBackedMessages(backfilled.messages));
+    diagnostics.outOfOrderTsCount = Math.max(diagnostics.outOfOrderTsCount, countOutOfOrderMessageTs(backfilled.messages));
     return {
       messages: backfilled.messages,
       harvestedViaScroll: true,
@@ -1436,12 +1554,40 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       };
     }
 
+    if (endTs && !harvest.reachedEnd && !harvest.hitLimit) {
+      return {
+        ok: false,
+        error: {
+          code: "boundary_ambiguous",
+          message: "Chrome could not prove that the requested end Slack permalink was reached.",
+          diagnostics,
+          warnings: [...warnings, "channel_range: the requested end permalink was not reached before extraction stopped."],
+        },
+      };
+    }
+
+    const confidence = evaluateChannelExtractionConfidence(harvest.messages, diagnostics, { cursorTs, endTs });
+    if (!confidence.ok) {
+      return {
+        ok: false,
+        error: {
+          code: confidence.code,
+          message: confidence.message,
+          diagnostics,
+          warnings: [...warnings, ...confidence.reasons.map((reason) => `channel_range: ${reason}.`)],
+        },
+      };
+    }
+
     const documentMeta = parseDocumentTitle();
     const channel = findChannelName() || undefined;
 
     const lastMessage = harvest.messages[harvest.messages.length - 1];
     const nextCursor = harvest.hitLimit && lastMessage?.messageTs ? lastMessage.messageTs : undefined;
     const nextStartUrl = harvest.hitLimit && lastMessage?.permalinkUrl ? lastMessage.permalinkUrl : undefined;
+    const finalWarnings = endTs && !harvest.reachedEnd && harvest.hitLimit
+      ? [...warnings, "channel_range: requested end permalink was not reached before the explicit message limit stopped this page."]
+      : warnings;
 
     return {
       ok: true,
@@ -1458,7 +1604,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
         nextCursor,
         nextStartUrl,
         diagnostics,
-        extractionWarnings: warnings,
+        extractionWarnings: finalWarnings,
       },
     };
   }

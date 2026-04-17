@@ -1759,11 +1759,24 @@ async function getChannelRangeAllFromTemporarySlackTab(
     const allMessages = [];
     let cursor;
     let seedAuthor;
+    let previousLastMessageTs = "";
+    const seenCursors = new Set();
 
     while (allMessages.length < maxMessages) {
       if (signal?.aborted) break; // T16: stop pagination if Pi timed out
       const limit = Math.min(pageSize, maxMessages - allMessages.length);
       let payload;
+
+      if (cursor) {
+        const normalizedCursor = normalizeSlackTs(cursor);
+        if (!normalizedCursor) {
+          throw new BridgeActionError("pagination_stalled", "Slack pagination cursor became invalid before the next page read.");
+        }
+        if (seenCursors.has(normalizedCursor)) {
+          throw new BridgeActionError("pagination_stalled", "Slack channel pagination repeated the same cursor and stopped making progress.");
+        }
+        seenCursors.add(normalizedCursor);
+      }
 
       try {
         payload = await readChannelRangePageFromTemporarySlackTab(tabId, {
@@ -1788,8 +1801,24 @@ async function getChannelRangeAllFromTemporarySlackTab(
         seedAuthor = lastAuthor;
       }
 
+      const lastMessage = payload.messages[payload.messages.length - 1];
+      const lastMessageTs = normalizeSlackTs(typeof lastMessage?.messageTs === "string" ? lastMessage.messageTs : "");
+      if (previousLastMessageTs && lastMessageTs && lastMessageTs <= previousLastMessageTs) {
+        throw new BridgeActionError("pagination_stalled", "Slack channel pagination stopped advancing through message timestamps.");
+      }
+      if (lastMessageTs) {
+        previousLastMessageTs = lastMessageTs;
+      }
+
       if (!payload.nextCursor) break;
-      cursor = payload.nextCursor;
+      const nextCursor = normalizeSlackTs(payload.nextCursor);
+      if (!nextCursor) {
+        throw new BridgeActionError("pagination_stalled", "Slack channel pagination returned an unusable next cursor.");
+      }
+      if (nextCursor === normalizeSlackTs(cursor)) {
+        throw new BridgeActionError("pagination_stalled", "Slack channel pagination returned the same cursor twice in a row.");
+      }
+      cursor = nextCursor;
     }
 
     if (!firstPayload) {

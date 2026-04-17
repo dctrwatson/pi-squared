@@ -441,6 +441,8 @@ These scans return structured diagnostics such as:
 
 They are intended for debugging extractor behavior, not for normal summarization. Like other browser reads, they still require Chrome-side approval.
 
+For paginated channel summaries, the background worker also aborts if pagination stalls or stops advancing through Slack message timestamps.
+
 ### Approval window
 
 `approve.html` is a dedicated extension page for request approval.
@@ -465,6 +467,8 @@ File: `chrome-extensions/pi-slack/content-script.js`
 
 The content script is a heuristic DOM adapter for the Slack web UI. It isolates Slack-specific selectors and extraction behavior from the rest of the system.
 
+It now prefers to fail closed when extraction confidence is too low, rather than returning a plausible-looking but ambiguous thread or channel snapshot.
+
 ### General approach
 
 The script:
@@ -475,6 +479,7 @@ The script:
 - finds the active composer when present
 - scrolls virtualized Slack lists to collect messages that are not currently rendered
 - backfills missing authors for grouped Slack message rows
+- rejects extractions whose identity coverage, boundary detection, or timestamp ordering looks too ambiguous
 - normalizes text to remove UI noise and zero-width characters
 
 ### Thread extraction
