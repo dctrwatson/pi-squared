@@ -242,7 +242,15 @@ function sleep(ms) {
 }
 
 function isSlackUrl(url) {
-  return /^https:\/\/(?:app|[^./]+)\.slack\.com\//i.test(url);
+  // T06: URL-parser allowlist instead of loose regex.
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:") return false;
+    const host = u.hostname.toLowerCase();
+    return host === "app.slack.com" || host.endsWith(".slack.com");
+  } catch {
+    return false;
+  }
 }
 
 function normalizeSlackTs(ts) {
