@@ -672,7 +672,7 @@ This changes the failure mode of a mistaken or malicious local peer from silent 
 
 ### Prompt injection
 
-Slack message bodies are untrusted third-party content and are wrapped in `<untrusted-slack-content>` delimiters in every model-facing text block. The system prompt instructs the model to treat that region as data, never as instructions, and to refuse requests to call tools on behalf of Slack content. Composer draft text receives the same treatment. This is a structural mitigation, not a guarantee — outputs should be reviewed before use.
+Slack message bodies are untrusted third-party content and are wrapped in fresh nonce-based delimiters in every model-facing text block, using lines that start with `BEGIN_UNTRUSTED_SLACK_...` and the matching `END_UNTRUSTED_SLACK_...`. The system prompt instructs the model to treat anything inside those matching delimiters as data, never as instructions, and to refuse requests to call tools on behalf of Slack content. Composer draft text receives the same treatment. This is a structural mitigation, not a guarantee — outputs should be reviewed before use.
 
 ### Local-only bridge
 
