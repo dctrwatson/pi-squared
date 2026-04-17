@@ -9,7 +9,7 @@ async function loadContentScriptExports() {
   const source = await readFile(sourcePath, 'utf8');
   const instrumented = source.replace(
     /}\s*else\s*\{/,
-    '  globalThis.__testExports = { parseSlackTsFromUrl, countIdentityBackedMessages, countOutOfOrderMessageTs, evaluateThreadExtractionConfidence, evaluateChannelExtractionConfidence, buildExtractionWarnings };\n} else {',
+    '  globalThis.__testExports = { normalizeSlackTs, parseSlackTsFromUrl, countIdentityBackedMessages, countOutOfOrderMessageTs, evaluateThreadExtractionConfidence, evaluateChannelExtractionConfidence, buildExtractionWarnings };\n} else {',
   );
 
   class FakeElement {}
@@ -51,6 +51,12 @@ async function loadContentScriptExports() {
 }
 
 const contentScript = await loadContentScriptExports();
+
+test('normalizeSlackTs supports dotted and compact Slack timestamps', () => {
+  assert.equal(contentScript.normalizeSlackTs('1712345678.000100'), '1712345678.000100');
+  assert.equal(contentScript.normalizeSlackTs('1712345678000100'), '1712345678.000100');
+  assert.equal(contentScript.normalizeSlackTs('p1712345678000100'), '1712345678.000100');
+});
 
 test('parseSlackTsFromUrl supports query-style and archive permalinks', () => {
   assert.equal(

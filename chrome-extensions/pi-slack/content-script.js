@@ -203,22 +203,32 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return "";
   }
 
+  function normalizeSlackTs(value) {
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (!raw) return undefined;
+
+    const cleaned = raw.replace(/[^\d.]/g, "");
+    if (/^\d{10}\.\d{6}$/.test(cleaned)) return cleaned;
+
+    const digits = cleaned.replace(/\D/g, "");
+    if (/^\d{16}$/.test(digits)) {
+      return `${digits.slice(0, 10)}.${digits.slice(10)}`;
+    }
+
+    return undefined;
+  }
+
   function parseSlackTsFromUrl(url) {
     if (!url) return undefined;
 
     try {
       const parsed = new URL(url, window.location.href);
-      const messageTs = parsed.searchParams.get("message_ts");
-      if (messageTs) {
-        const cleaned = messageTs.replace(/[^\d.]/g, "");
-        return /^\d{10}\.\d{6}$/.test(cleaned) ? cleaned : undefined; // T20
-      }
+      const messageTs = normalizeSlackTs(parsed.searchParams.get("message_ts") || "");
+      if (messageTs) return messageTs;
 
       const archiveMatch = parsed.pathname.match(/\/(?:archives|messages)\/[^/]+\/p(\d{16})/i);
       if (archiveMatch && archiveMatch[1]) {
-        const digits = archiveMatch[1];
-        const ts = `${digits.slice(0, 10)}.${digits.slice(10)}`;
-        return /^\d{10}\.\d{6}$/.test(ts) ? ts : undefined; // T20
+        return normalizeSlackTs(archiveMatch[1]);
       }
     } catch {
       return undefined;
@@ -254,6 +264,9 @@ if (!globalThis.__piSlackContentScriptLoaded) {
   function isLikelyMessageBodyPermalinkAnchor(anchor) {
     if (!(anchor instanceof HTMLAnchorElement)) return false;
     if (anchor.querySelector("time")) return false;
+    if (anchor.getAttribute("data-ts")) return false;
+    if (anchor.matches('.c-timestamp, [class*="timestamp"]')) return false;
+    if (anchor.querySelector('[data-qa="timestamp_label"]')) return false;
 
     const bodyContainer = anchor.closest([
       '[data-qa="message-text"]',
@@ -274,7 +287,6 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       '[class*="p-rich_text"]',
       '[class*="rich_text"]',
       '[class*="rich-text"]',
-      '[data-stringify-type]',
       'blockquote',
       'pre',
     ].join(", "));
@@ -289,6 +301,9 @@ if (!globalThis.__piSlackContentScriptLoaded) {
 
     let score = 0;
     if (anchor.querySelector("time")) score += 100;
+    if (anchor.getAttribute("data-ts")) score += 120;
+    if (anchor.matches('.c-timestamp, [class*="timestamp"]')) score += 120;
+    if (anchor.querySelector('[data-qa="timestamp_label"]')) score += 80;
     if (anchor.closest('[data-qa*="timestamp"], [data-qa*="meta"], [data-qa*="header"], header')) score += 40;
 
     const aria = [anchor.getAttribute("aria-label"), anchor.title].filter(Boolean).join(" ").toLowerCase();
@@ -321,9 +336,40 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return bestScore >= 0 ? bestHref : undefined;
   }
 
+  function extractMessageTsFromAttributes(messageElement) {
+    if (!(messageElement instanceof HTMLElement)) return undefined;
+
+    const candidates = [
+      messageElement.getAttribute("data-msg-ts"),
+      messageElement.getAttribute("data-item-key"),
+      messageElement.getAttribute("data-ts"),
+    ];
+
+    for (const candidate of candidates) {
+      const ts = normalizeSlackTs(candidate || "");
+      if (ts) return ts;
+    }
+
+    const descendant = messageElement.querySelector('[data-ts], [data-msg-ts], [data-item-key]');
+    if (descendant instanceof HTMLElement) {
+      const ts = normalizeSlackTs(
+        descendant.getAttribute("data-ts") || descendant.getAttribute("data-msg-ts") || descendant.getAttribute("data-item-key") || "",
+      );
+      if (ts) return ts;
+    }
+
+    const idMatches = [...(messageElement.id || "").matchAll(/(\d{10}\.\d{6}|\d{16})/g)];
+    for (let index = idMatches.length - 1; index >= 0; index -= 1) {
+      const ts = normalizeSlackTs(idMatches[index]?.[1] || "");
+      if (ts) return ts;
+    }
+
+    return undefined;
+  }
+
   function extractMessageTs(messageElement) {
     const permalinkUrl = extractMessagePermalinkUrl(messageElement);
-    return parseSlackTsFromUrl(permalinkUrl);
+    return parseSlackTsFromUrl(permalinkUrl) || extractMessageTsFromAttributes(messageElement);
   }
 
   function parseReplyCountFromText(text) {
@@ -837,7 +883,7 @@ if (!globalThis.__piSlackContentScriptLoaded) {
       const permalinkUrl = extractMessagePermalinkUrl(element);
       if (permalinkUrl) permalinkCount += 1;
 
-      const messageTs = parseSlackTsFromUrl(permalinkUrl);
+      const messageTs = extractMessageTs(element);
       if (messageTs) messageTsCount += 1;
 
       rawMessages.push({
