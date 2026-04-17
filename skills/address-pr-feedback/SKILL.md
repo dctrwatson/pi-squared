@@ -42,42 +42,13 @@ bash <skill_dir>/scripts/render-feedback-item.sh <workdir>/normalized-feedback.j
 
 Read `normalized-feedback.json` or the raw payloads only if you need more detail than the helper outputs provide.
 
-If you cannot use the helper, gather manually:
-
-```bash
-set -euo pipefail
-gh auth status >/dev/null
-git rev-parse --is-inside-work-tree >/dev/null
-repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-pr=$(gh pr view --json number -q .number)
-workdir=$(mktemp -d /tmp/pr-feedback-XXXXXX)
-echo "REPO=$repo"
-echo "PR=$pr"
-echo "WORKDIR=$workdir"
-```
-
-If `gh pr view` fails because there is no PR for the current branch, ask the user for the PR number or URL.
-
-If the user gave a PR selector, resolve it explicitly first:
-
-```bash
-gh pr view <pr-selector> --json number,title,url
-```
+If the helper fails, inspect its output and debug the underlying `gh` or `jq` command rather than switching to a separate manual workflow.
 
 ## 2. Gather all relevant feedback
 
 You need the full feedback picture before deciding what to change.
 
-If you are gathering manually, fetch these sources:
-
-```bash
-gh pr view "$pr" --json number,title,url,baseRefName,headRefName,reviewDecision,isDraft > "$workdir/pr.json"
-gh api "repos/$repo/issues/$pr/comments?per_page=100" > "$workdir/issue-comments.json"
-gh api "repos/$repo/pulls/$pr/comments?per_page=100" > "$workdir/review-comments.json"
-gh api "repos/$repo/pulls/$pr/reviews?per_page=100" > "$workdir/reviews.json"
-```
-
-Treat them differently:
+The helper gathers these sources and keeps them separate:
 
 - `issue-comments.json`: general PR conversation comments
 - `review-comments.json`: inline code comments with file/line context
