@@ -16,13 +16,15 @@ The system is read-only with respect to Slack itself. It reads Slack threads and
 The current implementation provides:
 
 - a dedicated `pi-slack` launcher with a fixed session directory
-- a singleton local WebSocket bridge on `127.0.0.1:27183` by default
-- shared-secret authentication between Pi and Chrome
+- a local WebSocket bridge on `127.0.0.1` using a session-specific port by default
+- session pairing via a one-session pairing code shown by Pi
+- nonce/HMAC handshake between Chrome and Pi after pairing
 - a Slack-specific Pi system prompt and restricted tool set
+- explicit Chrome-side approval before each Slack read request
 - `slack_read_thread` for the currently open Slack thread
 - `slack_read_channel` for channel reads starting from a Slack permalink
 - paginated channel summarization with optional thread expansion
-- Chrome popup status and token setup
+- Chrome popup status, pairing setup, and approval window access
 - DOM-based extraction of Slack threads, composer draft text, and channel message ranges
 
 The current implementation does **not** provide:
@@ -31,6 +33,7 @@ The current implementation does **not** provide:
 - automatic sending in Slack
 - a workspace-installed Slack app
 - a standalone always-on daemon
+- long-lived Chrome-side credentials for Slack reads
 
 ## Repository layout
 
@@ -53,6 +56,8 @@ pi-squared/
       content-script.js
       popup.html
       popup.js
+      approve.html
+      approve.js
       README.md
       package.json
 ```
@@ -81,7 +86,7 @@ This layout keeps the Slack integration out of the repo's auto-loaded `extension
 | background.js         |
 +-----------+-----------+
             |
-            | WebSocket + shared secret
+            | WebSocket + pairing + approval gate
             v
 +-----------------------+
 | Pi Slack Extension    |
@@ -121,7 +126,7 @@ This gives `pi-slack` stable session storage independent of the current working 
 
 ### Trust boundary
 
-The launcher passes any extra arguments verbatim to `pi` via `"$@"`. An additional `-e` flag (e.g. `pi-slack -e /tmp/x.ts`) would load a second extension alongside the Slack extension. That extension runs with full Node.js access and could read the token file or inspect in-memory bridge state. Only use extra `-e` flags with extensions you fully trust. This is not a supported usage and is outside the normal operating model.
+The launcher passes any extra arguments verbatim to `pi` via `"$@"`. An additional `-e` flag (e.g. `pi-slack -e /tmp/x.ts`) would load a second extension alongside the Slack extension. That extension runs with full Node.js access and could inspect live bridge state or reveal the current pairing code. Only use extra `-e` flags with extensions you fully trust. This is not a supported usage and is outside the normal operating model.
 
 ## Pi extension architecture
 
@@ -134,10 +139,11 @@ The Pi extension owns the local bridge and defines the Slack-facing Pi behavior.
 It:
 
 - starts the WebSocket server
-- enforces singleton ownership through a fixed localhost port
-- creates or loads the shared secret token
-- authenticates the Chrome extension handshake
-- tracks the active Chrome connection
+- generates a fresh session id and session secret on startup
+- binds to a session-specific localhost port by default
+- exposes a pairing code for the current live session
+- authenticates the Chrome extension handshake using nonce/HMAC proof exchange
+- tracks the active Chrome connection for this Pi Slack session
 - exposes Slack read tools and commands to Pi
 - rewrites the system prompt so the session behaves as a Slack communications assistant rather than a coding agent
 - renames the session based on the Slack context that was read
@@ -152,11 +158,13 @@ On session start, the extension:
   - `slack_read_thread`
   - `slack_read_channel`
 - sets a default session name of `Pi Slack` if none exists
+- shows the bridge endpoint and reminds the user to reveal the pairing code for Chrome setup
 
 On shutdown, it:
 
 - closes the WebSocket server
 - disconnects Chrome
+- clears the active pairing code
 - rejects any pending requests
 
 ### Bridge defaults
@@ -164,38 +172,50 @@ On shutdown, it:
 Default values in the implementation:
 
 - host: `127.0.0.1`
-- port: `27183`
+- port: OS-assigned ephemeral port by default
 - protocol version: `1`
 - hello timeout: 5 seconds
-- default request timeout: 10 seconds
-- thread read timeout: 20 seconds
-- bounded channel range timeout: 60 seconds
-- paginated channel range timeout: 180 seconds
+- approval timeout budget added to request timeouts: 60 seconds
+- default request timeout: 70 seconds total
+- thread read timeout: 80 seconds total
+- bounded channel range timeout: 120 seconds total
+- paginated channel range timeout: 240 seconds total
 
 Overrides:
 
-- `PI_SLACK_PORT`
-- `PI_SLACK_TOKEN_FILE`
-
-Default token file:
-
-```text
-~/.config/pi-slack/token
-```
-
-If the token file does not exist, the extension creates one and writes it with mode `0600`.
+- `PI_SLACK_PORT` — bind to a fixed port instead of a session-specific ephemeral one
 
 ### Commands
 
 The extension currently registers these commands:
 
 - `/slack-status`
-- `/slack-status --show-token`
+- `/slack-status --show-pairing`
+- `/slack-status --show-token` — compatibility alias for `--show-pairing`
 - `/slack-ping`
 - `/slack-read-thread`
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max N] [--no-threads]`
 
 `/slack-read-thread` and `/slack-read-channel` inject a visible `slack-read` message into the session, using a custom renderer in the TUI.
+
+### Pairing
+
+Chrome does not persist a long-lived shared secret.
+
+Instead, each live `pi-slack` session creates:
+
+- a session id
+- a session secret
+- a session-specific bridge URL
+- a pairing code that encodes those values for the current session only
+
+The pairing code is revealed from Pi with:
+
+```text
+/slack-status --show-pairing
+```
+
+The user pastes that code into the Chrome popup. Chrome stores it in `chrome.storage.session`, not `chrome.storage.local`, so the pairing is session-scoped rather than a long-lived browser secret.
 
 ### Tools
 
@@ -242,6 +262,8 @@ Files:
 - `chrome-extensions/pi-slack/content-script.js`
 - `chrome-extensions/pi-slack/popup.html`
 - `chrome-extensions/pi-slack/popup.js`
+- `chrome-extensions/pi-slack/approve.html`
+- `chrome-extensions/pi-slack/approve.js`
 
 ### Manifest and permissions
 
@@ -267,22 +289,62 @@ The background worker is the bridge between Pi and Slack tabs.
 
 It is responsible for:
 
-- maintaining the authenticated WebSocket connection to Pi
+- maintaining the authenticated WebSocket connection to the currently paired Pi Slack session
 - reconnecting automatically when Pi is unavailable or restarted
 - sending heartbeat events every 20 seconds once authenticated
 - routing `getCurrentThread`, `getChannelRange`, and `getChannelRangeAll` requests
 - tracking Slack tabs and picking the active one for current-thread reads
 - opening temporary Slack tabs for permalink-based channel reads
 - restoring the previously active tab after temporary foreground work
-- exposing status and token setup flows to the popup
-- updating the extension action icon color for connection state
+- exposing pairing, status, and approval flows to the popup
+- updating the extension action icon color for connection state and pending approvals
 
 Connection state is stored in the background service worker, including:
 
 - socket lifecycle
-- hello/ack timestamps
+- pairing payload for the current Pi session
+- handshake nonce state
+- hello/challenge/ack timestamps
 - ping/pong timestamps
+- pending approval requests
 - last error
+
+### Pairing and authentication
+
+Chrome does not auto-authenticate to a fixed port with a long-lived token.
+
+Instead:
+
+1. the user pastes a Pi-generated pairing code into the popup
+2. the background worker stores that pairing in `chrome.storage.session`
+3. Chrome connects to the session-specific bridge URL from the pairing code
+4. Chrome sends `client_hello` with the session id and a client nonce
+5. Pi responds with `server_challenge` carrying a server nonce
+6. Chrome responds with `client_proof`, an HMAC over protocol version, session id, both nonces, and the role label
+7. Pi validates that proof and returns `hello_ack` containing its own HMAC proof
+8. Chrome verifies the server proof before marking the bridge authenticated
+
+This removes the previous behavior where Chrome sent a long-lived secret as the first WebSocket message.
+
+### Approval gate
+
+Every Slack read request from Pi requires explicit approval in Chrome before the browser will execute it.
+
+Applies to:
+
+- `getCurrentThread`
+- `getChannelRange`
+- `getChannelRangeAll`
+
+Approval flow:
+
+1. Pi sends a request over the authenticated bridge
+2. the background worker creates a pending approval entry
+3. Chrome opens or focuses `approve.html`
+4. the user chooses **Allow once** or **Deny**
+5. only after approval does the background worker read Slack DOM state and return the result
+
+If the user denies the request, Chrome returns a structured error such as `user_denied`. If the user never responds, Chrome returns `approval_timeout`.
 
 ### Active Slack tab selection
 
@@ -304,11 +366,12 @@ The background worker:
 2. opens a temporary Slack tab in the foreground
 3. waits for the page to load
 4. asks the content script to prepare the page if Slack shows an app-to-browser handoff screen
-5. harvests the requested channel messages
-6. optionally paginates through more messages
-7. optionally revisits thread URLs in the same temporary tab to expand replies for summary mode
-8. closes the temporary tab
-9. restores the previously active tab context
+5. waits for Chrome approval if the read has not already been approved
+6. harvests the requested channel messages
+7. optionally paginates through more messages
+8. optionally revisits thread URLs in the same temporary tab to expand replies for summary mode
+9. closes the temporary tab
+10. restores the previously active tab context
 
 This means permalink reads are not purely hidden background work; they temporarily take foreground focus and then restore it.
 
@@ -319,11 +382,25 @@ The popup is intentionally minimal.
 It supports:
 
 - viewing bridge status
-- entering and saving the shared secret token
-- resetting the stored token
+- entering and saving the current session pairing code
+- resetting the stored pairing
+- opening the approval window
 - running a simple connection test
 
-The token is stored in `chrome.storage.local` under `piSlackToken`.
+The pairing is stored in `chrome.storage.session`, not `chrome.storage.local`, so it is scoped to the current browser session and live Pi Slack session.
+
+### Approval window
+
+`approve.html` is a dedicated extension page for request approval.
+
+It shows:
+
+- each pending Slack read request
+- a concise summary of what will be read
+- timing metadata such as request age and timeout
+- **Allow once** and **Deny** controls
+
+The extension action icon turns yellow and shows a badge count while approvals are pending.
 
 ## Slack DOM extraction architecture
 
@@ -384,37 +461,48 @@ This preparation loop is what makes workspace-host permalinks and app handoff pa
 
 ## End-to-end data flows
 
-### Current thread read
+### Pairing and connection
 
 1. User launches `pi-slack`
-2. Pi extension starts the local bridge
-3. Chrome background connects and authenticates with the shared secret
-4. User asks Pi to read the current Slack thread
-5. Pi calls `slack_read_thread`
-6. Pi extension sends `getCurrentThread` over WebSocket
-7. Background worker routes the request to the active Slack tab
-8. Content script extracts the thread and composer draft
-9. Data flows back to Pi
-10. Pi normalizes the thread for model context and uses it to draft or refine a reply
+2. Pi extension starts the local bridge on a session-specific port
+3. User runs `/slack-status --show-pairing`
+4. User pastes the pairing code into the Chrome popup
+5. Chrome connects to the bridge URL from that pairing code
+6. Chrome and Pi complete the nonce/HMAC handshake
+7. The extension action icon turns green once authenticated
+
+### Current thread read
+
+1. User asks Pi to read the current Slack thread
+2. Pi calls `slack_read_thread`
+3. Pi extension sends `getCurrentThread` over WebSocket
+4. Chrome opens or focuses the approval window
+5. User approves the request in Chrome
+6. Background worker routes the request to the active Slack tab
+7. Content script extracts the thread and composer draft
+8. Data flows back to Pi
+9. Pi normalizes the thread for model context and uses it to draft or refine a reply
 
 ### Bounded channel range read
 
 1. User provides a Slack message permalink and a bounded request such as "next 20 messages"
 2. Pi calls `slack_read_channel` with `startUrl` and `limit`
 3. Pi extension sends `getChannelRange`
-4. Background worker opens a temporary Slack tab and prepares it
-5. Content script collects messages from the start permalink onward
-6. Background worker closes the temporary tab and returns the payload
-7. Pi formats the range into compact model-readable text
+4. Chrome asks for approval
+5. After approval, the background worker opens a temporary Slack tab and prepares it
+6. Content script collects messages from the start permalink onward
+7. Background worker closes the temporary tab and returns the payload
+8. Pi formats the range into compact model-readable text
 
 ### Paginated channel summarization
 
 1. User provides a Slack permalink and asks for a summary
 2. Pi calls `slack_read_channel` without `limit`
 3. Pi extension sends `getChannelRangeAll`
-4. Background worker repeatedly collects pages of messages using a cursor
-5. If thread expansion is enabled, the background worker revisits selected thread roots in the same temporary tab and attaches thread snapshots to the corresponding channel messages
-6. Pi formats the full result into a summary-oriented text block with optional nested thread replies
+4. Chrome asks for approval
+5. After approval, the background worker repeatedly collects pages of messages using a cursor
+6. If thread expansion is enabled, the background worker revisits selected thread roots in the same temporary tab and attaches thread snapshots to the corresponding channel messages
+7. Pi formats the full result into a summary-oriented text block with optional nested thread replies
 
 ## WebSocket protocol
 
@@ -422,7 +510,9 @@ The bridge uses a simple JSON protocol.
 
 Message categories:
 
-- `hello`
+- `client_hello`
+- `server_challenge`
+- `client_proof`
 - `hello_ack`
 - `request`
 - `response`
@@ -434,16 +524,36 @@ Chrome sends:
 
 - role `chrome`
 - protocol version `1`
-- shared secret token
+- session id
+- client nonce
 - extension version
 
-Pi validates the token and protocol version, then returns `hello_ack` with:
+Pi validates the protocol version and session id, then returns `server_challenge` with:
 
 - role `pi`
+- session id
+- server nonce
 - instance `pi-slack`
 - protocol version `1`
 
-Only one authenticated Chrome connection is kept active at a time. A newer valid Chrome connection replaces the previous one.
+Chrome then sends `client_proof`, which is an HMAC over:
+
+- protocol version
+- session id
+- client nonce
+- server nonce
+- role label `chrome`
+
+Pi validates that HMAC with the session secret, then returns `hello_ack` containing:
+
+- role `pi`
+- protocol version `1`
+- session id
+- server proof HMAC over the same fields but with role label `pi`
+
+Chrome verifies the server proof before treating the bridge as authenticated.
+
+Only one authenticated Chrome connection is kept active at a time per Pi Slack session. A newer valid Chrome connection replaces the previous one.
 
 ### Requests currently implemented
 
@@ -462,6 +572,8 @@ When Pi's request timeout fires it sends a Pi→Chrome message:
 
 Chrome looks up the matching `AbortController` in `pendingAbortControllers` and calls `.abort()`. Pagination loops and thread-expansion loops check the signal between iterations and bail early, still closing the temporary tab and restoring the active tab context.
 
+If a request is still waiting for user approval when cancellation arrives, Chrome removes the pending approval and rejects it.
+
 ### Events
 
 Chrome currently emits heartbeat events. Pi accepts them but does not currently surface them as a higher-level feature.
@@ -479,6 +591,9 @@ Responses use a structured error shape with a code and message. Common error cod
 - `no_channel_messages`
 - `missing_team_id`
 - `content_script_unavailable`
+- `user_denied`
+- `approval_timeout`
+- `approval_cancelled`
 
 ## Model-facing normalization
 
@@ -528,33 +643,40 @@ Session names are also updated from read results so saved sessions are easier to
 
 ### Browser origin enforcement
 
-The WebSocket server uses `verifyClient` to reject any connection whose `Origin` header is present but does not match `chrome-extension://`. No-origin clients (CLI tools, wscat) are still accepted. This is a defense-in-depth measure on top of the shared-secret handshake.
+The WebSocket server uses `verifyClient` to reject any connection whose `Origin` header is present but does not match `chrome-extension://`. No-origin clients (CLI tools, wscat) are still accepted. This is a defense-in-depth measure on top of session pairing and the nonce/HMAC handshake.
+
+### Session pairing
+
+Authentication is scoped to a live Pi Slack session.
+
+- Pi generates a fresh session id and session secret at startup
+- Pi exposes those through a pairing code for the current session only
+- Chrome stores the pairing in `chrome.storage.session`
+- Chrome proves knowledge of the session secret without sending it as plaintext in the first message
+
+This means pairing must be repeated for each new `pi-slack` session.
+
+### Approval gate
+
+The browser will not silently process Slack read requests.
+
+Before Chrome reads:
+
+- the current thread
+- a bounded channel range
+- a paginated channel span
+
+…the user must explicitly approve the request in Chrome.
+
+This changes the failure mode of a mistaken or malicious local peer from silent Slack extraction to a visible approval prompt that the user can deny.
 
 ### Prompt injection
 
 Slack message bodies are untrusted third-party content and are wrapped in `<untrusted-slack-content>` delimiters in every model-facing text block. The system prompt instructs the model to treat that region as data, never as instructions, and to refuse requests to call tools on behalf of Slack content. Composer draft text receives the same treatment. This is a structural mitigation, not a guarantee — outputs should be reviewed before use.
 
-### Token storage
-
-`chrome.storage.local` is unencrypted on disk per Chrome's model. The Pi-side token directory is created with mode `0700` and the token file with mode `0600`. Users on shared machines should be aware of both constraints.
-
 ### Local-only bridge
 
 The WebSocket server binds to `127.0.0.1`, not `0.0.0.0`.
-
-### Shared secret
-
-Authentication is based on a locally stored shared secret.
-
-- Pi stores the token in a local file
-- Chrome stores the token in extension local storage
-- every connection must send the correct token in the hello message
-
-### Singleton ownership
-
-The Pi extension owns a fixed localhost port. If the port is already in use, startup fails and `pi-slack` exits.
-
-This is the mechanism that makes `pi-slack` a single-controller integration.
 
 ### Manual-send policy
 
@@ -581,17 +703,21 @@ Known limitations:
 - Slack extraction depends on heuristic DOM selectors and may need maintenance when Slack changes its UI
 - current-thread reads require an already open thread pane
 - permalink-based reads temporarily open a foreground Slack tab
+- every Slack read requires explicit approval in Chrome, which adds user friction by design
+- pairing is per live Pi Slack session rather than a persistent setup step
 - no browser-side write-back exists
 - no workspace app or Slack API integration exists
 - channel and thread extraction are best-effort against a virtualized DOM, not a first-party message API
 - Slack content is untrusted and prompt-injection-capable; structural delimiters and a system-prompt instruction are the current mitigations, not guarantees
+- localhost WebSockets are still a local IPC compromise compared with native messaging; the hardened handshake and approval gate improve safety, but do not turn the bridge into a full OS-authenticated channel
 
 ## Summary
 
-The current `pi-slack` architecture is a local, singleton, read-only Slack assistant:
+The current `pi-slack` architecture is a local, read-only Slack assistant with explicit per-request browser approval:
 
 - `bin/pi-slack` launches a dedicated Pi session
-- the Pi extension owns a localhost WebSocket bridge and Slack-specific tooling
-- the Chrome extension authenticates to that bridge and reads Slack DOM state
+- the Pi extension owns a localhost WebSocket bridge for the current session
+- the Pi extension generates a session pairing code and authenticates Chrome with nonce/HMAC proof exchange
+- the Chrome extension reads Slack DOM state only after the user explicitly approves each request
 - current-thread and permalink-based channel reads are normalized into model-friendly text
 - Pi uses that context to produce replies and summaries for manual copy/paste back into Slack
