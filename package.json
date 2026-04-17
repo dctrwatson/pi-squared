@@ -26,7 +26,8 @@
     "check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/pi-slack/tsconfig.json",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "check:pi-slack": "node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/pi-slack/tsconfig.json"
+    "check:pi-slack": "node ./node_modules/typescript/bin/tsc --noEmit -p manual-extensions/pi-slack/tsconfig.json",
+    "test:pi-slack": "node --test tests/pi-slack/*.test.mjs"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
