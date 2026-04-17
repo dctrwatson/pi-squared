@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: Handles GitHub PR feedback end-to-end: reviews PR comments and inline threads, decides whether to reply or change code, groups related fixes into sensible commits, and posts replies on GitHub. Use when the user wants review feedback actually addressed on a PR, not just analyzed or drafted.
+description: "Handles GitHub PR feedback end-to-end: reviews PR comments and inline threads, decides whether to reply or change code, groups related fixes into sensible commits, and posts replies on GitHub. Use when the user wants review feedback actually addressed on a PR, not just analyzed or drafted."
 compatibility: Requires bash, git, GitHub CLI (`gh`), `jq`, a GitHub checkout, and permission to read the target PR. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
