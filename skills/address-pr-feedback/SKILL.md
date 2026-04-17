@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: Reviews GitHub pull request feedback, separates reply-only comments from comments that need code changes, groups related feedback into sensible patches, and posts responses on GitHub. Use whenever the user asks to address PR feedback, respond to review comments, fix requested changes on a GitHub PR, resolve code review threads, or work through inline comments and general PR discussion on the current branch PR. Use this skill when the user wants the feedback actually handled on GitHub, not merely analyzed or drafted.
+description: Handles GitHub PR feedback end-to-end: reviews PR comments and inline threads, decides whether to reply or change code, groups related fixes into sensible commits, and posts replies on GitHub. Use when the user wants review feedback actually addressed on a PR, not just analyzed or drafted.
 compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. The bundled helper script also requires Python 3. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
