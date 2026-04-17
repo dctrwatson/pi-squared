@@ -402,6 +402,30 @@ async function approvalSummaryForRequest(message) {
     };
   }
 
+  if (message.action === "debugCurrentThreadScan") {
+    const tabs = await getSlackTabsDetailed();
+    return {
+      title: "Debug current Slack thread extraction",
+      lines: [
+        ...summarizeTabForApproval(serializeTab(tabs.activeTab)),
+        `Slack tabs detected: ${tabs.count}`,
+        "Reads lightweight extractor diagnostics and sample rows for the open thread pane.",
+      ],
+    };
+  }
+
+  if (message.action === "debugCurrentChannelScan") {
+    const tabs = await getSlackTabsDetailed();
+    return {
+      title: "Debug current Slack channel extraction",
+      lines: [
+        ...summarizeTabForApproval(serializeTab(tabs.activeTab)),
+        `Slack tabs detected: ${tabs.count}`,
+        "Reads lightweight extractor diagnostics and sample rows for the active channel view.",
+      ],
+    };
+  }
+
   return {
     title: `Allow Pi Slack request: ${String(message.action)}`,
     lines: ["The connected Pi Slack session is asking Chrome to process a request."],
@@ -1356,6 +1380,64 @@ async function handleRequestMessage(socket, message) {
       } finally {
         state.pendingAbortControllers.delete(message.id);
       }
+      return;
+    }
+
+    if (message.action === "debugCurrentThreadScan") {
+      await requestUserApproval(message);
+      const result = await withExecutionTimeout(
+        message.action,
+        sendMessageToActiveSlackTab({ type: "pi-slack:debug-thread-scan" }),
+      );
+      if (!result.response.ok) {
+        sendSocketResponse(socket, message.id, {
+          ok: false,
+          error: result.response.error ?? {
+            code: "thread_debug_failed",
+            message: "The Slack content script failed to build a thread debug scan.",
+          },
+        });
+        return;
+      }
+
+      sendSocketResponse(socket, message.id, {
+        ok: true,
+        payload: {
+          ...result.response.payload,
+          activeTab: result.activeTab,
+          selectionRule: result.selectionRule,
+          slackTabCount: result.tabCount,
+        },
+      });
+      return;
+    }
+
+    if (message.action === "debugCurrentChannelScan") {
+      await requestUserApproval(message);
+      const result = await withExecutionTimeout(
+        message.action,
+        sendMessageToActiveSlackTab({ type: "pi-slack:debug-channel-scan" }),
+      );
+      if (!result.response.ok) {
+        sendSocketResponse(socket, message.id, {
+          ok: false,
+          error: result.response.error ?? {
+            code: "channel_debug_failed",
+            message: "The Slack content script failed to build a channel debug scan.",
+          },
+        });
+        return;
+      }
+
+      sendSocketResponse(socket, message.id, {
+        ok: true,
+        payload: {
+          ...result.response.payload,
+          activeTab: result.activeTab,
+          selectionRule: result.selectionRule,
+          slackTabCount: result.tabCount,
+        },
+      });
       return;
     }
 

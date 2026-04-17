@@ -1148,6 +1148,126 @@ if (!globalThis.__piSlackContentScriptLoaded) {
     return normalizeText(document.body?.innerText || "").slice(0, 800);
   }
 
+  function sampleMessagesForDebug(messages, limit = 3) {
+    return (messages || []).slice(0, limit).map((message, index) => ({
+      index,
+      author: message?.author,
+      timestamp: message?.timestamp,
+      messageTs: message?.messageTs,
+      hasPermalink: Boolean(message?.permalinkUrl),
+      replyCount: message?.replyCount,
+      textPreview: truncateForDebug(message?.text, 180),
+    }));
+  }
+
+  function truncateForDebug(text, maxChars = 180) {
+    const normalized = normalizeText(text || "");
+    if (normalized.length <= maxChars) return normalized;
+    return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+  }
+
+  async function buildDebugThreadScan() {
+    const threadRootDetails = await waitForThreadRootDetails(2_000);
+    const threadRoot = threadRootDetails.root;
+    const documentMeta = parseDocumentTitle();
+
+    if (!threadRoot) {
+      return {
+        ok: true,
+        payload: {
+          kind: "thread_debug",
+          url: window.location.href,
+          title: document.title,
+          parsedTitle: documentMeta.title,
+          workspace: documentMeta.workspace,
+          threadOpen: false,
+          diagnostics: {
+            rootSelector: threadRootDetails.matchedSelector,
+            rootCandidateCount: threadRootDetails.candidateCount,
+          },
+          extractionWarnings: ["thread_debug: no visible thread pane was found."],
+        },
+      };
+    }
+
+    const composerElement = findComposer(threadRoot);
+    const extract = extractMessagesDetailed(threadRoot, composerElement);
+    const diagnostics = {
+      rootSelector: threadRootDetails.matchedSelector,
+      rootCandidateCount: threadRootDetails.candidateCount,
+      composerPresent: Boolean(composerElement),
+      ...extract.diagnostics,
+    };
+
+    return {
+      ok: true,
+      payload: {
+        kind: "thread_debug",
+        url: window.location.href,
+        title: document.title,
+        parsedTitle: documentMeta.title,
+        workspace: documentMeta.workspace,
+        threadOpen: true,
+        diagnostics,
+        extractionWarnings: buildExtractionWarnings(diagnostics, "thread_debug"),
+        sampleMessages: sampleMessagesForDebug(extract.messages),
+        composerDraftPreview: truncateForDebug(composerElement ? getElementText(composerElement) : "", 180),
+      },
+    };
+  }
+
+  async function buildDebugChannelScan() {
+    const mainRootDetails = await waitForChannelRootDetails(2_000);
+    const mainRoot = mainRootDetails.root;
+    const documentMeta = parseDocumentTitle();
+
+    if (!mainRoot) {
+      return {
+        ok: true,
+        payload: {
+          kind: "channel_debug",
+          url: window.location.href,
+          title: document.title,
+          parsedTitle: documentMeta.title,
+          workspace: documentMeta.workspace,
+          channel: findChannelName() || undefined,
+          channelOpen: false,
+          diagnostics: {
+            rootSelector: mainRootDetails.matchedSelector,
+            rootCandidateCount: mainRootDetails.candidateCount,
+          },
+          extractionWarnings: ["channel_debug: no visible channel root was found."],
+        },
+      };
+    }
+
+    const composerElement = findComposer(mainRoot);
+    const extract = extractMessagesDetailed(mainRoot, composerElement);
+    const diagnostics = {
+      rootSelector: mainRootDetails.matchedSelector,
+      rootCandidateCount: mainRootDetails.candidateCount,
+      composerPresent: Boolean(composerElement),
+      ...extract.diagnostics,
+    };
+
+    return {
+      ok: true,
+      payload: {
+        kind: "channel_debug",
+        url: window.location.href,
+        title: document.title,
+        parsedTitle: documentMeta.title,
+        workspace: documentMeta.workspace,
+        channel: findChannelName() || undefined,
+        channelOpen: true,
+        diagnostics,
+        extractionWarnings: buildExtractionWarnings(diagnostics, "channel_debug"),
+        sampleMessages: sampleMessagesForDebug(extract.messages),
+        composerDraftPreview: truncateForDebug(composerElement ? getElementText(composerElement) : "", 180),
+      },
+    };
+  }
+
   function findBrowserFallbackControl() {
     const selectors = ['a[href]', 'button', '[role="button"]'];
     const positivePatterns = [
@@ -1393,6 +1513,36 @@ if (!globalThis.__piSlackContentScriptLoaded) {
             ok: false,
             error: {
               code: "channel_range_extraction_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        });
+      return true;
+    }
+
+    if (message.type === "pi-slack:debug-thread-scan") {
+      void buildDebugThreadScan()
+        .then((result) => sendResponse(result))
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "thread_debug_failed",
+              message: error instanceof Error ? error.message : String(error),
+            },
+          });
+        });
+      return true;
+    }
+
+    if (message.type === "pi-slack:debug-channel-scan") {
+      void buildDebugChannelScan()
+        .then((result) => sendResponse(result))
+        .catch((error) => {
+          sendResponse({
+            ok: false,
+            error: {
+              code: "channel_debug_failed",
               message: error instanceof Error ? error.message : String(error),
             },
           });

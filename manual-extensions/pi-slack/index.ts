@@ -1348,6 +1348,19 @@ async function readSlackChannelRangeAll(
 	return response.payload;
 }
 
+async function readSlackDebugScan(action: "debugCurrentThreadScan" | "debugCurrentChannelScan"): Promise<Record<string, unknown>> {
+	await ensureBridgeStarted();
+	const response = await requestChrome(action);
+	if (!isRecord(response.payload)) {
+		throw new BridgeError("bridge_error", `Chrome returned an invalid debug payload for ${action}.`);
+	}
+	return response.payload;
+}
+
+function formatSlackDebugPayload(title: string, payload: Record<string, unknown>): string {
+	return `${title}\n${JSON.stringify(payload, null, 2)}`;
+}
+
 function startupFailureMessage(): string {
 	if (state.startupError?.includes("EADDRINUSE")) {
 		return `Pi Slack could not start because ${state.wsUrl} is already in use. Another pi-slack instance is probably running.`;
@@ -1407,6 +1420,20 @@ export default function piSlack(pi: ExtensionAPI) {
 		text += `\n${body}`;
 		if (truncated) {
 			text += `\n${theme.fg("muted", "... expand to view the full Slack thread")}`;
+		}
+		return new Text(text, 0, 0);
+	});
+
+	pi.registerMessageRenderer("slack-debug", (message, options, theme) => {
+		const content = typeof message.content === "string" ? message.content : String(message.content ?? "");
+		const lines = content.split("\n");
+		const body = options.expanded ? content : lines.slice(0, 32).join("\n");
+		const truncated = !options.expanded && lines.length > 32;
+
+		let text = theme.fg("toolTitle", theme.bold("slack-debug"));
+		text += `\n${body}`;
+		if (truncated) {
+			text += `\n${theme.fg("muted", "... expand to view the full debug payload")}`;
 		}
 		return new Text(text, 0, 0);
 	});
@@ -1617,6 +1644,62 @@ export default function piSlack(pi: ExtensionAPI) {
 				}
 			} catch (error) {
 				const message = `Slack channel read failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
+			}
+		},
+	});
+
+	pi.registerCommand("slack-debug-thread-scan", {
+		description: "Collect a lightweight debug scan for the currently open Slack thread extractor",
+		handler: async (_args, ctx) => {
+			try {
+				const payload = await readSlackDebugScan("debugCurrentThreadScan");
+				const content = formatSlackDebugPayload("Slack thread debug scan", payload);
+				pi.sendMessage({
+					customType: "slack-debug",
+					content,
+					display: true,
+					details: payload,
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify("Slack thread debug scan added to the session.", "info");
+				} else {
+					writeStatus(content);
+				}
+			} catch (error) {
+				const message = `Slack thread debug scan failed: ${error instanceof Error ? error.message : String(error)}`;
+				if (ctx.hasUI) {
+					ctx.ui.notify(message, "error");
+				} else {
+					console.error(message);
+				}
+			}
+		},
+	});
+
+	pi.registerCommand("slack-debug-channel-scan", {
+		description: "Collect a lightweight debug scan for the active Slack channel extractor",
+		handler: async (_args, ctx) => {
+			try {
+				const payload = await readSlackDebugScan("debugCurrentChannelScan");
+				const content = formatSlackDebugPayload("Slack channel debug scan", payload);
+				pi.sendMessage({
+					customType: "slack-debug",
+					content,
+					display: true,
+					details: payload,
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify("Slack channel debug scan added to the session.", "info");
+				} else {
+					writeStatus(content);
+				}
+			} catch (error) {
+				const message = `Slack channel debug scan failed: ${error instanceof Error ? error.message : String(error)}`;
 				if (ctx.hasUI) {
 					ctx.ui.notify(message, "error");
 				} else {

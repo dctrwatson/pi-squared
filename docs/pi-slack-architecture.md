@@ -200,6 +200,8 @@ The extension currently registers these commands:
 - `/slack-ping`
 - `/slack-read-thread`
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max N] [--no-threads]`
+- `/slack-debug-thread-scan`
+- `/slack-debug-channel-scan`
 
 `/slack-read-thread` and `/slack-read-channel` inject a visible `slack-read` message into the session, using a custom renderer in the TUI.
 
@@ -392,7 +394,32 @@ It supports:
 - opening the approval window
 - running a simple connection test
 
+Developer-oriented extractor diagnostics are exposed through Pi commands rather than the popup:
+
+- `/slack-debug-thread-scan`
+- `/slack-debug-channel-scan`
+
 The pairing is stored in `chrome.storage.session`, not `chrome.storage.local`, so it is scoped to the current browser session and live Pi Slack session.
+
+### Extractor debug scans
+
+For live diagnosis of Slack DOM drift, Pi can request lightweight debug scans from Chrome.
+
+Chrome supports two debug actions:
+
+- current thread debug scan
+- current channel debug scan
+
+These scans return structured diagnostics such as:
+
+- chosen root selector
+- candidate and filtered row counts
+- permalink and `messageTs` coverage
+- fallback text extraction count
+- author backfill count
+- a few sample extracted rows with short text previews
+
+They are intended for debugging extractor behavior, not for normal summarization. Like other browser reads, they still require Chrome-side approval.
 
 ### Approval window
 

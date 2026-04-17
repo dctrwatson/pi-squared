@@ -99,6 +99,8 @@ Not implemented yet:
 - `/slack-ping` — ping the connected Chrome extension
 - `/slack-read-thread` — read the active Slack thread and add it to the session as a visible message
 - `/slack-read-channel <start-url> [--next N] [--until <end-url>] [--max <n>] [--no-threads]` — read channel messages from a Slack message link, either as a bounded window (`--next`) or as a paginated span suitable for summarization
+- `/slack-debug-thread-scan` — capture a lightweight extractor debug scan for the currently open Slack thread
+- `/slack-debug-channel-scan` — capture a lightweight extractor debug scan for the active Slack channel view
 - ask Pi to use `slack_read_thread` — read the active Slack thread plus any existing composer draft text
 - ask Pi to use `slack_read_channel` — read channel messages from a Slack permalink, either as a bounded range or as a larger paginated span for summarization
 
