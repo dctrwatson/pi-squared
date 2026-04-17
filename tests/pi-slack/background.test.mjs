@@ -7,7 +7,7 @@ import path from 'node:path';
 async function loadBackgroundExports() {
   const sourcePath = path.resolve('chrome-extensions/pi-slack/background.js');
   const source = await readFile(sourcePath, 'utf8');
-  const instrumented = `${source}\n;globalThis.__testExports = {\n  parseSlackContextFromUrl,\n  describeObservedSlackContext,\n  buildObservedThreadApprovalContext,\n  policyMatchesObservedContext,\n  summarizeChannelRangeScope,\n  classifyApprovalRequest,\n  normalizeSlackTs,\n  parseSlackMessageLink,\n  shouldClearPairingOnClose,\n};`;
+  const instrumented = `${source}\n;globalThis.__testExports = {\n  parsePairingCode,\n  parseSlackContextFromUrl,\n  describeObservedSlackContext,\n  buildObservedThreadApprovalContext,\n  policyMatchesObservedContext,\n  summarizeChannelRangeScope,\n  classifyApprovalRequest,\n  normalizeSlackTs,\n  parseSlackMessageLink,\n  shouldClearPairingOnClose,\n};`;
 
   const noop = () => {};
   const sandbox = {
@@ -154,6 +154,31 @@ test('normalizeSlackTs and parseSlackMessageLink handle Slack permalink variants
     messageTs: '1712345678.000100',
     threadTs: '1712345678.000100',
   });
+});
+
+test('parsePairingCode accepts a full copied pairing card and extracts the embedded code', () => {
+  const pairing = {
+    version: 1,
+    host: '127.0.0.1',
+    port: 27183,
+    sessionId: 'session-123',
+    secret: 'secret-abc',
+  };
+  const code = `pi-slack-pair:${Buffer.from(JSON.stringify(pairing), 'utf8').toString('base64url')}`;
+  const pastedCard = [
+    'slack-pair',
+    'Current Pi Slack pairing code:',
+    '',
+    'Keep this code confidential until it is rotated or the Pi Slack session exits.',
+    '',
+    'Pairing code:',
+    code,
+    '',
+    'Endpoint: ws://127.0.0.1:27183',
+    'Session: session-123',
+  ].join('\n');
+
+  assert.deepEqual(JSON.parse(JSON.stringify(background.parsePairingCode(pastedCard))), pairing);
 });
 
 test('shouldClearPairingOnClose only clears stale or rotated pairing failures', () => {

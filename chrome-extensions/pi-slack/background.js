@@ -68,7 +68,9 @@ function parsePairingCode(input) {
     throw new Error("Pairing code is empty.");
   }
 
-  const raw = trimmed.startsWith(PAIRING_CODE_PREFIX) ? trimmed.slice(PAIRING_CODE_PREFIX.length) : trimmed;
+  const embeddedCode = trimmed.match(/pi-slack-pair:[A-Za-z0-9_-]+/i)?.[0] ?? "";
+  const candidate = embeddedCode || trimmed;
+  const raw = candidate.startsWith(PAIRING_CODE_PREFIX) ? candidate.slice(PAIRING_CODE_PREFIX.length) : candidate;
   let parsed;
   try {
     parsed = JSON.parse(decodeBase64Url(raw));
