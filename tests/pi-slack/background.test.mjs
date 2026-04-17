@@ -7,7 +7,7 @@ import path from 'node:path';
 async function loadBackgroundExports() {
   const sourcePath = path.resolve('chrome-extensions/pi-slack/background.js');
   const source = await readFile(sourcePath, 'utf8');
-  const instrumented = `${source}\n;globalThis.__testExports = {\n  parsePairingCode,\n  parseSlackContextFromUrl,\n  describeObservedSlackContext,\n  buildObservedThreadApprovalContext,\n  policyMatchesObservedContext,\n  summarizeChannelRangeScope,\n  classifyApprovalRequest,\n  normalizeSlackTs,\n  parseSlackMessageLink,\n  shouldClearPairingOnClose,\n};`;
+  const instrumented = `${source}\n;globalThis.__testExports = {\n  extractEmbeddedPairingCode,\n  parsePairingCode,\n  parseSlackContextFromUrl,\n  describeObservedSlackContext,\n  buildObservedThreadApprovalContext,\n  policyMatchesObservedContext,\n  summarizeChannelRangeScope,\n  classifyApprovalRequest,\n  normalizeSlackTs,\n  parseSlackMessageLink,\n  shouldClearPairingOnClose,\n};`;
 
   const noop = () => {};
   const sandbox = {
@@ -179,6 +179,21 @@ test('parsePairingCode accepts a full copied pairing card and extracts the embed
   ].join('\n');
 
   assert.deepEqual(JSON.parse(JSON.stringify(background.parsePairingCode(pastedCard))), pairing);
+});
+
+test('parsePairingCode accepts wrapped pairing code with embedded newlines', () => {
+  const pairing = {
+    version: 1,
+    host: '127.0.0.1',
+    port: 27183,
+    sessionId: 'session-456',
+    secret: 'secret-def',
+  };
+  const code = `pi-slack-pair:${Buffer.from(JSON.stringify(pairing), 'utf8').toString('base64url')}`;
+  const wrapped = `${code.slice(0, 40)}\n${code.slice(40, 95)}\n${code.slice(95)}`;
+
+  assert.equal(background.extractEmbeddedPairingCode(wrapped), code);
+  assert.deepEqual(JSON.parse(JSON.stringify(background.parsePairingCode(wrapped))), pairing);
 });
 
 test('shouldClearPairingOnClose only clears stale or rotated pairing failures', () => {

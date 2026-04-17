@@ -62,14 +62,34 @@ function decodeBase64Url(value) {
   return atob(normalized + padding);
 }
 
+function extractEmbeddedPairingCode(input) {
+  const lines = String(input ?? "").split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const start = line.toLowerCase().indexOf(PAIRING_CODE_PREFIX);
+    if (start === -1) continue;
+
+    let code = line.slice(start).replace(/\s+/g, "");
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const nextLine = (lines[j] ?? "").trim();
+      if (!nextLine) continue;
+      if (!/^[A-Za-z0-9_-]+$/.test(nextLine)) break;
+      code += nextLine;
+    }
+    return code;
+  }
+  return "";
+}
+
 function parsePairingCode(input) {
   const trimmed = String(input ?? "").trim();
   if (!trimmed) {
     throw new Error("Pairing code is empty.");
   }
 
-  const embeddedCode = trimmed.match(/pi-slack-pair:[A-Za-z0-9_-]+/i)?.[0] ?? "";
-  const candidate = embeddedCode || trimmed;
+  const embeddedCode = extractEmbeddedPairingCode(trimmed);
+  const compact = trimmed.replace(/\s+/g, "");
+  const candidate = embeddedCode || compact;
   const raw = candidate.startsWith(PAIRING_CODE_PREFIX) ? candidate.slice(PAIRING_CODE_PREFIX.length) : candidate;
   let parsed;
   try {
