@@ -1,7 +1,7 @@
 ---
 name: address-pr-feedback
 description: Handles GitHub PR feedback end-to-end: reviews PR comments and inline threads, decides whether to reply or change code, groups related fixes into sensible commits, and posts replies on GitHub. Use when the user wants review feedback actually addressed on a PR, not just analyzed or drafted.
-compatibility: Requires git, GitHub CLI (`gh`), a GitHub checkout, and permission to read the target PR. The bundled helper script also requires Python 3. Pushing commits or posting replies also requires the corresponding repo permissions.
+compatibility: Requires bash, git, GitHub CLI (`gh`), `jq`, a GitHub checkout, and permission to read the target PR. Pushing commits or posting replies also requires the corresponding repo permissions.
 ---
 
 # Address PR Feedback
@@ -17,7 +17,7 @@ Use the current repo and current branch PR unless the user specifies a PR number
 Prefer the bundled helper first:
 
 ```bash
-python3 -B <skill_dir>/scripts/gather-pr-feedback.py [pr-selector]
+bash <skill_dir>/scripts/gather-pr-feedback.sh [pr-selector]
 ```
 
 The script prints `WORKDIR=`, `SUMMARY=`, and `NORMALIZED_JSON=` paths and writes:
@@ -29,7 +29,7 @@ The script prints `WORKDIR=`, `SUMMARY=`, and `NORMALIZED_JSON=` paths and write
 Read `feedback-summary.md` first, then build a planning worksheet from the normalized JSON:
 
 ```bash
-python3 -B <skill_dir>/scripts/build-feedback-worklist.py <workdir>/normalized-feedback.json
+bash <skill_dir>/scripts/build-feedback-worklist.sh <workdir>/normalized-feedback.json
 ```
 
 That writes `feedback-worklist.md` and `feedback-worklist.json`. Read the Markdown worklist before deciding what to change.
@@ -37,7 +37,7 @@ That writes `feedback-worklist.md` and `feedback-worklist.json`. Read the Markdo
 If you need full context for one specific thread or comment while drafting a reply or planning a patch, render just that item:
 
 ```bash
-python3 -B <skill_dir>/scripts/render-feedback-item.py <workdir>/normalized-feedback.json <item-id>
+bash <skill_dir>/scripts/render-feedback-item.sh <workdir>/normalized-feedback.json <item-id>
 ```
 
 Read `normalized-feedback.json` or the raw payloads only if you need more detail than the helper outputs provide.
@@ -176,7 +176,7 @@ By default, post replies on GitHub rather than drafting them in the conversation
 When a single thread is long or has back-and-forth from multiple people, use the item renderer so you can read only that thread without losing context:
 
 ```bash
-python3 -B <skill_dir>/scripts/render-feedback-item.py <workdir>/normalized-feedback.json <item-id>
+bash <skill_dir>/scripts/render-feedback-item.sh <workdir>/normalized-feedback.json <item-id>
 ```
 
 Every handled comment should have a clear response path:
@@ -261,6 +261,6 @@ Do not mix unrelated local changes into review-response commits. Ask the user wh
 
 ## Helper files
 
-- `scripts/gather-pr-feedback.py` — resolves the PR, fetches general comments plus inline review threads, normalizes them, and writes a summary you can read before planning changes
-- `scripts/build-feedback-worklist.py` — turns normalized feedback into a planning worksheet with stable item IDs, sorted so unresolved inline threads are easy to tackle first
-- `scripts/render-feedback-item.py` — prints full context for one or more specific worklist items so you can draft a reply or inspect a thread without rereading the whole PR summary
+- `scripts/gather-pr-feedback.sh` — resolves the PR, fetches general comments plus inline review threads, normalizes them with `jq`, and writes a summary you can read before planning changes
+- `scripts/build-feedback-worklist.sh` — turns normalized feedback into a planning worksheet with stable item IDs, sorted so unresolved inline threads are easy to tackle first
+- `scripts/render-feedback-item.sh` — prints full context for one or more specific worklist items so you can draft a reply or inspect a thread without rereading the whole PR summary
