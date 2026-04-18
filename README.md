@@ -10,4 +10,4 @@ Repository for maintaining skills and extensions that I use with [Pi](https://bu
 ## Extensions
 
 - [**qa**](extensions/qa.ts) — Extracts questions from assistant responses and presents an interactive wizard for answering them.
-- [**auto-commit**](extensions/auto-commit.ts) — Auto-commits after every interaction with AI-generated commit messages, and provides an `/undo` command to revert the last auto-commit.
+- [**auto-commit**](extensions/auto-commit.ts) — Auto-commits after every interaction with AI-generated commit messages, provides `/autocommit` to toggle it on/off, and `/undo` to revert the last auto-commit.

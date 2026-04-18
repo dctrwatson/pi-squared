@@ -6,6 +6,7 @@
  * - Commits all changed files via `git add -A`
  * - Commit message format: "pi: <summary of changes>"
  * - Uses claude-haiku-4-5 for commit summaries (falls back to user prompt)
+ * - /autocommit command to toggle auto-commit on/off
  * - /undo command to reset the last auto-commit
  * - Commits pending changes on session shutdown
  * - Silently does nothing if not in a git repo
@@ -101,6 +102,7 @@ export default function (pi: ExtensionAPI) {
 	let assistantText = "";
 	let userPrompt = "";
 	let inGitRepo = false;
+	let autoCommitEnabled = true;
 
 	// Get commit strategy
 	const getCommitStrategy = (): "per-interaction" | "per-turn" => {
@@ -114,8 +116,23 @@ export default function (pi: ExtensionAPI) {
 		userPrompt = "";
 	}
 
+	function persistAutoCommitState() {
+		pi.appendEntry("auto-commit-state", { enabled: autoCommitEnabled });
+	}
+
+	function restoreAutoCommitState(ctx: ExtensionContext) {
+		autoCommitEnabled = true;
+
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type === "custom" && entry.customType === "auto-commit-state") {
+				const data = entry.data as { enabled?: boolean } | undefined;
+				autoCommitEnabled = data?.enabled !== false;
+			}
+		}
+	}
+
 	// Check if we're in a git repo on session start; reset state on switch/fork
-	pi.on("session_start", async (event, _ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		if (event.reason !== "fork") {
 			const { code } = await pi.exec("git", ["rev-parse", "--git-dir"], { timeout: 1000 });
 			inGitRepo = code === 0;
@@ -123,6 +140,11 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			resetState();
 		}
+		restoreAutoCommitState(ctx);
+	});
+
+	pi.on("session_tree", async (_event, ctx) => {
+		restoreAutoCommitState(ctx);
 	});
 
 	// Capture user prompt before agent starts
@@ -183,7 +205,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Shared commit logic
 	async function performCommit(ctx: ExtensionContext, skipHaiku: boolean) {
-		if (!inGitRepo) return;
+		if (!inGitRepo || !autoCommitEnabled) return;
 
 		try {
 			// Stage all changes
@@ -233,6 +255,19 @@ export default function (pi: ExtensionAPI) {
 			// Silently ignore errors (e.g., nothing to commit)
 		}
 	}
+
+	// Register /autocommit command
+	pi.registerCommand("autocommit", {
+		description: "Toggle pi auto-commit on/off",
+		handler: async (_args, ctx) => {
+			autoCommitEnabled = !autoCommitEnabled;
+			persistAutoCommitState();
+
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Auto-commit ${autoCommitEnabled ? "enabled" : "disabled"}`, "info");
+			}
+		},
+	});
 
 	// Register /undo command
 	pi.registerCommand("undo", {
