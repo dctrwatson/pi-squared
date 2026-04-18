@@ -6,7 +6,7 @@
  * - Commits all changed files via `git add -A`
  * - Commit message format: "pi: <summary of changes>"
  * - Uses claude-haiku-4-5 for commit summaries (falls back to user prompt)
- * - /autocommit command to toggle auto-commit on/off
+ * - /autocommit command or Ctrl+Alt+A to toggle auto-commit on/off
  * - /undo command to reset the last auto-commit
  * - Commits pending changes on session shutdown
  * - Silently does nothing if not in a git repo
@@ -18,6 +18,7 @@
 
 import { complete, getModel } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key } from "@mariozechner/pi-tui";
 
 /**
  * Truncate text to a maximum length, keeping the first and last portions
@@ -256,17 +257,24 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function toggleAutoCommit(ctx: ExtensionContext) {
+		autoCommitEnabled = !autoCommitEnabled;
+		persistAutoCommitState();
+
+		if (ctx.hasUI) {
+			ctx.ui.notify(`Auto-commit ${autoCommitEnabled ? "enabled" : "disabled"}`, "info");
+		}
+	}
+
 	// Register /autocommit command
 	pi.registerCommand("autocommit", {
 		description: "Toggle pi auto-commit on/off",
-		handler: async (_args, ctx) => {
-			autoCommitEnabled = !autoCommitEnabled;
-			persistAutoCommitState();
+		handler: async (_args, ctx) => toggleAutoCommit(ctx),
+	});
 
-			if (ctx.hasUI) {
-				ctx.ui.notify(`Auto-commit ${autoCommitEnabled ? "enabled" : "disabled"}`, "info");
-			}
-		},
+	pi.registerShortcut(Key.ctrlAlt("a"), {
+		description: "Toggle pi auto-commit",
+		handler: async (ctx) => toggleAutoCommit(ctx),
 	});
 
 	// Register /undo command
