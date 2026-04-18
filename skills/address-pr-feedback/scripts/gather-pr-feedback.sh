@@ -59,6 +59,7 @@ done
 require_cmd gh
 require_cmd jq
 require_cmd mktemp
+require_cmd git
 
 gh auth status >/dev/null
 git rev-parse --is-inside-work-tree >/dev/null

@@ -10,9 +10,19 @@ Use this skill to work through GitHub PR feedback methodically. The default expe
 
 Some comments should lead to code changes. Some should lead to a thoughtful reply. Some should be grouped into one patch because they are really the same underlying issue. Others should stay separate so the history stays easy to review.
 
+Throughout this skill, `<skill_dir>` refers to the directory containing this `SKILL.md`. Resolve it once at the start (for example, via the path the harness used to load the skill) and reuse it for every helper invocation below.
+
 ## 1. Verify the repo and resolve the PR
 
 Use the current repo and current branch PR unless the user specifies a PR number or URL.
+
+Before gathering feedback, verify the local state:
+
+- `git status --porcelain` is empty, or the user has explicitly approved unrelated local changes. If dirty and unapproved, stop and ask whether to stash, commit, or discard.
+- `git fetch` the remote so your local refs match what reviewers see.
+- You are on the PR's head branch. After running the gather helper, cross-check `git rev-parse --abbrev-ref HEAD` against `.pr.headRefName` in `normalized-feedback.json`. If they differ, switch branches or ask the user before making any changes.
+
+These checks are cheap and prevent the most common failure mode: committing feedback fixes on top of a stale or wrong branch.
 
 Prefer the bundled helper first:
 
@@ -66,6 +76,13 @@ Turn the comments into a short action plan. Use `feedback-worklist.md` as the ch
 
 This step matters because not every comment deserves code churn.
 
+Treat `feedback-worklist.md` as a working document. For each item, fill in:
+
+- `Action:` — one of `reply`, `change`, `clarify`, or `already-addressed`. If grouping with another item, write `change (grouped with <other item id>)`.
+- `Notes:` — a one-line rationale or, for code changes, the file(s) you expect to touch and the proposed commit subject.
+
+Edit the file directly before making code changes. The filled-in worklist is the plan of record for the session and becomes the basis for your final summary in Section 7.
+
 ### What usually counts as reply-only
 
 Prefer replying without changing code when the best response is:
@@ -100,10 +117,14 @@ Keep them separate when they are independent, even if they were left by the same
 A good plan looks like:
 
 ```text
-1. [reply] Reviewer asks why this helper is package-private → explain test visibility constraint
-2. [change A] Two inline comments both point to missing nil handling in parser → one fix commit
-3. [change B] Rename a confusing option flag → separate commit
-4. [clarify] Reviewer suggests a broader refactor beyond PR scope → ask user whether to take it now
+- [ ] `thread:PRRT_abc` `parser.go:42` by @alice [unresolved]
+  - Summary: Missing nil handling when config block is absent
+  - Action: change (grouped with thread:PRRT_def)
+  - Notes: parser.go + parser_test.go; commit `fix(parser): handle nil config blocks`
+- [ ] `issue-comment:12345` by @bob [open]
+  - Summary: Why is this helper package-private?
+  - Action: reply
+  - Notes: visibility is test-only; explain.
 ```
 
 ## 4. Make code changes with clean commit boundaries
@@ -123,7 +144,7 @@ Before each commit:
 - run the most relevant test/check for the touched area when practical
 - stage only that change
 
-Then commit with a concise summary. Prefer a short imperative subject that names the area or fix, not the reviewer conversation.
+Then commit with a concise summary. Prefer a short imperative subject that names the area or fix, not the reviewer conversation (this repo does not strictly require Conventional Commits; the goal is a short imperative subject that names the area).
 
 Good examples:
 
@@ -177,18 +198,41 @@ Keep replies short and direct. The reviewer should not have to reverse-engineer 
 
 > I can take this either as a small rename in this PR or as part of the larger config cleanup. Which direction do you want here?
 
+**Longer code-change reply:**
+
+> I kept the fallback behavior, but moved the nil check earlier so the parser fails closed instead of silently continuing. I also added `TestLoadConfigMissingBlock` to cover the missing-config path.
+
 ## 6. Post comments on GitHub
 
-Posting replies is the default behavior for this skill.
+Posting replies is the default behavior for this skill. Use the bundled helper so inline replies land on the correct thread:
 
-- For general PR conversation, use `gh pr comment`.
-- For inline review comments, use the GitHub pull-request review comment reply API so the response stays attached to the right thread.
-- If a reply refers to code changes, push the relevant commits first so the comment truthfully describes the branch state.
-- If several comments are handled by one commit, reply to each affected thread individually and mention the shared fix in natural language.
+```bash
+bash <skill_dir>/scripts/post-reply.sh <workdir>/normalized-feedback.json <item-id> <body-file>
+```
 
-If the user asks for a preview first, draft the replies in the conversation before posting.
+- For `thread:*` items the helper posts through the review-comment reply API so the response stays attached to the thread. The worklist exposes a GraphQL node id, but the reply API needs the REST comment `databaseId`; the helper handles that lookup for you.
+- For `issue-comment:*` and `review:*` items the helper posts a new general PR comment via `gh pr comment`.
+- Pass `--dry-run` to see the resolved endpoint and body without posting.
+- By default, leave thread resolution to the reviewer; only resolve threads on the user's explicit instruction.
+
+If a reply refers to code changes, push the relevant commits first so the comment truthfully describes the branch state. If several comments are handled by one commit, reply to each affected thread individually and mention the shared fix in natural language.
+
+If the user asks for a preview first, draft the replies in the conversation before posting (see "Dry-run mode").
+
+### Dry-run mode
+
+If the user asks for a preview, analysis-only, or explicitly says "dry run":
+
+- Do not push commits. If it helps keep the work reviewable you may make local commits on the current branch, but prefer the lightest-weight local state that still lets the user review the proposed changes, and do not `git push`.
+- Do not post replies. Instead, write each drafted reply as a separate file in the workdir, named `draft-<item-id>.md`, and list the paths in your final summary.
+- Pass `--dry-run` to `post-reply.sh` when you want to show the user what the posting call would look like without executing it.
+- In Section 7's final summary, replace `Commits created` / `Replies posted` with `Commits staged (not pushed)` / `Replies drafted (not posted)` and point at the draft files.
+
+Resume normal posting behavior only after the user explicitly confirms.
 
 ## 7. Final response to the user
+
+Use the filled-in `feedback-worklist.md` as the source of truth for this summary; the `Plan`, `Commits created`, and `Replies posted` sections should map one-to-one to those rows.
 
 Return a concise summary with these sections when applicable:
 
@@ -216,7 +260,7 @@ If you intentionally did not push or post replies yet, say so explicitly.
 ## 8. Edge cases
 
 ### Outdated inline comments
-If a line comment refers to code that has already moved or changed, inspect whether the concern is still relevant. Often the right move is a short reply, not another code change.
+If a line comment refers to code that has already moved or changed, inspect whether the concern is still relevant. Outdated often still means relevant: the code may have moved, been reformatted, or been partially rewritten without addressing the underlying concern. Inspect the current code before dismissing the comment. Often the right move is a short reply, not another code change.
 
 ### Conflicting reviewer guidance
 If two comments point in opposite directions, stop and ask the user which tradeoff they want. Do not guess.
@@ -227,11 +271,15 @@ Prefer replying and scoping the current PR tightly unless the user explicitly wa
 ### Bot comments
 Treat bot findings as input, not automatic requirements. Apply the same reply-versus-change judgment.
 
+### Failing CI referenced by reviewers
+If reviewers reference failing checks, the `buildkite-pr-check-review` skill in this repo handles that triage.
+
 ### Dirty working tree
-Do not mix unrelated local changes into review-response commits. Ask the user whether to stash, commit, or discard unrelated work first.
+This should have been caught in Step 1. Do not mix unrelated local changes into review-response commits. If you find yourself here anyway, stop and ask the user whether to stash, commit, or discard unrelated work first.
 
 ## Helper files
 
 - `scripts/gather-pr-feedback.sh` — resolves the PR, fetches general comments plus inline review threads, normalizes them with `jq`, and writes a summary you can read before planning changes
 - `scripts/build-feedback-worklist.sh` — turns normalized feedback into a planning worksheet with stable item IDs, sorted so unresolved inline threads are easy to tackle first
 - `scripts/render-feedback-item.sh` — prints full context for one or more specific worklist items so you can draft a reply or inspect a thread without rereading the whole PR summary
+- `scripts/post-reply.sh` — posts replies for worklist items, handling the thread node-id to REST comment `databaseId` lookup for inline replies and supporting `--dry-run` for preview mode
