@@ -3,7 +3,7 @@ import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 const HOST = "127.0.0.1";
@@ -119,6 +119,7 @@ interface PendingRequest {
 	timeout: NodeJS.Timeout;
 	resolve: (response: ResponseMessage) => void;
 	reject: (error: Error) => void;
+	abortListener?: () => void;
 }
 
 interface BridgeState {
@@ -1037,10 +1038,8 @@ function serialize(message: ServerChallengeMessage | HelloAckMessage | RequestMe
 }
 
 function rejectAllPending(reason: string): void {
-	for (const [id, pending] of state.pendingRequests) {
-		clearTimeout(pending.timeout);
+	for (const pending of state.pendingRequests.values()) {
 		pending.reject(new Error(reason));
-		state.pendingRequests.delete(id);
 	}
 }
 
@@ -1104,10 +1103,13 @@ function getChromeRequestTimeoutMs(action: string): number {
 	return USER_APPROVAL_TIMEOUT_MS + getChromeExecutionTimeoutMs(action) + REQUEST_TIMEOUT_BUFFER_MS;
 }
 
-async function requestChrome(action: string, payload: Record<string, unknown> = {}): Promise<ResponseMessage> {
+async function requestChrome(action: string, payload: Record<string, unknown> = {}, signal?: AbortSignal): Promise<ResponseMessage> {
 	const chrome = state.activeChrome;
 	if (!chrome) {
 		throw new Error("Chrome extension is not connected.");
+	}
+	if (signal?.aborted) {
+		throw new Error(`Cancelled ${action}.`);
 	}
 
 	const id = randomUUID();
@@ -1120,32 +1122,66 @@ async function requestChrome(action: string, payload: Record<string, unknown> = 
 	};
 
 	return await new Promise<ResponseMessage>((resolve, reject) => {
-		const timeout = setTimeout(() => {
-			state.pendingRequests.delete(id);
-			// T16: Notify Chrome to abort this request before rejecting.
+		let settled = false;
+		let timeout: NodeJS.Timeout | undefined;
+		let abortListener: (() => void) | undefined;
+
+		const notifyChromeToCancel = () => {
 			try {
 				state.activeChrome?.socket.send(serialize({ type: "cancel", id }));
 			} catch { /* ignore — Chrome may be disconnected */ }
-			reject(new Error(
+		};
+
+		const cleanup = () => {
+			if (timeout) clearTimeout(timeout);
+			state.pendingRequests.delete(id);
+			if (signal && abortListener) {
+				signal.removeEventListener("abort", abortListener);
+			}
+		};
+
+		const settleResolve = (response: ResponseMessage) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(response);
+		};
+
+		const settleReject = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		};
+
+		timeout = setTimeout(() => {
+			// T16: Notify Chrome to abort this request before rejecting.
+			notifyChromeToCancel();
+			settleReject(new Error(
 				`Timed out waiting for Chrome response to ${action} after ${Math.round(timeoutMs / 1000)}s total ` +
 				`(approval ${Math.round(USER_APPROVAL_TIMEOUT_MS / 1000)}s + execution ${Math.round(getChromeExecutionTimeoutMs(action) / 1000)}s + buffer ${Math.round(REQUEST_TIMEOUT_BUFFER_MS / 1000)}s).`,
 			));
 		}, timeoutMs);
 
+		abortListener = () => {
+			notifyChromeToCancel();
+			settleReject(new Error(`Cancelled ${action}.`));
+		};
+		signal?.addEventListener("abort", abortListener, { once: true });
+
 		state.pendingRequests.set(id, {
 			action,
 			startedAt: Date.now(),
-			timeout,
-			resolve,
-			reject,
+			timeout: timeout!,
+			resolve: settleResolve,
+			reject: settleReject,
+			abortListener,
 		});
 
 		try {
 			chrome.socket.send(serialize(request));
 		} catch (error) {
-			clearTimeout(timeout);
-			state.pendingRequests.delete(id);
-			reject(error instanceof Error ? error : new Error(String(error)));
+			settleReject(error instanceof Error ? error : new Error(String(error)));
 		}
 	});
 }
@@ -1456,9 +1492,9 @@ async function ensureBridgeStarted(): Promise<void> {
 	return await startupPromise;
 }
 
-async function readCurrentSlackThread(): Promise<SlackThreadSnapshot> {
+async function readCurrentSlackThread(signal?: AbortSignal): Promise<SlackThreadSnapshot> {
 	await ensureBridgeStarted();
-	const response = await requestChrome("getCurrentThread");
+	const response = await requestChrome("getCurrentThread", {}, signal);
 	if (!isSlackThreadSnapshot(response.payload)) {
 		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack thread payload.");
 	}
@@ -1469,13 +1505,13 @@ async function readCurrentSlackThread(): Promise<SlackThreadSnapshot> {
 }
 
 // T13: cursor param removed — no caller passed it. Expose via CLI if continuation reads are needed later.
-async function readSlackChannelRange(startUrl: string, endUrl?: string, limit?: number): Promise<SlackChannelRangeSnapshot> {
+async function readSlackChannelRange(startUrl: string, endUrl?: string, limit?: number, signal?: AbortSignal): Promise<SlackChannelRangeSnapshot> {
 	await ensureBridgeStarted();
 	const response = await requestChrome("getChannelRange", {
 		startUrl,
 		...(endUrl ? { endUrl } : {}),
 		...(limit !== undefined ? { limit } : {}),
-	});
+	}, signal);
 	if (!isSlackChannelRangeSnapshot(response.payload)) {
 		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack channel range payload.");
 	}
@@ -1490,6 +1526,7 @@ async function readSlackChannelRangeAll(
 	endUrl?: string,
 	maxMessages = 500,
 	includeThreads = true,
+	signal?: AbortSignal,
 ): Promise<SlackChannelRangeSnapshot> {
 	await ensureBridgeStarted();
 	const response = await requestChrome("getChannelRangeAll", {
@@ -1498,7 +1535,7 @@ async function readSlackChannelRangeAll(
 		maxMessages,
 		includeThreads,
 		pageSize: CHANNEL_RANGE_PAGE_SIZE,
-	});
+	}, signal);
 	if (!isSlackChannelRangeSnapshot(response.payload)) {
 		throw new BridgeError("bridge_error", "Chrome returned an invalid Slack channel range payload.");
 	}
@@ -1508,9 +1545,9 @@ async function readSlackChannelRangeAll(
 	return response.payload;
 }
 
-async function readSlackDebugScan(action: "debugCurrentThreadScan" | "debugCurrentChannelScan"): Promise<Record<string, unknown>> {
+async function readSlackDebugScan(action: "debugCurrentThreadScan" | "debugCurrentChannelScan", signal?: AbortSignal): Promise<Record<string, unknown>> {
 	await ensureBridgeStarted();
-	const response = await requestChrome(action);
+	const response = await requestChrome(action, {}, signal);
 	if (!isRecord(response.payload)) {
 		throw new BridgeError("bridge_error", `Chrome returned an invalid debug payload for ${action}.`);
 	}
@@ -1616,11 +1653,11 @@ export default function piSlack(pi: ExtensionAPI) {
 		promptSnippet:
 			"Read the currently open Slack thread from Chrome Slack, including any existing draft text in the reply composer.",
 		promptGuidelines: [
-			"Use this tool when the user asks about the currently open Slack thread or wants Pi to refine text already typed into the Slack reply box.",
+			"Use slack_read_thread when the user asks about the currently open Slack thread or wants Pi to refine text already typed into the Slack reply box.",
 		],
 		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			const thread = await readCurrentSlackThread();
+		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+			const thread = await readCurrentSlackThread(signal ?? ctx.signal);
 			updateSessionNameFromThread(pi, thread);
 			const charBudget = getThreadCharBudget(ctx);
 			return {
@@ -1646,7 +1683,7 @@ export default function piSlack(pi: ExtensionAPI) {
 		promptSnippet:
 			"Read channel messages starting from a Slack message link, either as a bounded window or as a paginated span suitable for summarization.",
 		promptGuidelines: [
-			"Use this tool when the user pastes a Slack message link and wants channel context from that point.",
+			"Use slack_read_channel when the user pastes a Slack message link and wants channel context from that point.",
 			"Set limit for 'next N messages' or a bounded window between two permalinks.",
 			"Omit limit to paginate from startUrl through endUrl or to the present, which is useful before summarizing.",
 			"Leave includeThreads enabled unless the user wants a faster, channel-only fetch.",
@@ -1658,13 +1695,13 @@ export default function piSlack(pi: ExtensionAPI) {
 			maxMessages: Type.Optional(Type.Integer({ minimum: 1, description: "Paginated read: safety cap on total messages fetched (default 500)" })),
 			includeThreads: Type.Optional(Type.Boolean({ description: "Paginated read: whether to expand threaded replies (default true)" })),
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (params.limit !== undefined && params.maxMessages !== undefined) {
 				throw new Error("limit and maxMessages cannot be combined. Use limit for bounded reads, or omit limit for paginated reads.");
 			}
 
 			if (params.limit !== undefined) {
-				const range = await readSlackChannelRange(params.startUrl, params.endUrl, params.limit);
+				const range = await readSlackChannelRange(params.startUrl, params.endUrl, params.limit, signal ?? ctx.signal);
 				updateSessionNameFromChannelRange(pi, range);
 				const charBudget = getThreadCharBudget(ctx);
 				return {
@@ -1686,6 +1723,7 @@ export default function piSlack(pi: ExtensionAPI) {
 				params.endUrl,
 				params.maxMessages,
 				params.includeThreads !== false,
+				signal ?? ctx.signal,
 			);
 			updateSessionNameFromChannelRange(pi, snapshot);
 			const charBudget = getSummaryCharBudget(ctx);

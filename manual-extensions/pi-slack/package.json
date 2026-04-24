@@ -13,12 +13,16 @@
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "typebox": "*"
   },
   "dependencies": {
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1"
+    "@mariozechner/pi-ai": "^0.70.0",
+    "@mariozechner/pi-coding-agent": "^0.70.0",
+    "@mariozechner/pi-tui": "^0.70.0",
+    "@types/ws": "^8.18.1",
+    "typebox": "^1.1.32"
   }
 }

@@ -32,14 +32,13 @@
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "@mariozechner/pi-tui": "*"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "^0.70.0",
     "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*",
+    "typebox": "^1.1.32",
     "typescript": "^5.7.2"
   }
 }

@@ -257,19 +257,28 @@ export default function (pi: ExtensionAPI) {
 		try {
 			skillContent = fs.readFileSync(skillCommand.sourceInfo.path, "utf-8");
 		} catch {
-			ctx.ui.notify(`Failed to read skill file: ${skillCommand.sourceInfo.path}`, "error");
+			const message = `Failed to read skill file: ${skillCommand.sourceInfo.path}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "error");
+			else console.error(message);
 			return { action: "handled" as const };
 		}
 
 		const task = taskText || "Execute the skill instructions.";
 		const modeLabel = mode === "fork" ? "forked" : "isolated";
-		ctx.ui.setStatus("isolated-skill", `Running skill:${skillName} (${modeLabel})...`);
+		if (ctx.hasUI) {
+			ctx.ui.setStatus("isolated-skill", `Running skill:${skillName} (${modeLabel})...`);
+		}
 
 		// Get current session file for fork mode
 		const sessionFile = mode === "fork" ? ctx.sessionManager.getSessionFile() ?? undefined : undefined;
 		if (mode === "fork" && !sessionFile) {
-			ctx.ui.setStatus("isolated-skill", "");
-			ctx.ui.notify(`Cannot fork: no active session file. Use --isolated instead.`, "error");
+			const message = "Cannot fork: no active session file. Use --isolated instead.";
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("isolated-skill", undefined);
+				ctx.ui.notify(message, "error");
+			} else {
+				console.error(message);
+			}
 			return { action: "handled" as const };
 		}
 
@@ -286,14 +295,18 @@ export default function (pi: ExtensionAPI) {
 				signal: controller.signal,
 			});
 
-			ctx.ui.setStatus("isolated-skill", "");
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("isolated-skill", undefined);
+			}
 
 			const isError = result.exitCode !== 0 || result.stopReason === "error";
 			const output = result.output || result.errorMessage || result.stderr || "(no output)";
 			const usageStr = formatUsage(result.usage, result.model);
 
 			if (isError) {
-				ctx.ui.notify(`Skill ${skillName} failed: ${result.errorMessage || result.stderr || "unknown error"}`, "error");
+				const message = `Skill ${skillName} failed: ${result.errorMessage || result.stderr || "unknown error"}`;
+				if (ctx.hasUI) ctx.ui.notify(message, "error");
+				else console.error(message);
 			}
 
 			// Inject result as a message — only the output, not the skill instructions
@@ -309,8 +322,13 @@ export default function (pi: ExtensionAPI) {
 
 			return { action: "handled" as const };
 		} catch (err: any) {
-			ctx.ui.setStatus("isolated-skill", "");
-			ctx.ui.notify(`Skill ${skillName} error: ${err.message}`, "error");
+			const message = `Skill ${skillName} error: ${err.message}`;
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("isolated-skill", undefined);
+				ctx.ui.notify(message, "error");
+			} else {
+				console.error(message);
+			}
 			return { action: "handled" as const };
 		}
 	});

@@ -221,9 +221,11 @@ export default function (pi: ExtensionAPI) {
 					editor.setText(existingAnswer);
 				}
 
+				let cachedWidth: number | undefined;
 				let cachedLines: string[] | undefined;
 
 				function refresh() {
+					cachedWidth = undefined;
 					cachedLines = undefined;
 					tui.requestRender();
 				}
@@ -343,17 +345,18 @@ export default function (pi: ExtensionAPI) {
 				let _focused = false;
 
 				function render(width: number): string[] {
-					if (cachedLines) return cachedLines;
+					if (cachedLines && cachedWidth === width) return cachedLines;
 
+					const safeWidth = Math.max(1, width);
 					const lines: string[] = [];
-					const add = (s: string) => lines.push(truncateToWidth(s, width));
+					const add = (s: string) => lines.push(truncateToWidth(s, safeWidth));
 
 					const total = state.questions.length;
 					const current = state.currentIndex;
 					const currentQ = state.questions[current];
 
 					// Top border
-					add(theme.fg("accent", "─".repeat(width)));
+					add(theme.fg("accent", "─".repeat(safeWidth)));
 
 					// Header: Title + Progress dots
 					const title = theme.fg("accent", theme.bold(" Answering Questions "));
@@ -386,7 +389,7 @@ export default function (pi: ExtensionAPI) {
 						const qNum = `Q${i + 1}`;
 						
 						// Truncate question text for sidebar
-						const maxQLen = width - 12;
+						const maxQLen = Math.max(8, safeWidth - 12);
 						let qText = (q.question.split("\n")[0] ?? ""); // First line only for sidebar
 						if (qText.length > maxQLen) {
 							qText = qText.substring(0, maxQLen - 3) + "...";
@@ -402,13 +405,13 @@ export default function (pi: ExtensionAPI) {
 
 					// Separator
 					lines.push("");
-					add(theme.fg("dim", "─".repeat(width)));
+					add(theme.fg("dim", "─".repeat(safeWidth)));
 					lines.push("");
 
 					// Current question (full text, word-wrapped)
 					const qPrefix = `Q${current + 1}: `;
 					const indent = " ".repeat(qPrefix.length + 1); // +1 for leading space
-					const wrapWidth = width - indent.length;
+					const wrapWidth = Math.max(1, safeWidth - indent.length);
 					const questionLines = (currentQ?.question ?? "").split("\n");
 					let firstLine = true;
 					for (const qLine of questionLines) {
@@ -430,7 +433,7 @@ export default function (pi: ExtensionAPI) {
 					// Answer editor
 					lines.push("");
 					add(` ${theme.fg("muted", "Your answer:")}`);
-					const editorLines = editor.render(width - 2);
+					const editorLines = editor.render(Math.max(1, safeWidth - 2));
 					for (const line of editorLines) {
 						add(` ${line}`);
 					}
@@ -445,8 +448,9 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// Bottom border
-					add(theme.fg("accent", "─".repeat(width)));
+					add(theme.fg("accent", "─".repeat(safeWidth)));
 
+					cachedWidth = width;
 					cachedLines = lines;
 					return lines;
 				}
@@ -454,6 +458,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					render,
 					invalidate: () => {
+						cachedWidth = undefined;
 						cachedLines = undefined;
 					},
 					handleInput,

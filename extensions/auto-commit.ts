@@ -63,7 +63,7 @@ async function generateCommitSummary(
 					},
 				],
 			},
-			{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 100 }
+			{ apiKey: auth.apiKey, headers: auth.headers, maxTokens: 100, signal: ctx.signal }
 		);
 
 		const summary = response.content
@@ -210,12 +210,13 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			// Stage all changes
-			const { code: addCode } = await pi.exec("git", ["add", "-A"], { timeout: 5000 });
+			const { code: addCode } = await pi.exec("git", ["add", "-A"], { timeout: 5000, signal: ctx.signal });
 			if (addCode !== 0) return;
 
 			// Check if there are any staged changes to commit
 			const { code: diffCode } = await pi.exec("git", ["diff", "--cached", "--quiet"], {
 				timeout: 5000,
+				signal: ctx.signal,
 			});
 			if (diffCode === 0) {
 				// Exit code 0 = no staged changes
@@ -240,6 +241,7 @@ export default function (pi: ExtensionAPI) {
 			// Commit the changes
 			const { code: commitCode } = await pi.exec("git", ["commit", "-m", commitMessage], {
 				timeout: 5000,
+				signal: ctx.signal,
 			});
 
 			if (ctx.hasUI) {
