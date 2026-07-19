@@ -10,10 +10,12 @@
  * 3. Submits formatted Q&A pairs back to the conversation
  */
 
-import { complete, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader, rawKeyHint } from "@mariozechner/pi-coding-agent";
-import { Editor, type EditorTheme, type Focusable, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+// Pi's ModelRegistry currently supplies dynamically configured models and auth;
+// migrate to its Models instance when that API is exposed, then drop compat.
+import { complete, parseJsonWithRepair, type UserMessage } from "@earendil-works/pi-ai/compat";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, rawKeyHint } from "@earendil-works/pi-coding-agent";
+import { Editor, type EditorTheme, type Focusable, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const EXTRACTION_SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering from the user.
 
@@ -54,11 +56,122 @@ interface QAState {
 	currentIndex: number;
 }
 
+const MAX_QUESTIONS = 20;
+const MAX_QUESTION_CHARS = 12_000;
+
+type ExtractionModel = NonNullable<ExtensionContext["model"]>;
+type ExtractionAuth = {
+    apiKey?: string;
+    headers?: Record<string, string>;
+    env?: Record<string, string>;
+};
+
+const EXTRACTION_MODEL_PREFERENCES = [
+    ["openai", "gpt-5.6-luna"],
+    ["anthropic", "claude-haiku-4-5"],
+] as const;
+
+function hasUsableRequestAuth(auth: ExtractionAuth): boolean {
+    if (auth.apiKey?.trim()) return true;
+    return Object.entries(auth.headers ?? {}).some(([name, value]) =>
+        ["authorization", "cf-aig-authorization", "x-api-key"].includes(name.toLowerCase()) && value.trim(),
+    );
+}
+
+export async function selectExtractionModel(
+    activeModel: ExtractionModel,
+    modelRegistry: Pick<ExtensionContext["modelRegistry"], "find" | "getApiKeyAndHeaders">,
+): Promise<{ model: ExtractionModel; auth?: ExtractionAuth }> {
+    for (const [provider, modelId] of EXTRACTION_MODEL_PREFERENCES) {
+        const model = modelRegistry.find(provider, modelId);
+        if (!model) continue;
+        if (model.provider === activeModel.provider && model.id === activeModel.id) {
+            return { model: activeModel };
+        }
+
+        const auth = await modelRegistry.getApiKeyAndHeaders(model);
+        if (auth.ok && hasUsableRequestAuth(auth)) {
+            return { model, auth };
+        }
+    }
+
+    return { model: activeModel };
+}
+
+function extractJsonArrayCandidates(text: string): string[] {
+	const candidates: string[] = [];
+	for (let start = text.indexOf("["); start !== -1; start = text.indexOf("[", start + 1)) {
+		let depth = 0;
+		let inString = false;
+		let escaped = false;
+		for (let index = start; index < text.length; index++) {
+			const char = text[index];
+			if (inString) {
+				if (escaped) escaped = false;
+				else if (char === "\\") escaped = true;
+				else if (char === '"') inString = false;
+				continue;
+			}
+			if (char === '"') inString = true;
+			else if (char === "[") depth++;
+			else if (char === "]") {
+				depth--;
+				if (depth === 0) {
+					candidates.push(text.slice(start, index + 1));
+					break;
+				}
+			}
+		}
+	}
+	return candidates;
+}
+
+function questionsFromJsonArray(value: unknown): ExtractedQuestion[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+
+    const seen = new Set<string>();
+    const questions: ExtractedQuestion[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== "object" || typeof (item as { question?: unknown }).question !== "string") continue;
+        const question = (item as { question: string }).question.trim();
+        if (!question || question.length > MAX_QUESTION_CHARS || seen.has(question)) continue;
+        seen.add(question);
+        questions.push({ question });
+        if (questions.length >= MAX_QUESTIONS) break;
+    }
+    return questions;
+}
+
+function parseExtractionResponse(responseText: string): { questions: ExtractedQuestion[]; valid: boolean } {
+	const direct = responseText.trim();
+	const candidates = [direct, ...extractJsonArrayCandidates(direct)];
+    let foundJsonArray = false;
+
+	for (const candidate of candidates) {
+		try {
+            const questions = questionsFromJsonArray(parseJsonWithRepair<unknown>(candidate));
+            if (!questions) continue;
+            foundJsonArray = true;
+            if (questions.length > 0 || candidate.trim() === "[]") {
+                return { questions, valid: true };
+            }
+		} catch {
+			// Try the next JSON candidate.
+		}
+	}
+    return { questions: [], valid: foundJsonArray };
+}
+
+export function parseExtractedQuestions(responseText: string): ExtractedQuestion[] {
+    return parseExtractionResponse(responseText).questions;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("qa", {
 		description: "Extract and answer questions from the last assistant message",
 		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
+			if (ctx.mode !== "tui") {
+				if (ctx.hasUI) ctx.ui.notify("/qa requires TUI mode", "error");
 				return;
 			}
 
@@ -96,15 +209,9 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Try to find claude-haiku-4-5 for extraction, fall back to current model
-			const haiku = ctx.modelRegistry.find("anthropic", "claude-haiku-4-5");
-			let extractionModel = ctx.model;
-			if (haiku) {
-				const haikuAuth = await ctx.modelRegistry.getApiKeyAndHeaders(haiku);
-				if (haikuAuth.ok) {
-					extractionModel = haiku;
-				}
-			}
+            // Prefer Luna, then Haiku, when each has request credentials; otherwise keep the active model.
+            const selection = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+            const extractionModel = selection.model;
 
 			// Extract questions with loader UI
 			const assistantText = lastAssistantText;
@@ -115,14 +222,24 @@ export default function (pi: ExtensionAPI) {
 					theme,
 					`Extracting questions using ${extractionModel.id}...`,
 				);
-				loader.onAbort = () => done(null);
+				let completed = false;
+				const finish = (value: ExtractedQuestion[] | null) => {
+					if (completed) return;
+					completed = true;
+					done(value);
+				};
+				loader.onAbort = () => finish(null);
 
 				const doExtract = async () => {
-					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-					if (!auth.ok) {
-						extractionError = `No API key available for ${extractionModel.id}`;
-						return null;
-					}
+                    let auth = selection.auth;
+                    if (!auth) {
+                        const resolvedAuth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
+                        if (!resolvedAuth.ok) {
+                            extractionError = `No API key available for ${extractionModel.id}`;
+                            return null;
+                        }
+                        auth = resolvedAuth;
+                    }
 
 					const userMessage: UserMessage = {
 						role: "user",
@@ -133,48 +250,38 @@ export default function (pi: ExtensionAPI) {
 					const response = await complete(
 						extractionModel,
 						{ systemPrompt: EXTRACTION_SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+						{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
 					);
 
 					if (response.stopReason === "aborted") {
 						return null;
 					}
+                    if (response.stopReason === "error") {
+                        throw new Error(response.errorMessage ?? "Question extraction request failed");
+                    }
 
 					const responseText = response.content
 						.filter((c): c is { type: "text"; text: string } => c.type === "text")
 						.map((c) => c.text)
 						.join("");
 
-					// Strip markdown code fences before parsing
-					const cleaned = responseText
-						.replace(/^```(?:json)?\s*\n?/gm, "")
-						.replace(/\n?```\s*$/gm, "");
+                    // Strip markdown code fences before parsing.
+                    const cleaned = responseText
+                        .replace(/^```(?:json)?\s*\n?/gm, "")
+                        .replace(/\n?```\s*$/gm, "");
+                    const parsed = parseExtractionResponse(cleaned);
+                    if (!parsed.valid) {
+                        throw new Error(`${extractionModel.id} returned an invalid question list`);
+                    }
 
-					try {
-						const parsed = JSON.parse(cleaned);
-						if (Array.isArray(parsed)) {
-							return parsed as ExtractedQuestion[];
-						}
-						return [];
-					} catch {
-						// Try to extract JSON array from response if it has extra text
-						const jsonMatch = cleaned.match(/\[[\s\S]*\]/);
-						if (jsonMatch) {
-							try {
-								return JSON.parse(jsonMatch[0]) as ExtractedQuestion[];
-							} catch {
-								return [];
-							}
-						}
-						return [];
-					}
+                    return parsed.questions;
 				};
 
 				doExtract()
-					.then(done)
+					.then(finish)
 					.catch((err) => {
 						extractionError = err instanceof Error ? err.message : String(err);
-						done(null);
+						finish(null);
 					});
 
 				return loader;
@@ -185,7 +292,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (questions === null) {
+			if (questions === null || questions === undefined) {
 				ctx.ui.notify("Cancelled", "info");
 				return;
 			}
@@ -221,26 +328,28 @@ export default function (pi: ExtensionAPI) {
 					editor.setText(existingAnswer);
 				}
 
+				let cachedWidth: number | undefined;
 				let cachedLines: string[] | undefined;
 
 				function refresh() {
+					cachedWidth = undefined;
 					cachedLines = undefined;
 					tui.requestRender();
 				}
 
+				function saveAnswer(index: number, value: string) {
+					const text = value.trim();
+					if (text) state.answers.set(index, text);
+					else state.answers.delete(index);
+				}
+
 				function saveCurrentAnswer() {
-					const text = editor.getText().trim();
-					if (text) {
-						state.answers.set(state.currentIndex, text);
-					}
+					saveAnswer(state.currentIndex, editor.getText());
 				}
 
 				function advanceToNext(submittedValue?: string) {
-					// Save the submitted value if provided, otherwise get from editor
-					const text = (submittedValue ?? editor.getText()).trim();
-					if (text) {
-						state.answers.set(state.currentIndex, text);
-					}
+					// Save the submitted value if provided, otherwise get from editor.
+					saveAnswer(state.currentIndex, submittedValue ?? editor.getText());
 
 					// Find next unanswered question after current
 					let nextIndex = -1;
@@ -274,7 +383,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				// Enter saves answer and advances to next unanswered question
-				// (Shift+Enter or \+Enter adds newlines for multi-line answers)
+				// Shift+Enter adds newlines for multi-line answers.
 				editor.onSubmit = (value) => {
 					advanceToNext(value);
 				};
@@ -343,17 +452,18 @@ export default function (pi: ExtensionAPI) {
 				let _focused = false;
 
 				function render(width: number): string[] {
-					if (cachedLines) return cachedLines;
+					if (cachedLines && cachedWidth === width) return cachedLines;
 
+					const safeWidth = Math.max(1, width);
 					const lines: string[] = [];
-					const add = (s: string) => lines.push(truncateToWidth(s, width));
+					const add = (s: string) => lines.push(truncateToWidth(s, safeWidth));
 
 					const total = state.questions.length;
 					const current = state.currentIndex;
 					const currentQ = state.questions[current];
 
 					// Top border
-					add(theme.fg("accent", "─".repeat(width)));
+					add(theme.fg("accent", "─".repeat(safeWidth)));
 
 					// Header: Title + Progress dots
 					const title = theme.fg("accent", theme.bold(" Answering Questions "));
@@ -386,7 +496,7 @@ export default function (pi: ExtensionAPI) {
 						const qNum = `Q${i + 1}`;
 						
 						// Truncate question text for sidebar
-						const maxQLen = width - 12;
+						const maxQLen = Math.max(8, safeWidth - 12);
 						let qText = (q.question.split("\n")[0] ?? ""); // First line only for sidebar
 						if (qText.length > maxQLen) {
 							qText = qText.substring(0, maxQLen - 3) + "...";
@@ -402,13 +512,13 @@ export default function (pi: ExtensionAPI) {
 
 					// Separator
 					lines.push("");
-					add(theme.fg("dim", "─".repeat(width)));
+					add(theme.fg("dim", "─".repeat(safeWidth)));
 					lines.push("");
 
 					// Current question (full text, word-wrapped)
 					const qPrefix = `Q${current + 1}: `;
 					const indent = " ".repeat(qPrefix.length + 1); // +1 for leading space
-					const wrapWidth = width - indent.length;
+					const wrapWidth = Math.max(1, safeWidth - indent.length);
 					const questionLines = (currentQ?.question ?? "").split("\n");
 					let firstLine = true;
 					for (const qLine of questionLines) {
@@ -430,7 +540,7 @@ export default function (pi: ExtensionAPI) {
 					// Answer editor
 					lines.push("");
 					add(` ${theme.fg("muted", "Your answer:")}`);
-					const editorLines = editor.render(width - 2);
+					const editorLines = editor.render(Math.max(1, safeWidth - 2));
 					for (const line of editorLines) {
 						add(` ${line}`);
 					}
@@ -445,8 +555,9 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// Bottom border
-					add(theme.fg("accent", "─".repeat(width)));
+					add(theme.fg("accent", "─".repeat(safeWidth)));
 
+					cachedWidth = width;
 					cachedLines = lines;
 					return lines;
 				}
@@ -454,6 +565,7 @@ export default function (pi: ExtensionAPI) {
 				return {
 					render,
 					invalidate: () => {
+						cachedWidth = undefined;
 						cachedLines = undefined;
 					},
 					handleInput,
@@ -468,7 +580,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			});
 
-			if (result === null) {
+			if (result === null || result === undefined) {
 				ctx.ui.notify("Cancelled", "info");
 				return;
 			}

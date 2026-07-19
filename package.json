@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "description": "Pi extensions and skills",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -23,21 +26,22 @@
     ]
   },
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "node ./node_modules/typescript/bin/tsc --noEmit",
     "clean": "echo 'nothing to clean'",
-    "build": "echo 'nothing to build'"
+    "build": "echo 'nothing to build'",
+    "test": "npm run test:extensions",
+    "test:extensions": "node --experimental-strip-types --test tests/extensions/*.test.mjs"
   },
   "peerDependencies": {
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "^0.65.0",
-    "@mariozechner/pi-tui": "*",
-    "@sinclair/typebox": "*",
+    "@earendil-works/pi-ai": "^0.80.7",
+    "@earendil-works/pi-coding-agent": "^0.80.7",
+    "@earendil-works/pi-tui": "^0.80.7",
+    "typebox": "^1.1.32",
     "typescript": "^5.7.2"
   }
 }

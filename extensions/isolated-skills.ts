@@ -22,9 +22,14 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { getMarkdownTheme, keyHint } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+
+const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_STDERR_BYTES = 16 * 1024;
+const MAX_SUBPROCESS_STREAM_BYTES = 2 * 1024 * 1024;
+const SKILL_TIMEOUT_MS = 10 * 60_000;
 
 interface SkillRunResult {
 	skillName: string;
@@ -45,6 +50,53 @@ interface SkillRunResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	outputTruncated?: boolean;
+	stderrTruncated?: boolean;
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, middle), "utf8") <= maxBytes) low = middle;
+		else high = middle - 1;
+	}
+	return text.slice(0, low);
+}
+
+export function truncateOutput(text: string, maxBytes = MAX_OUTPUT_BYTES): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+
+	const suffix = "\n\n[Output truncated to fit the context limit.]";
+	const suffixBytes = Buffer.byteLength(suffix, "utf8");
+	if (maxBytes <= suffixBytes) return truncateUtf8(suffix, Math.max(0, maxBytes));
+	return truncateUtf8(text, maxBytes - suffixBytes) + suffix;
+}
+
+function appendBounded(current: string, chunk: string, maxBytes: number, label: string): { text: string; truncated: boolean } {
+	if (!chunk) return { text: current, truncated: false };
+	if (Buffer.byteLength(current, "utf8") >= maxBytes) {
+		const marker = `[${label} truncated.]`;
+		return {
+			text: current.includes(marker) ? current : truncateOutput(current, maxBytes).replace("[Output truncated to fit the context limit.]", marker),
+			truncated: true,
+		};
+	}
+	const combined = current + chunk;
+	if (Buffer.byteLength(combined, "utf8") <= maxBytes) return { text: combined, truncated: false };
+	return {
+		text: truncateOutput(combined, maxBytes).replace("[Output truncated to fit the context limit.]", `[${label} truncated.]`),
+		truncated: true,
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function numberOrZero(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function formatTokens(count: number): string {
@@ -94,7 +146,6 @@ interface RunOptions {
 async function runSkillInSubprocess(opts: RunOptions): Promise<SkillRunResult> {
 	const { skillContent, skillName, task, mode, sessionFile, cwd, signal, onProgress } = opts;
 
-	// Write skill content to temp file for --append-system-prompt
 	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-skill-"));
 	const promptFile = path.join(tmpDir, `skill-${skillName}.md`);
 	await fs.promises.writeFile(promptFile, skillContent, { encoding: "utf-8", mode: 0o600 });
@@ -114,18 +165,14 @@ async function runSkillInSubprocess(opts: RunOptions): Promise<SkillRunResult> {
 			"--mode",
 			"json",
 			"-p",
-			"--no-skills", // Don't load skills in subprocess
-			"--no-extensions", // Clean environment: just skill + tools
+			"--no-skills",
+			"--no-extensions",
 			"--append-system-prompt",
 			promptFile,
 		];
 
-		if (mode === "fork" && sessionFile) {
-			args.push("--fork", sessionFile);
-		} else {
-			args.push("--no-session");
-		}
-
+		if (mode === "fork" && sessionFile) args.push("--fork", sessionFile);
+		else args.push("--no-session");
 		args.push(task);
 
 		const exitCode = await new Promise<number>((resolve) => {
@@ -134,46 +181,92 @@ async function runSkillInSubprocess(opts: RunOptions): Promise<SkillRunResult> {
 				cwd,
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
+				detached: process.platform !== "win32",
 			});
-
 			let buffer = "";
+			let stdoutBytes = 0;
+			let settled = false;
+			let terminationRequested = false;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
+			let runTimer: ReturnType<typeof setTimeout> | undefined;
+			let abortListener: (() => void) | undefined;
+
+			const finish = (code: number | null, signalName: NodeJS.Signals | null) => {
+				if (settled) return;
+				settled = true;
+				if (killTimer) clearTimeout(killTimer);
+				if (runTimer) clearTimeout(runTimer);
+				if (signal && abortListener) signal.removeEventListener("abort", abortListener);
+				if (buffer.trim()) processLine(buffer);
+				resolve(code ?? (signalName || terminationRequested ? 1 : 0));
+			};
+
+			const killProcess = (signalName: NodeJS.Signals) => {
+				try {
+					if (process.platform !== "win32" && proc.pid) process.kill(-proc.pid, signalName);
+					else proc.kill(signalName);
+				} catch {
+					// The process may have already exited.
+				}
+			};
+
+			const terminate = (stopReason: "aborted" | "error", message: string) => {
+				if (terminationRequested || settled) return;
+				terminationRequested = true;
+				result.stopReason = stopReason;
+				result.errorMessage = message;
+				killProcess("SIGTERM");
+				killTimer = setTimeout(() => killProcess("SIGKILL"), 5000);
+			};
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
-				let event: any;
+				let event: unknown;
 				try {
 					event = JSON.parse(line);
 				} catch {
 					return;
 				}
+				if (!event || typeof event !== "object") return;
+				const record = event as Record<string, unknown>;
+				if (record.type !== "message_end" || !isRecord(record.message) || record.message.role !== "assistant") return;
 
-				if (event.type === "message_end" && event.message) {
-					const msg = event.message;
-					if (msg.role === "assistant") {
-						result.usage.turns++;
-						for (const part of msg.content || []) {
-							if (part.type === "text") {
-								result.output = part.text;
-								onProgress?.(part.text);
-							}
-						}
-						const usage = msg.usage;
-						if (usage) {
-							result.usage.input += usage.input || 0;
-							result.usage.output += usage.output || 0;
-							result.usage.cacheRead += usage.cacheRead || 0;
-							result.usage.cacheWrite += usage.cacheWrite || 0;
-							result.usage.cost += usage.cost?.total || 0;
-							result.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!result.model && msg.model) result.model = msg.model;
-						if (msg.stopReason) result.stopReason = msg.stopReason;
-						if (msg.errorMessage) result.errorMessage = msg.errorMessage;
-					}
+				const msg = record.message;
+				result.usage.turns++;
+				const output = (Array.isArray(msg.content) ? msg.content : [])
+					.filter(isRecord)
+					.filter((part) => part.type === "text")
+					.map((part) => (typeof part.text === "string" ? part.text : ""))
+					.join("");
+				if (output) {
+					const truncated = truncateOutput(output);
+					result.output = truncated;
+					result.outputTruncated ||= truncated !== output;
+					onProgress?.(truncated);
+				}
+				if (isRecord(msg.usage)) {
+					result.usage.input += numberOrZero(msg.usage.input);
+					result.usage.output += numberOrZero(msg.usage.output);
+					result.usage.cacheRead += numberOrZero(msg.usage.cacheRead);
+					result.usage.cacheWrite += numberOrZero(msg.usage.cacheWrite);
+					result.usage.cost += isRecord(msg.usage.cost) ? numberOrZero(msg.usage.cost.total) : 0;
+					result.usage.contextTokens = numberOrZero(msg.usage.totalTokens);
+				}
+				if (!result.model && typeof msg.model === "string") result.model = msg.model;
+				if (!terminationRequested && typeof msg.stopReason === "string") result.stopReason = msg.stopReason;
+				if (!terminationRequested && typeof msg.errorMessage === "string") {
+					const truncated = truncateOutput(msg.errorMessage);
+					result.errorMessage = truncated;
+					result.outputTruncated ||= truncated !== msg.errorMessage;
 				}
 			};
 
 			proc.stdout.on("data", (data) => {
+				stdoutBytes += Buffer.byteLength(data);
+				if (stdoutBytes > MAX_SUBPROCESS_STREAM_BYTES) {
+					terminate("error", "Skill subprocess produced too much output.");
+					return;
+				}
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
@@ -181,37 +274,33 @@ async function runSkillInSubprocess(opts: RunOptions): Promise<SkillRunResult> {
 			});
 
 			proc.stderr.on("data", (data) => {
-				result.stderr += data.toString();
+				const appended = appendBounded(result.stderr, data.toString(), MAX_STDERR_BYTES, "stderr");
+				result.stderr = appended.text;
+				result.stderrTruncated ||= appended.truncated;
 			});
 
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(buffer);
-				resolve(code ?? 0);
+			proc.on("close", finish);
+			proc.on("error", (error) => {
+				if (settled) return;
+				result.stopReason = "error";
+				result.errorMessage = error.message;
+				finish(1, null);
 			});
 
-			proc.on("error", () => resolve(1));
-
-			if (signal) {
-				const killProc = () => {
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
-			}
+			abortListener = () => terminate("aborted", "Skill run cancelled.");
+			if (signal?.aborted) abortListener();
+			else signal?.addEventListener("abort", abortListener, { once: true });
+			runTimer = setTimeout(() => terminate("error", `Skill run timed out after ${Math.round(SKILL_TIMEOUT_MS / 60_000)} minutes.`), SKILL_TIMEOUT_MS);
 		});
 
 		result.exitCode = exitCode;
 		return result;
 	} finally {
 		try {
-			fs.unlinkSync(promptFile);
-		} catch {}
-		try {
-			fs.rmdirSync(tmpDir);
-		} catch {}
+			await fs.promises.rm(tmpDir, { recursive: true, force: true });
+		} catch {
+			// Cleanup failure must not hide the skill result.
+		}
 	}
 }
 
@@ -219,18 +308,27 @@ async function runSkillInSubprocess(opts: RunOptions): Promise<SkillRunResult> {
  * Parse --fork or --isolated flag from the beginning of task text.
  * Returns the mode and remaining text.
  */
-function parseFlags(taskText: string): { mode: "isolated" | "fork" | null; rest: string } {
+export function parseFlags(taskText: string): { mode: "isolated" | "fork" | null; rest: string } {
 	const trimmed = taskText.trim();
-	if (trimmed.startsWith("--fork")) {
-		return { mode: "fork", rest: trimmed.slice("--fork".length).trim() };
-	}
-	if (trimmed.startsWith("--isolated")) {
-		return { mode: "isolated", rest: trimmed.slice("--isolated".length).trim() };
-	}
-	return { mode: null, rest: trimmed };
+	const match = trimmed.match(/^(--fork|--isolated)(?:\s+|$)/);
+	if (!match) return { mode: null, rest: trimmed };
+	return {
+		mode: match[1] === "--fork" ? "fork" : "isolated",
+		rest: trimmed.slice(match[0].length).trim(),
+	};
+}
+
+function isFailedSkillRun(result: SkillRunResult): boolean {
+	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
 export default function (pi: ExtensionAPI) {
+	const activeControllers = new Set<AbortController>();
+
+	pi.on("session_shutdown", async () => {
+		for (const controller of activeControllers) controller.abort();
+	});
+
 	pi.on("input", async (event, ctx) => {
 		const text = event.text.trim();
 
@@ -257,46 +355,65 @@ export default function (pi: ExtensionAPI) {
 		try {
 			skillContent = fs.readFileSync(skillCommand.sourceInfo.path, "utf-8");
 		} catch {
-			ctx.ui.notify(`Failed to read skill file: ${skillCommand.sourceInfo.path}`, "error");
+			const message = `Failed to read skill file: ${skillCommand.sourceInfo.path}`;
+			if (ctx.hasUI) ctx.ui.notify(message, "error");
+			else console.error(message);
 			return { action: "handled" as const };
 		}
 
 		const task = taskText || "Execute the skill instructions.";
 		const modeLabel = mode === "fork" ? "forked" : "isolated";
-		ctx.ui.setStatus("isolated-skill", `Running skill:${skillName} (${modeLabel})...`);
+		if (ctx.hasUI) {
+			ctx.ui.setStatus("isolated-skill", `Running skill:${skillName} (${modeLabel})...`);
+		}
 
 		// Get current session file for fork mode
 		const sessionFile = mode === "fork" ? ctx.sessionManager.getSessionFile() ?? undefined : undefined;
 		if (mode === "fork" && !sessionFile) {
-			ctx.ui.setStatus("isolated-skill", "");
-			ctx.ui.notify(`Cannot fork: no active session file. Use --isolated instead.`, "error");
+			const message = "Cannot fork: no active session file. Use --isolated instead.";
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("isolated-skill", undefined);
+				ctx.ui.notify(message, "error");
+			} else {
+				console.error(message);
+			}
 			return { action: "handled" as const };
 		}
 
-		try {
-			const controller = new AbortController();
+		const controller = new AbortController();
+		const abortFromContext = () => controller.abort();
+		activeControllers.add(controller);
+		if (ctx.signal?.aborted) abortFromContext();
+		else ctx.signal?.addEventListener("abort", abortFromContext, { once: true });
 
+		try {
 			const result = await runSkillInSubprocess({
 				skillContent,
 				skillName,
 				task,
 				mode,
 				sessionFile,
-				cwd: ctx.cwd ?? process.cwd(),
+				cwd: ctx.cwd,
 				signal: controller.signal,
+				onProgress: () => {
+					if (ctx.hasUI) ctx.ui.setStatus("isolated-skill", `Running skill:${skillName} (${modeLabel})...`);
+				},
 			});
 
-			ctx.ui.setStatus("isolated-skill", "");
+			if (ctx.hasUI) ctx.ui.setStatus("isolated-skill", undefined);
 
-			const isError = result.exitCode !== 0 || result.stopReason === "error";
-			const output = result.output || result.errorMessage || result.stderr || "(no output)";
+			const isError = isFailedSkillRun(result);
+			const output = isError
+				? result.errorMessage || result.stderr || result.output || "(no output)"
+				: result.output || "(no output)";
 			const usageStr = formatUsage(result.usage, result.model);
 
 			if (isError) {
-				ctx.ui.notify(`Skill ${skillName} failed: ${result.errorMessage || result.stderr || "unknown error"}`, "error");
+				const message = `Skill ${skillName} failed: ${result.errorMessage || result.stderr || "unknown error"}`;
+				if (ctx.hasUI) ctx.ui.notify(message, "error");
+				else console.error(message);
 			}
 
-			// Inject result as a message — only the output, not the skill instructions
 			pi.sendMessage(
 				{
 					customType: "isolated-skill",
@@ -308,10 +425,18 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			return { action: "handled" as const };
-		} catch (err: any) {
-			ctx.ui.setStatus("isolated-skill", "");
-			ctx.ui.notify(`Skill ${skillName} error: ${err.message}`, "error");
+		} catch (err: unknown) {
+			const message = `Skill ${skillName} error: ${err instanceof Error ? err.message : String(err)}`;
+			if (ctx.hasUI) {
+				ctx.ui.setStatus("isolated-skill", undefined);
+				ctx.ui.notify(message, "error");
+			} else {
+				console.error(message);
+			}
 			return { action: "handled" as const };
+		} finally {
+			activeControllers.delete(controller);
+			ctx.signal?.removeEventListener("abort", abortFromContext);
 		}
 	});
 
@@ -324,7 +449,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const { result, usageStr } = details;
-		const isError = result.exitCode !== 0 || result.stopReason === "error";
+		const isError = isFailedSkillRun(result);
 		const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 		const modeLabel = result.mode === "fork" ? "forked" : "isolated";
 
