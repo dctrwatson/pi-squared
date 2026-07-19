@@ -13,6 +13,7 @@ Requires Node.js 22.19.0 or newer.
 ## Extensions
 
 - [**qa**](extensions/qa.ts) — Extracts questions from assistant responses and presents an interactive wizard for answering them.
+- [**handoff**](extensions/handoff.ts) — Starts a fresh linked session with the latest complete assistant response, or `/handoff generate` creates a full-context handoff draft.
 - [**bash-tool-interceptor**](extensions/bash-tool-interceptor/) — Prepends steering wrappers to the model Bash `PATH` so Python tooling uses `uv` without unsafe command rewrites.
 - [**skill-loader**](extensions/skill-loader.ts) — `/skill-loader` interactively chooses skills from roots in `~/.pi/agent/skill-loader.json` without changing Pi settings or persisting the selection.
 - [**prevent-idle**](extensions/prevent-idle.ts) — On macOS, holds a `kIOPMAssertionTypePreventUserIdleSystemSleep` assertion through `osascript` while Pi is working, then releases it when the agent settles.
