@@ -1,0 +1,39 @@
+{
+  "repo": "octo/example",
+  "pr": {
+    "number": 17,
+    "headRefName": "feature/address-feedback"
+  },
+  "review_threads": [
+    {
+      "thread_id": "PRRT_kwDOExample123",
+      "root_comment_id": 9001,
+      "path": "src/parser.go",
+      "line": 42,
+      "status": "unresolved",
+      "comments": [{
+        "id": 9001,
+        "author": "alice",
+        "body": "Handle nil config.",
+        "created_at": "2026-04-17T10:00:00Z",
+        "url": "https://github.com/octo/example/pull/17#discussion_r9001"
+      }]
+    }
+  ],
+  "issue_comments": [{
+    "id": 7001,
+    "author": "bob",
+    "body": "Why package-private?",
+    "created_at": "2026-04-17T11:00:00Z",
+    "updated_at": "2026-04-17T11:00:00Z",
+    "url": "https://github.com/octo/example/pull/17#issuecomment-7001"
+  }],
+  "reviews": [{
+    "id": 8001,
+    "author": "carol",
+    "state": "COMMENTED",
+    "body": "Looks good overall.",
+    "submitted_at": "2026-04-17T12:00:00Z",
+    "url": "https://github.com/octo/example/pull/17#pullrequestreview-8001"
+  }]
+}
