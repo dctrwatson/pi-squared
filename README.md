@@ -1,6 +1,8 @@
 # π²
 
-Repository for maintaining skills and extensions that I use with [Pi](https://buildwithpi.ai/)
+Repository for maintaining skills and extensions that I use with [Pi](https://buildwithpi.ai/).
+
+Requires Node.js 22.19.0 or newer.
 
 ## Skills
 
@@ -10,4 +12,6 @@ Repository for maintaining skills and extensions that I use with [Pi](https://bu
 ## Extensions
 
 - [**qa**](extensions/qa.ts) — Extracts questions from assistant responses and presents an interactive wizard for answering them.
-- [**auto-commit**](extensions/auto-commit.ts) — Auto-commits after every interaction with AI-generated commit messages, and provides an `/undo` command to revert the last auto-commit.
+- [**bash-tool-interceptor**](extensions/bash-tool-interceptor/) — Prepends steering wrappers to the model Bash `PATH` so Python tooling uses `uv` without unsafe command rewrites.
+- [**skill-loader**](extensions/skill-loader.ts) — `/skill-loader` interactively chooses skills from roots in `~/.pi/agent/skill-loader.json` without changing Pi settings or persisting the selection.
+- [**prevent-idle**](extensions/prevent-idle.ts) — On macOS, holds a `kIOPMAssertionTypePreventUserIdleSystemSleep` assertion through `osascript` while Pi is working, then releases it when the agent settles.
