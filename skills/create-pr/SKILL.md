@@ -10,18 +10,21 @@ compatibility: Requires git, GitHub CLI (`gh`), push access to the repo, and a G
 
 This skill is for GitHub repos. If `git`/`gh` fails because the directory is not a GitHub checkout or `gh` is not authenticated, stop and tell the user what needs to be fixed.
 
-Run both helper scripts (pass optional base branch as arg):
+Run the context script first (pass optional base branch as arg):
 
 ```bash
 bash <skill_dir>/gather-context.sh [base_branch]
 ```
 
+The script outputs: BRANCHES, EXISTING PR, COMMITS, and RECENT PR TITLES. Note the resolved `base:` value from BRANCHES, then pass it to the diff script to avoid a redundant API call:
+
 ```bash
-bash <skill_dir>/gather-diff.sh [base_branch]
+bash <skill_dir>/gather-diff.sh <resolved_base>
 ```
 
-The first script outputs: BRANCHES, EXISTING PR, COMMITS, and RECENT PR TITLES.
-The second script outputs: DIFF STAT and DIFF. They are separate to avoid large diffs truncating the metadata.
+The diff script outputs: DIFF STAT and DIFF. They are run separately to avoid large diffs truncating the metadata.
+
+- If the diff is very large (truncated output), rely on DIFF STAT for an overview and inspect individual files with `git diff <base>...HEAD -- <path>`.
 
 - If the first script errors with `Current branch IS the base branch` or `No commits between`, stop and tell the user.
 - If the user did not specify a base branch and the branch appears to be stacked or targeted at a non-default base, confirm the base branch before continuing.
@@ -66,11 +69,11 @@ If any commit subject in `COMMITS` starts with `pi:`, rewrite only the `pi:` com
 
 ```bash
 tmp=$(mktemp)
-cat > "$tmp" <<'EOF'
+cat > "$tmp" <<'COMMIT_MSG_EOF'
 <title>
 
 <commit summary>
-EOF
+COMMIT_MSG_EOF
 bash <skill_dir>/squash-pi-commits.sh <base> "$tmp"
 rm -f "$tmp"
 ```
@@ -117,3 +120,9 @@ bash <skill_dir>/create-or-edit-pr.sh --base <base> --title-file "$title_file" -
 ```
 
 Add `--draft` only when creating a PR and the user requested a draft. Remove the temp files afterward. The helper prints `ACTION:`, `NUMBER:`, and `URL:` lines; show the PR URL to the user when done.
+
+If the user requested reviewers, labels, or assignees, apply them after the PR is created or updated:
+
+```bash
+gh pr edit <number> --add-reviewer <users> --add-label <labels> --add-assignee <users>
+```
