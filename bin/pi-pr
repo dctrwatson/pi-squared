@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+file_args=()
+message_parts=()
+
+for arg in "$@"; do
+  if [[ "$arg" == @* ]]; then
+    file_args+=("$arg")
+  else
+    message_parts+=("$arg")
+  fi
+done
+
+prompt="create GitHub PR for this branch."
+if ((${#message_parts[@]} > 0)); then
+  prompt+=" ${message_parts[*]}"
+fi
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$DIR/$TARGET"
+  fi
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+pi \
+  --mode json \
+  --model openai-codex/gpt-5.6-terra \
+  --thinking off \
+  --no-extensions \
+  --no-prompt-templates \
+  --no-session \
+  "${file_args[@]}" "$prompt" | node "$SCRIPT_DIR/pi-progress.mjs"
