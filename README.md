@@ -6,6 +6,7 @@ Requires Node.js 22.19.0 or newer.
 
 ## Skills
 
+- [**address-pr-feedback**](skills/address-pr-feedback/SKILL.md) — Handles GitHub PR feedback end-to-end: reviews comments and inline threads, makes or plans the appropriate changes, and posts replies on GitHub.
 - [**buildkite-pr-check-review**](skills/buildkite-pr-check-review/SKILL.md) — Investigates GitHub PR status checks that map to Buildkite builds/jobs, fetches Buildkite logs with the CLI, and summarizes failures.
 - [**create-pr**](skills/create-pr/SKILL.md) — Creates or drafts a GitHub pull request from the current branch, analyzes changes, cleans up `pi:` auto-commits, and follows repo PR templates.
 
