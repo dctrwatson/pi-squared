@@ -3,6 +3,11 @@
 # Diff is handled separately by gather-diff.sh to avoid truncation.
 set -euo pipefail
 
+if ! gh auth status >/dev/null 2>&1; then
+  echo "ERROR: gh is not authenticated. Run 'gh auth login' first." >&2
+  exit 1
+fi
+
 # --- Branches ---
 current_branch=$(git branch --show-current)
 default_branch=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')
@@ -24,8 +29,10 @@ echo "=== EXISTING PR ==="
 if pr_state=$(gh pr view --json state --jq '.state' 2>/dev/null); then
   if [ "$pr_state" = "OPEN" ]; then
     gh pr view --json number,title,url,state,baseRefName
+  elif [ "$pr_state" = "MERGED" ]; then
+    echo "none (note: a previous PR from this branch was already merged)"
   else
-    echo "none"
+    echo "none (note: a previous PR from this branch was closed)"
   fi
 else
   echo "none"

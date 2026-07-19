@@ -131,8 +131,7 @@ fi
 
 if [ -n "$pr_number" ]; then
   gh pr edit "$pr_number" --title "$title" --body-file "$body_file" >/dev/null
-  url=$(gh pr view "$pr_number" --json url --jq '.url')
-  number=$(gh pr view "$pr_number" --json number --jq '.number')
+  read -r url number < <(gh pr view "$pr_number" --json url,number --jq '"\(.url) \(.number)"')
   echo "ACTION: updated"
   echo "NUMBER: $number"
   echo "URL: $url"

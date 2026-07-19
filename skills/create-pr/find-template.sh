@@ -17,7 +17,7 @@ add_named_templates() {
     if [ -n "$file" ]; then
       candidates+=("$file")
     fi
-  done < <(find "$dir" -maxdepth 1 -type f -iname 'pull_request_template.md' | LC_ALL=C sort)
+  done < <(find "$dir" -maxdepth 1 -type f \( -iname 'pull_request_template.md' -o -iname 'pull_request_template' \) | LC_ALL=C sort)
 }
 
 add_directory_templates() {
