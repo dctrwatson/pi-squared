@@ -17,7 +17,7 @@ add_named_templates() {
     if [ -n "$file" ]; then
       candidates+=("$file")
     fi
-  done < <(find "$dir" -maxdepth 1 -type f \( -iname 'pull_request_template.md' -o -iname 'pull_request_template' \) | LC_ALL=C sort)
+  done < <(fd --hidden --no-ignore --max-depth 1 --type f --glob '{pull_request_template.md,pull_request_template}' "$dir" | LC_ALL=C sort)
 }
 
 add_directory_templates() {
@@ -31,8 +31,8 @@ add_directory_templates() {
       if [ -n "$file" ]; then
         candidates+=("$file")
       fi
-    done < <(find "$dir" -type f \( -iname '*.md' -o -iname '*.markdown' \) | LC_ALL=C sort)
-  done < <(find "$parent" -maxdepth 1 -type d -iname 'pull_request_template' | LC_ALL=C sort)
+    done < <(fd --hidden --no-ignore --type f --glob '*.{md,markdown}' "$dir" | LC_ALL=C sort)
+  done < <(fd --hidden --no-ignore --max-depth 1 --type d --glob 'pull_request_template' "$parent" | LC_ALL=C sort)
 }
 
 add_named_templates "$root/.github"
