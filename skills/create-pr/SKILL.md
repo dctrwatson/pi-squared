@@ -10,6 +10,10 @@ compatibility: Requires git, fd, GitHub CLI (`gh`), push access to the repo, and
 
 This skill is for GitHub repos. If `git`/`gh` fails because the directory is not a GitHub checkout or `gh` is not authenticated, stop and tell the user what needs to be fixed.
 
+**Push authorization:** A request to create or update a PR authorizes only the push needed for that operation. An existing PR is not standing permission to push later follow-up work. For each later push the user requests, rerun this workflow.
+
+**Hard invariant:** Never invoke `git push` directly in this workflow. Every PR branch push—including the initial push and later updates—must go through `push-pr-branch.sh`. Cleanup performed for an earlier push is stale as soon as another commit is created.
+
 Run the context script first (pass optional base branch as arg):
 
 ```bash
@@ -59,13 +63,13 @@ Only if none of the above files exist, use this fallback structure:
 
 **Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes.
 
-## 3. Clean up `pi:` auto-commits
+## 3. Clean up `pi:` auto-commits and push
 
-If any commit subject in `COMMITS` starts with `pi:`, rewrite only the `pi:` commit run into one clean commit before pushing, while preserving non-`pi:` commits.
+Run this step immediately before **every** authorized push. Always invoke the helper against the current `HEAD`; do not skip it based on the earlier `COMMITS` output or because cleanup ran before. The helper rewrites one contiguous `pi:` commit run into one clean commit, preserves surrounding non-`pi:` commits, verifies that no `pi:` subject remains, and only then pushes.
 
 - Reuse the generated PR title as the cleaned-up commit subject.
 - Write a short commit body (1 short paragraph or 2-4 bullets) that accurately summarizes the changes represented by the squashed `pi:` commit(s). Do **not** paste the PR template or checkbox lists into the commit message.
-- Create a temporary commit message file and run:
+- Create a temporary commit message file and run the cleanup-and-push helper:
 
 ```bash
 tmp=$(mktemp)
@@ -74,25 +78,20 @@ cat > "$tmp" <<'COMMIT_MSG_EOF'
 
 <commit summary>
 COMMIT_MSG_EOF
-bash <skill_dir>/squash-pi-commits.sh <base> "$tmp"
+bash <skill_dir>/push-pr-branch.sh <base> "$tmp"
 rm -f "$tmp"
 ```
 
-- If the script prints `NO_PI_COMMITS`, leave the existing commit history alone.
-- If the script prints `REWROTE_PI_COMMITS`, continue with the updated history.
-- If the script errors because the working tree is dirty, stop and ask the user whether to commit or stash the extra changes first.
-- If the script errors because there are multiple separate `pi:` commit groups or merge commits, stop and ask the user how they want to clean up the history; preserving non-`pi:` commits would require a more manual rewrite.
-- If the script prints a `PUSH:` command, use that exact command in the next step.
+- `NO_PI_COMMITS` means history was left unchanged and a normal push was used.
+- `REWROTE_PI_COMMITS` means the helper cleaned the history and used `--force-with-lease` when the branch already existed on `origin`.
+- If cleanup or its final verification fails, the helper does not push. Do not work around it with a direct `git push`.
+- If the working tree is dirty, ask the user whether to commit or stash the extra changes first.
+- If there are multiple separate `pi:` commit groups or merge commits, ask how the user wants to clean up the history; preserving non-`pi:` commits requires a more manual rewrite.
+- If any new commit is created after this helper succeeds, its cleanup result no longer applies; use the helper again for the next user-authorized push.
 
-## 4. Push and create or update
+## 4. Create or update
 
-If step 3 did not print a `PUSH:` command, use:
-
-```bash
-git push -u origin HEAD
-```
-
-Use the helper script so title/body markdown is passed safely and the final output is structured.
+After step 3 successfully pushes, use the helper script so title/body markdown is passed safely and the final output is structured.
 
 Write the title and PR body to temporary files:
 
