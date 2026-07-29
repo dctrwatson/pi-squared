@@ -61,7 +61,7 @@ Only if none of the above files exist, use this fallback structure:
 <Migration steps, breaking changes, testing notes, or "None">
 ```
 
-**Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes.
+**Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes. When the user provides a GitHub issue, reference it as `ref #<issue-number>`; use a closing keyword only when the user explicitly asks to close the issue.
 
 ## 3. Clean up `pi:` auto-commits and push
 
