@@ -6,7 +6,8 @@ usage() {
 Usage: gather-pr-feedback.sh [--repo owner/repo] [--workdir path] [pr-selector]
 
 Resolve a PR, fetch comments/reviews/threads with gh, normalize them with jq,
-and write a workdir containing both raw payloads and readable summaries.
+and write a workdir containing both raw payloads and readable summaries. When
+pr-selector is omitted, resolve the PR for the checked-out branch.
 EOF
 }
 
@@ -69,11 +70,14 @@ if [ -z "$repo" ]; then
 fi
 
 pr_fields='number,title,url,baseRefName,headRefName,reviewDecision,isDraft,author'
-if [ -n "$pr_selector" ]; then
-  gh pr view "$pr_selector" --repo "$repo" --json "$pr_fields" > /tmp/pr-feedback-pr.json.$$ 
-else
-  gh pr view --repo "$repo" --json "$pr_fields" > /tmp/pr-feedback-pr.json.$$ 
+if [ -z "$pr_selector" ]; then
+  pr_selector=$(git branch --show-current)
+  if [ -z "$pr_selector" ]; then
+    echo "ERROR: No PR selector was provided and HEAD is detached. Check out a PR branch or provide a PR number or URL." >&2
+    exit 1
+  fi
 fi
+gh pr view "$pr_selector" --repo "$repo" --json "$pr_fields" > /tmp/pr-feedback-pr.json.$$
 
 pr_number=$(jq -r '.number' /tmp/pr-feedback-pr.json.$$)
 owner=${repo%%/*}
