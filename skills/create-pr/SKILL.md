@@ -28,6 +28,7 @@ bash <skill_dir>/gather-diff.sh <resolved_base>
 
 The diff script outputs: DIFF STAT and DIFF. They are run separately to avoid large diffs truncating the metadata.
 
+- If the user provides a GitHub issue or PR reference, inspect it before drafting the body to gather its description and discussion. Use `gh issue view <reference> --comments` or `gh pr view <reference> --comments` as appropriate; pass a full URL for a reference in another repository. Incorporate relevant context into the body.
 - If the diff is very large (truncated output), rely on DIFF STAT for an overview and inspect individual files with `git diff <base>...HEAD -- <path>`.
 
 - If the first script errors with `Current branch IS the base branch` or `No commits between`, stop and tell the user.
@@ -52,7 +53,7 @@ Only if none of the above files exist, use this fallback structure:
 
 ```
 ## Summary
-<1-3 sentences: why, then what>
+<As many sentences as needed: why, then what>
 
 ## Changes
 <Bulleted list of changes, grouped logically>
@@ -61,7 +62,7 @@ Only if none of the above files exist, use this fallback structure:
 <Migration steps, breaking changes, testing notes, or "None">
 ```
 
-**Guidelines:** Be concise. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes. When the user provides a GitHub issue, reference it as `ref #<issue-number>`; use a closing keyword only when the user explicitly asks to close the issue.
+**Guidelines:** Make the body as detailed as needed; do not optimize for brevity, and the summary may be longer than three sentences. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes. When the user provides a GitHub issue in the current repository, reference it as `ref #<issue-number>`. For an issue in another repository, use `ref <full-issue-url>` instead (for example, `ref https://github.com/owner/repo/issues/123`). Use a closing keyword only when the user explicitly asks to close the issue.
 
 ## 3. Clean up `pi:` auto-commits and push
 
