@@ -53,7 +53,7 @@ Only if none of the above files exist, use this fallback structure:
 
 ```
 ## Summary
-<As many sentences as needed: why, then what>
+<A proportional, scannable explanation: why, then what>
 
 ## Changes
 <Bulleted list of changes, grouped logically>
@@ -62,7 +62,7 @@ Only if none of the above files exist, use this fallback structure:
 <Migration steps, breaking changes, testing notes, or "None">
 ```
 
-**Guidelines:** Make the body as detailed as needed; do not optimize for brevity, and the summary may be longer than three sentences. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes. When the user provides a GitHub issue or PR, always reference it with its full URL after `ref` (for example, `ref https://github.com/owner/repo/issues/123` or `ref https://github.com/owner/repo/pull/456`); never use `ref #<number>`. Use a closing keyword only when the user explicitly asks to close an issue.
+**Guidelines:** Aim for an appropriately detailed, scannable body. Do not omit useful context just to be concise or impose a fixed sentence limit; the summary may be longer than three sentences. Keep the length proportional to the change, and omit repetition, exhaustive code walkthroughs, and incidental implementation detail. Lead with "why". Synthesize commits, don't just list them. Call out breaking changes or new dependencies. If the user provided extra context, incorporate it into the summary and notes. When the user provides a GitHub issue or PR, always reference it with its full URL after `ref` (for example, `ref https://github.com/owner/repo/issues/123` or `ref https://github.com/owner/repo/pull/456`); never use `ref #<number>`. Use a closing keyword only when the user explicitly asks to close an issue.
 
 ## 3. Clean up `pi:` auto-commits and push
 
