@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 
 const handoffModule = await import("../../extensions/handoff.ts");
 const {
+  HANDOFF_MAX_TOKENS,
   HANDOFF_SYSTEM_PROMPT,
   buildHandoffGenerationMessages,
   extractVisibleAssistantText,
+  generateHandoffText,
   getLastCompleteAssistantText,
   parseHandoffMode,
 } = handoffModule;
@@ -73,7 +75,8 @@ test("handoff generates rather than using an incomplete newest response", () => 
 });
 
 test("handoff uses its dedicated replacement system prompt", () => {
-  assert.match(HANDOFF_SYSTEM_PROMPT, /only task is to produce the text that will become the first user message/i);
+  assert.match(HANDOFF_SYSTEM_PROMPT, /only task is to produce the first user message/i);
+  assert.match(HANDOFF_SYSTEM_PROMPT, /compact, high-signal, self-contained handoff/i);
   assert.match(HANDOFF_SYSTEM_PROMPT, /Do not continue or solve the task/i);
   assert.match(HANDOFF_SYSTEM_PROMPT, /Output only the handoff text/i);
 });
@@ -106,6 +109,61 @@ test("generated handoffs retain the compaction-aware context", () => {
   assert.match(messages[0].content[0].text, /Important compacted context/);
   assert.equal(messages[1].content, "Recent uncompressed context");
   assert.equal(messages[2].content[0].text, "Create the handoff now.");
+});
+
+test("generated handoffs dispatch through the model runtime without retaining cache state", async () => {
+  const model = { provider: "custom-provider", id: "handoff-model", maxTokens: 1_024 };
+  const signal = new AbortController().signal;
+  let request;
+  const text = await generateHandoffText({
+    getSystemPromptOptions: () => ({
+      skills: [
+        {
+          name: "temporary-review",
+          filePath: "/skills/temporary-review/SKILL.md",
+          sourceInfo: { source: "extension:skill-loader" },
+          disableModelInvocation: false,
+        },
+        {
+          name: "command-only",
+          filePath: "/skills/command-only/SKILL.md",
+          sourceInfo: { source: "extension:skill-loader" },
+          disableModelInvocation: true,
+        },
+      ],
+    }),
+    sessionManager: {
+      buildContextEntries: () => [{
+        type: "message",
+        id: "user-entry",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "user", content: "Original request", timestamp: 0 },
+      }],
+    },
+    modelRegistry: {
+      complete: async (...args) => {
+        request = args;
+        return {
+          role: "assistant",
+          content: [{ type: "text", text: "Generated handoff" }],
+          stopReason: "stop",
+          timestamp: Date.now(),
+        };
+      },
+    },
+  }, model, signal);
+
+  assert.equal(text, "Generated handoff");
+  assert.equal(request[0], model);
+  assert.equal(request[1].systemPrompt, HANDOFF_SYSTEM_PROMPT);
+  assert.match(request[1].messages.at(-1).content[0].text, /temporary-review/);
+  assert.doesNotMatch(request[1].messages.at(-1).content[0].text, /command-only/);
+  assert.match(request[1].messages.at(-1).content[0].text, /do not carry into the new session/i);
+  assert.equal(request[2].signal, signal);
+  assert.equal(request[2].cacheRetention, "none");
+  assert.equal(request[2].maxTokens, Math.min(HANDOFF_MAX_TOKENS, model.maxTokens));
+  assert.match(request[2].sessionId, /^[0-9a-f-]+$/);
 });
 
 test("default handoff creates a linked blank session and leaves the draft in its editor", async () => {

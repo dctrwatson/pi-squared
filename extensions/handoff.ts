@@ -8,7 +8,7 @@
  *   /handoff generate Generate a self-contained handoff from active context.
  */
 
-import { completeSimple, type AssistantMessage, type Message } from "@earendil-works/pi-ai/compat";
+import { type AssistantMessage, type Message, uuidv7 } from "@earendil-works/pi-ai";
 import {
     BorderedLoader,
     convertToLlm,
@@ -19,33 +19,30 @@ import {
     type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
-export const HANDOFF_SYSTEM_PROMPT = `You are a session handoff writer. Your only task is to produce the text that will become the first user message in a fresh coding-agent session.
+export const HANDOFF_SYSTEM_PROMPT = `You are a session handoff writer. Your only task is to produce the first user message for a fresh coding-agent session. The new session cannot access this conversation.
 
-Transfer the working context with maximum fidelity and minimal compression. The new session will not have access to this conversation.
-
-Preserve all relevant:
-- User goals, requirements, constraints, and preferences
-- Decisions already made and their important rationale
-- Work completed, work in progress, and work not yet attempted
-- Exact file paths, symbols, commands, errors, test results, and other concrete details
-- Unresolved questions, blockers, risks, and expected next actions
+Create a compact, high-signal, self-contained handoff. Prioritize:
+- The current objective, requirements, constraints, and user preferences
+- Decisions and only the rationale needed to apply them
+- Completed work, in-progress work, and the exact next actions
+- Material file paths, symbols, commands, errors, and test results
+- Open questions, blockers, and risks
 
 Rules:
 - Do not continue or solve the task.
 - Do not call tools.
-- Do not invent details or silently resolve ambiguity.
-- Do not expose hidden reasoning or thinking. Transfer conclusions and relevant facts only.
-- Do not copy irrelevant conversational history or raw tool logs. Preserve the useful facts they established.
-- Do not optimize for brevity. Omit only genuinely irrelevant or redundant material.
-- Make the result self-contained and directly actionable by the next model.
-- Write it as context and instructions addressed to the next model.
+- Do not invent details or resolve ambiguity.
+- Transfer conclusions and relevant facts, not hidden reasoning or thinking.
+- Omit raw logs, conversational history, repetition, and repository facts that the next agent can quickly rediscover, unless they are needed for the next action.
+- Prefer precise bullets and short sections over narrative.
+- Write context and instructions directly to the next agent.
 - Output only the handoff text, with no preamble, commentary, or code fence.`;
 
+export const HANDOFF_MAX_TOKENS = 4_096;
 const HANDOFF_GENERATION_REQUEST = "Create the handoff now.";
 
 type HandoffMode = "verbatim" | "generate";
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
-type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
 export function parseHandoffMode(args: string): HandoffMode | undefined {
     const value = args.trim();
@@ -84,27 +81,36 @@ function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
 }
 
-export function buildHandoffGenerationMessages(entries: readonly SessionEntry[]): Message[] {
+export function buildHandoffGenerationMessages(
+    entries: readonly SessionEntry[],
+    request = HANDOFF_GENERATION_REQUEST,
+): Message[] {
     const messages = convertToLlm(entries.flatMap(sessionEntryToContextMessages));
 
     return [
         ...messages,
         {
             role: "user",
-            content: [{ type: "text", text: HANDOFF_GENERATION_REQUEST }],
+            content: [{ type: "text", text: request }],
             timestamp: Date.now(),
         },
     ];
 }
 
-function buildGenerationMessages(ctx: ExtensionContext): Message[] {
-    return buildHandoffGenerationMessages(ctx.sessionManager.buildContextEntries());
+function buildGenerationMessages(ctx: ExtensionCommandContext): Message[] {
+    const temporarySkills = (ctx.getSystemPromptOptions().skills ?? [])
+        .filter((skill) =>
+            skill.sourceInfo.source === "extension:skill-loader" && !skill.disableModelInvocation)
+        .map((skill) => ({ name: skill.name, path: skill.filePath }));
+    const request = temporarySkills.length === 0
+        ? HANDOFF_GENERATION_REQUEST
+        : `${HANDOFF_GENERATION_REQUEST}\n\nTemporary skill metadata, encoded as JSON: ${JSON.stringify(temporarySkills)}\nThese skills do not carry into the new session. Include only relevant skills in the handoff, with an instruction to read the given path on demand.`;
+    return buildHandoffGenerationMessages(ctx.sessionManager.buildContextEntries(), request);
 }
 
-async function generateHandoffText(
-    ctx: ExtensionContext,
+export async function generateHandoffText(
+    ctx: ExtensionCommandContext,
     model: ActiveModel,
-    thinkingLevel: ThinkingLevel,
     signal: AbortSignal,
 ): Promise<string> {
     const messages = buildGenerationMessages(ctx);
@@ -112,21 +118,17 @@ async function generateHandoffText(
         throw new Error("No conversation to hand off");
     }
 
-    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) throw new Error(auth.error);
-
-    const response = await completeSimple(
+    const response = await ctx.modelRegistry.complete(
         model,
         {
             systemPrompt: HANDOFF_SYSTEM_PROMPT,
             messages,
         },
         {
-            apiKey: auth.apiKey,
-            headers: auth.headers,
-            env: auth.env,
             signal,
-            ...(model.reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
+            cacheRetention: "none",
+            maxTokens: Math.max(1, Math.min(HANDOFF_MAX_TOKENS, model.maxTokens || HANDOFF_MAX_TOKENS)),
+            sessionId: uuidv7(),
         },
     );
 
@@ -145,7 +147,6 @@ async function generateHandoffText(
 async function generateWithLoader(
     ctx: ExtensionCommandContext,
     model: ActiveModel,
-    thinkingLevel: ThinkingLevel,
 ): Promise<string | undefined> {
     let generationError: unknown;
 
@@ -160,7 +161,7 @@ async function generateWithLoader(
 
         loader.onAbort = () => finish(undefined);
 
-        void generateHandoffText(ctx, model, thinkingLevel, loader.signal)
+        void generateHandoffText(ctx, model, loader.signal)
             .then(finish)
             .catch((error) => {
                 if (!loader.signal.aborted) generationError = error;
@@ -206,7 +207,7 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 try {
-                    handoffText = await generateWithLoader(ctx, model, pi.getThinkingLevel());
+                    handoffText = await generateWithLoader(ctx, model);
                 } catch (error) {
                     ctx.ui.notify(`Handoff generation failed: ${errorMessage(error)}`, "error");
                     return;

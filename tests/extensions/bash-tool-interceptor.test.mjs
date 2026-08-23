@@ -73,31 +73,26 @@ test("registers a model Bash override with composed guidance", async () => {
   assert.match(tools[0].promptSnippet, /Execute bash commands/);
   assert.equal(handlers.has("tool_call"), false);
 
-  const beforeAgentStart = handlers.get("before_agent_start");
-  assert.equal(typeof beforeAgentStart, "function");
-
-  const guided = await beforeAgentStart({
-    systemPrompt: "Base prompt",
-    systemPromptOptions: { selectedTools: ["bash"] },
-  });
-  assert.match(guided.systemPrompt, /Base prompt/);
-  assert.match(guided.systemPrompt, /Use `uv`/);
+  assert.equal(handlers.has("before_agent_start"), false);
+  assert.ok(tools[0].promptGuidelines.some((guideline) => /Use `uv`/.test(guideline)));
+  assert.ok(tools[0].promptGuidelines.some((guideline) => /Use `fd`/.test(guideline)));
   assert.match(UV_SYSTEM_PROMPT_GUIDANCE, /Use `uv` for all Python work/);
-  assert.match(guided.systemPrompt, /Use `fd`/);
   assert.match(FD_SYSTEM_PROMPT_GUIDANCE, /Prefer Pi's built-in `find` tool/);
 
-  const unguided = await beforeAgentStart({
-    systemPrompt: "Base prompt",
-    systemPromptOptions: { selectedTools: ["read"] },
-  });
-  assert.equal(unguided, undefined);
-
+  const toolContext = {
+    model: undefined,
+    thinkingLevel: "off",
+    sessionManager: {
+      getSessionId: () => "interceptor-test-session",
+      getSessionFile: () => undefined,
+    },
+  };
   await assert.rejects(
-    tools[0].execute("interceptor-test", { command: "python --version" }, undefined, undefined, {}),
+    tools[0].execute("interceptor-test", { command: "python --version" }, undefined, undefined, toolContext),
     /Use uv for Python work/,
   );
   await assert.rejects(
-    tools[0].execute("interceptor-test", { command: "find . -type f" }, undefined, undefined, {}),
+    tools[0].execute("interceptor-test", { command: "find . -type f" }, undefined, undefined, toolContext),
     /Use fd for file discovery/,
   );
 });
