@@ -6,10 +6,7 @@ const interceptorDir = dirname(fileURLToPath(import.meta.url));
 
 export const FIND_INTERCEPTOR_BIN_DIR = join(interceptorDir, "find", "bin");
 
-export const FD_SYSTEM_PROMPT_GUIDANCE = `
-## File discovery
-
-Use \`fd\` for file discovery in Bash. Prefer Pi's built-in \`find\` tool when available. Do not invoke the shell \`find\` command.`;
+export const FD_SYSTEM_PROMPT_GUIDANCE = `Prefer Pi's built-in \`find\` tool. Use \`fd\` for file discovery in Bash; do not invoke shell \`find\`.`;
 
 export const findCommandInterceptor = {
   name: "find",

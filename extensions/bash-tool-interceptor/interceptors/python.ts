@@ -29,10 +29,7 @@ export const INTERCEPTED_PYTHON_COMMANDS = [
   "pip-sync",
 ] as const;
 
-export const UV_SYSTEM_PROMPT_GUIDANCE = `
-## Python tooling
-
-Use \`uv\` for all Python work. Do not invoke \`python\`, \`pip\`, \`pipx\`, \`poetry\`, or other legacy Python tooling directly in Bash. Use the appropriate uv workflow: \`uv run\`, \`uv add\`, \`uv sync\`, \`uv pip\`, or \`uv tool\`.`;
+export const UV_SYSTEM_PROMPT_GUIDANCE = `Use \`uv\` for all Python work in Bash (\`uv run\`, \`uv add\`, \`uv sync\`, \`uv pip\`, or \`uv tool\`); do not invoke legacy Python tools directly.`;
 
 export const pythonCommandInterceptor = {
   name: "python",

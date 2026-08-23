@@ -35,11 +35,13 @@ export default function bashToolInterceptor(pi: ExtensionAPI) {
   });
 
   // Override only the model-facing Bash tool. The built-in implementation,
-  // rendering, output limits, and process handling remain intact.
-  pi.registerTool(bashTool);
-
-  pi.on("before_agent_start", (event) => {
-    if (!event.systemPromptOptions.selectedTools?.includes("bash")) return undefined;
-    return { systemPrompt: `${event.systemPrompt}\n${interceptorGuidance()}` };
+  // rendering, output limits, process handling, and prompt metadata remain intact.
+  // Pi includes these additional guidelines only while Bash is active.
+  pi.registerTool({
+    ...bashTool,
+    promptGuidelines: [
+      ...(bashTool.promptGuidelines ?? []),
+      ...BASH_COMMAND_INTERCEPTORS.map((interceptor) => interceptor.systemPromptGuidance.trim()),
+    ],
   });
 }

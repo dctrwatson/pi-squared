@@ -145,7 +145,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Keep the assertion through automatic retries and queued follow-ups.
-  pi.on("agent_settled", async (_event, _ctx) => {
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!ctx.isIdle()) return;
     agentRunning = false;
     await stopAssertion();
     failureReported = false;

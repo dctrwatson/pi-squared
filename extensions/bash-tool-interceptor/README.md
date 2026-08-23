@@ -7,10 +7,10 @@ Adds independent command-policy wrappers to model-initiated `bash` tool calls wh
 Each policy is a `BashCommandInterceptor` registered in `interceptors/index.ts`. A policy owns:
 
 - a dedicated wrapper `binDir`, prepended to the model Bash tool's `PATH`;
-- per-turn system-prompt guidance; and
+- active-tool `promptGuidelines` included only while Bash is selected; and
 - any policy-specific wrapper scripts and documentation.
 
-To add a new command family, create `interceptors/<name>.ts`, place its wrappers in `interceptors/<name>/bin/`, and add the exported interceptor to `BASH_COMMAND_INTERCEPTORS` in `interceptors/index.ts`. The top-level extension composes every registered policy; it contains no Python-specific behavior.
+To add a new command family, create `interceptors/<name>.ts`, place its wrappers in `interceptors/<name>/bin/`, and add the exported interceptor to `BASH_COMMAND_INTERCEPTORS` in `interceptors/index.ts`. The top-level extension composes every registered policy with Pi's built-in Bash prompt metadata; it contains no Python-specific behavior.
 
 ## uv Python policy
 
