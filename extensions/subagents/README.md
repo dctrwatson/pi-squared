@@ -17,7 +17,14 @@ The subagent list is also available with `Ctrl+Shift+A`.
 /subagents --stop [name-or-id]
 /subagents --disable
 /subagents --enable
+/subagent --help
+/subagent:<persona> --help
+/subagents --help
 ```
+
+All listed commands accept exact `--help` or `-h`. Help does not run the normal command.
+
+Argument completion offers `--fork` before a creation prompt. It offers `--stop`, `--enable`, `--disable`, and active names or IDs for `/subagents`. Creation commands do not offer options after prompt text starts.
 
 - `/subagent` creates and opens a persistent subagent.
 - `/subagents` lists existing subagents and opens the selected one.

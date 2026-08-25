@@ -8,14 +8,17 @@ Install this package as a global Pi package. Put `bin/piw` on your `PATH`. The l
 
 - `/workspace` and `/ws` open the local workspace picker.
 - `/ws <branch>` switches to a local branch workspace.
+- `/ws branch:<branch>` forces a local branch target. Use it for a branch named `new`, `prune`, or a pull request number.
 - `/ws <number>`, `/ws #<number>`, and `/ws <pull-request-url>` open a GitHub pull request workspace. URLs can end in `/files`, `/commits`, `/checks`, or `/conversation`.
-- `/ws <target> --worktree` uses a managed worktree when the target is not already in one.
+- `/ws <target> --worktree` and `/ws --worktree <target>` use a managed worktree when the target is not already in one.
 - `/ws --worktree` promotes the clean, non-`main` primary workspace into a managed worktree. Pi forks its session for the new working directory.
 - `/ws new` starts a fresh Pi session and binds it to the current branch workspace. It replaces the branch's saved workspace-session binding.
 - `/ws new <branch>` creates a branch workspace.
 - `/ws new <branch> --from <ref>` selects the base ref. Use `--from current` to use the current commit.
 - `/ws new <branch> --worktree` creates the branch in a managed worktree and switches the current Pi session.
 - `/ws prune` removes inactive managed workspaces when their remote branch no longer exists.
+
+Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
 
 Without `--from`, `/ws new <branch>` and `piw new <branch>` use only `refs/heads/main`. They fail when that local branch is absent. They do not fetch or use `origin/main`.
 

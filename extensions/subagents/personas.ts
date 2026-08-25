@@ -3,11 +3,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 
 export type SubagentContextMode = "fresh" | "fork";
 export type SubagentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export const SUBAGENT_LIFETIMES = ["one-shot", "task", "persistent"] as const;
 export type SubagentLifetime = typeof SUBAGENT_LIFETIMES[number];
+export const SUBAGENT_COMMAND_HELP_TEXT = `Usage: /subagent [--fork] [prompt]
+       /subagent:<persona> [--fork] [prompt]
+
+--fork: Start with parent-session context.
+prompt: Free-text initial request.
+--help, -h: Show this help.`;
+const SUBAGENT_COMMAND_COMPLETIONS: readonly AutocompleteItem[] = [
+    {
+        value: "--fork",
+        label: "--fork",
+        description: "Start with parent-session context",
+    },
+];
 
 export interface SubagentScopedModel {
     provider: string;
@@ -247,6 +261,14 @@ export function parseSubagentCommandArgs(args: string): ParsedSubagentCommand {
         return { mode: "fresh", prompt: "", error: `Unknown subagent option: ${flag}` };
     }
     return { mode: "fresh", prompt: trimmed };
+}
+
+export function getSubagentCommandArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+    if (/\s/.test(argumentPrefix)) return null;
+
+    const completions = SUBAGENT_COMMAND_COMPLETIONS.filter((item) =>
+        item.value.startsWith(argumentPrefix));
+    return completions.length > 0 ? completions : null;
 }
 
 export function formatSubagentModelScope(scopedModels: readonly SubagentScopedModel[]): string {
