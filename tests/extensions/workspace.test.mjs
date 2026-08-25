@@ -1389,11 +1389,17 @@ test("session start leaves plain Pi sessions unbound", async () => {
     let sessionStart;
     let sessionShutdown;
     const appended = [];
+    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
         if (event === "session_start") sessionStart = handler;
         if (event === "session_shutdown") sessionShutdown = handler;
+      },
+      events: {
+        emit(name, payload) {
+          modeEvents.push({ name, payload });
+        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -1423,6 +1429,7 @@ test("session start leaves plain Pi sessions unbound", async () => {
     const state = await new WorkspaceService(root).state();
     assert.equal(await state.getWorkspace("main"), undefined);
     assert.deepEqual(appended, []);
+    assert.deepEqual(modeEvents, []);
     assert.deepEqual(notifications, []);
   } finally {
     await removeRepository(root);
@@ -1440,6 +1447,7 @@ test("an active managed workspace exposes concise PM guidance", async () => {
     let resourcesDiscover;
     let beforeAgentStart;
     const appended = [];
+    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
@@ -1447,6 +1455,11 @@ test("an active managed workspace exposes concise PM guidance", async () => {
         if (event === "session_shutdown") sessionShutdown = handler;
         if (event === "resources_discover") resourcesDiscover = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
+      },
+      events: {
+        emit(name, payload) {
+          modeEvents.push({ name, payload });
+        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -1475,6 +1488,10 @@ test("an active managed workspace exposes concise PM guidance", async () => {
       systemPrompt: "Base prompt\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
     });
     assert.equal(appended.at(-1)?.type, "pi-workspace");
+    assert.deepEqual(modeEvents, [{
+      name: "observational-memory:session-mode",
+      payload: { mode: "active", source: "workspace" },
+    }]);
     assert.deepEqual(notifications, []);
 
     await sessionShutdown({}, ctx);
@@ -1486,7 +1503,7 @@ test("an active managed workspace exposes concise PM guidance", async () => {
   }
 });
 
-test("session start attaches to an already leased workspace session", async () => {
+test("managed workspace reload preserves its lease and activates observational memory", async () => {
   const root = await repository();
   try {
     let sessionStart;
@@ -1494,6 +1511,7 @@ test("session start attaches to an already leased workspace session", async () =
     let resourcesDiscover;
     let beforeAgentStart;
     const appended = [];
+    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
@@ -1501,6 +1519,11 @@ test("session start attaches to an already leased workspace session", async () =
         if (event === "session_shutdown") sessionShutdown = handler;
         if (event === "resources_discover") resourcesDiscover = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
+      },
+      events: {
+        emit(name, payload) {
+          modeEvents.push({ name, payload });
+        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -1545,11 +1568,47 @@ test("session start attaches to an already leased workspace session", async () =
     assert.equal(appended[2].type, "pi-workspace");
     assert.equal(appended[2].data.branch, "main");
     assert.equal((await state.getWorkspace("main"))?.session, session);
+    assert.deepEqual(modeEvents, [{
+      name: "observational-memory:session-mode",
+      payload: { mode: "active", source: "workspace" },
+    }]);
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [] });
     assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), undefined);
     assert.deepEqual(notifications, []);
     assert.deepEqual(statuses, []);
-    await sessionShutdown({}, ctx);
+
+    await sessionShutdown({ reason: "reload" }, ctx);
+    assert.equal((await state.readLease(session))?.session, session);
+
+    let reloadedSessionStart;
+    let reloadedSessionShutdown;
+    workspaceExtension({
+      registerCommand() {},
+      on(event, handler) {
+        if (event === "session_start") reloadedSessionStart = handler;
+        if (event === "session_shutdown") reloadedSessionShutdown = handler;
+      },
+      events: {
+        emit(name, payload) {
+          modeEvents.push({ name, payload });
+        },
+      },
+      appendEntry(type, data) {
+        appended.push({ type, data });
+      },
+      setSessionName(name) {
+        appended.push({ type: "session_info", data: name });
+      },
+    });
+    await reloadedSessionStart({}, ctx);
+    assert.deepEqual(modeEvents, [
+      { name: "observational-memory:session-mode", payload: { mode: "active", source: "workspace" } },
+      { name: "observational-memory:session-mode", payload: { mode: "active", source: "workspace" } },
+    ]);
+    assert.equal((await state.readLease(session))?.session, session);
+
+    await reloadedSessionShutdown({ reason: "quit" }, ctx);
+    assert.equal(await state.readLease(session), undefined);
   } finally {
     await removeRepository(root);
   }

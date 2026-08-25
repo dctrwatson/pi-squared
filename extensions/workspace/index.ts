@@ -632,6 +632,7 @@ export default function workspaceExtension(
             const record = await service.registerCurrent(session, true);
             if (!record) return;
             owned = { branch: record.branch, session: record.session };
+            pi.events.emit("observational-memory:session-mode", { mode: "active", source: "workspace" });
             if (await service.git.isManagedWorktree(record.cwd)) {
                 pmPath = await managedWorkspacePmPath(service, record.cwd);
                 if (!pmPath) ctx.ui.notify("Workspace PM repository is unavailable; PM guidance is disabled.", "warning");
@@ -641,7 +642,7 @@ export default function workspaceExtension(
             ctx.shutdown();
         }
     });
-    pi.on("session_shutdown", async (_event, ctx) => {
+    pi.on("session_shutdown", async (event, ctx) => {
         if (pendingMergeCleanup) {
             const cleanup = pendingMergeCleanup;
             pendingMergeCleanup = undefined;
@@ -658,8 +659,10 @@ export default function workspaceExtension(
         }
         if (!owned) return;
         try {
-            const state = await createService(ctx.cwd).state();
-            await state.releaseLease(owned);
+            if (event.reason !== "reload") {
+                const state = await createService(ctx.cwd).state();
+                await state.releaseLease(owned);
+            }
         } finally {
             owned = undefined;
             pmPath = undefined;
