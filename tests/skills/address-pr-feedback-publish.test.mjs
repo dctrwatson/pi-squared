@@ -9,13 +9,11 @@ import {
   git,
   commitFile,
   parseOutput,
-  createFixture,
-  prepare,
+  createPreparedFixture,
 } from "./address-pr-feedback-test-support.mjs";
 
 test("feedback publication strips prefixes without squashing and uses only a normal push", async (t) => {
-  const fixture = await createFixture(t);
-  const prepared = prepare(fixture, "--mode", "execute");
+  const { fixture, prepared } = await createPreparedFixture(t);
   commitFile(fixture.work, "a.txt", "a\n", "pi: fix parser validation", "Preserve this body.");
   commitFile(fixture.work, "b.txt", "b\n", "pi: test parser validation", "Preserve the second body.");
   await writeFile(join(fixture.root, "git.log"), "");
@@ -31,8 +29,7 @@ test("feedback publication strips prefixes without squashing and uses only a nor
 });
 
 test("publication rebases only new local commits and requires validation before retry", async (t) => {
-  const fixture = await createFixture(t);
-  const prepared = prepare(fixture, "--mode", "execute");
+  const { fixture, prepared } = await createPreparedFixture(t);
   commitFile(fixture.work, "local.txt", "local\n", "pi: fix local behavior");
   const other = join(fixture.root, "other");
   git(fixture.root, "clone", fixture.origin, other);
@@ -58,8 +55,7 @@ test("publication rebases only new local commits and requires validation before 
 });
 
 test("publication recovers when a clean prepared commit was already pushed", async (t) => {
-  const fixture = await createFixture(t);
-  const prepared = prepare(fixture, "--mode", "execute");
+  const { fixture, prepared } = await createPreparedFixture(t);
   commitFile(fixture.work, "clean-published.txt", "published\n", "fix: clean published commit");
   git(fixture.work, "push", "origin", "feature");
   const result = run("bash", [join(scripts, "publish-feedback-commits.sh"), "--state", prepared.output.STATE], { cwd: fixture.work, env: fixture.env });

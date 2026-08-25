@@ -50,6 +50,7 @@ export interface DirectProcessOptions {
   signal?: AbortSignal;
   onUpdate?: AgentToolUpdateCallback<ProcessToolDetails>;
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
+  cleanupLimitMs?: number;
 }
 
 interface ProcessExit {
@@ -308,6 +309,7 @@ function recordOutput(
 
 /** Run Git or GitHub CLI with shared exact capture and bounded output. */
 export async function runDirectProcess(options: DirectProcessOptions): Promise<FormattedProcessResult> {
+  const cleanupLimitMs = options.cleanupLimitMs ?? CLEANUP_LIMIT_MS;
   if (options.signal?.aborted) {
     throw new DirectProcessError("CANCELLED", `${options.displayName} command was cancelled.`);
   }
@@ -529,7 +531,7 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
         throw new DirectProcessError("SPAWN_FAILED", `Cannot run ${options.displayName}: ${String(first.error)}`);
       }
       if (first.kind === "stop") {
-        const deadline = Date.now() + CLEANUP_LIMIT_MS;
+        const deadline = Date.now() + cleanupLimitMs;
         exit = await drainAfterStop(activeChild, completion, deadline, options.displayName);
         if (first.reason === "input" || inputFailure) {
           throw new DirectProcessError("PROCESS_CONTROL_FAILED", `Cannot write ${options.displayName} standard input.`);
@@ -550,7 +552,7 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
       } else {
         if (timeoutHandle) clearTimeout(timeoutHandle);
         timeoutHandle = undefined;
-        const cleanupDeadline = Date.now() + CLEANUP_LIMIT_MS;
+        const cleanupDeadline = Date.now() + cleanupLimitMs;
         await terminateProcessGroup(activeChild, cleanupDeadline, options.displayName);
         if (!await waitForGroupExit(activeChild, cleanupDeadline)) {
           throw new DirectProcessError("PROCESS_CONTROL_FAILED", `Cannot finish ${options.displayName} process cleanup.`);
@@ -617,7 +619,7 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
     }
   } catch (error) {
     if (child && processGroupExists(child)) {
-      await terminateProcessGroup(child, Date.now() + CLEANUP_LIMIT_MS, options.displayName).catch(() => undefined);
+      await terminateProcessGroup(child, Date.now() + cleanupLimitMs, options.displayName).catch(() => undefined);
     }
     child?.stdout?.destroy();
     child?.stderr?.destroy();

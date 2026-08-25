@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { chmod, cp, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -127,8 +128,8 @@ async function createFixture(t) {
 
 function commitFile(work, path, content, subject) {
   const absolute = join(work, path);
-  execFileSync("mkdir", ["-p", resolve(absolute, "..")]);
-  execFileSync("bash", ["-c", `printf '%s' "$1" > "$2"`, "_", content, absolute]);
+  mkdirSync(resolve(absolute, ".."), { recursive: true });
+  writeFileSync(absolute, content);
   git(work, "add", path);
   git(work, "commit", "-m", subject);
   return git(work, "rev-parse", "HEAD");

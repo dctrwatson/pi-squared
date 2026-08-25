@@ -32,7 +32,8 @@
     "check": "node ./node_modules/typescript/bin/tsc --noEmit",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "test": "node --experimental-strip-types --test tests/extensions/*.test.mjs tests/skills/*.test.mjs",
+    "test": "concurrency=$(node -p \"Math.min(8, require('node:os').availableParallelism())\") && node --experimental-strip-types --test --test-concurrency=$concurrency tests/extensions/*.test.mjs tests/skills/*.test.mjs",
+    "test:quick": "node --experimental-strip-types --test $(find tests/extensions -name '*.test.mjs' ! -name 'workspace-*')",
     "test:extensions": "node --experimental-strip-types --test tests/extensions/*.test.mjs",
     "test:skills": "node --test tests/skills/*.test.mjs"
   },

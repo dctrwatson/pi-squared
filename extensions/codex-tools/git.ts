@@ -52,6 +52,7 @@ export type GitToolDetails = ProcessToolDetails;
 
 export interface CodexGitToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
+  cleanupLimitMs?: number;
 }
 
 interface NormalizedGitInput {
@@ -207,6 +208,7 @@ async function executeGit(
       signal,
       onUpdate,
       onArtifactCreated: options.onArtifactCreated,
+      cleanupLimitMs: options.cleanupLimitMs,
     });
   } catch (error) {
     if (error instanceof GitToolError || error instanceof DirectProcessError) {
