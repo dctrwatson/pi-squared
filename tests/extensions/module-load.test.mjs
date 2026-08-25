@@ -9,6 +9,7 @@ test("all Pi extension modules load with the pinned Pi API", async () => {
     import("../../extensions/skill-loader.ts"),
     import("../../extensions/prevent-idle.ts"),
     import("../../extensions/interactive-shell.ts"),
+    import("../../extensions/workspace/index.ts"),
     import("../../extensions/ask-user.ts"),
     import("../../extensions/codex-tools/index.ts"),
   ]);

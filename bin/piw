@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$DIR/$TARGET"
+  fi
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+plan="$(PIW_LEASE_PID="$$" node --experimental-strip-types "$SCRIPT_DIR/../extensions/workspace/launcher.ts" "$@")"
+action="$(PIW_PLAN="$plan" node --input-type=module -e 'process.stdout.write(JSON.parse(process.env.PIW_PLAN).action ?? "")')"
+if [[ "$action" == "prune" ]]; then
+  PIW_PLAN="$plan" node --input-type=module -e '
+const plan = JSON.parse(process.env.PIW_PLAN);
+if (plan.pruned.length === 0) console.log("No workspace was pruned.");
+for (const branch of plan.pruned) console.log(`Pruned ${branch}.`);
+for (const entry of plan.skipped) console.log(`Skipped ${entry.branch}: ${entry.reason}.`);
+'
+  exit 0
+fi
+if [[ "$action" != "launch" ]]; then
+  echo "piw: launcher returned an invalid action" >&2
+  exit 1
+fi
+fields=()
+while IFS= read -r -d '' field; do
+  fields+=("$field")
+done < <(PIW_PLAN="$plan" node --input-type=module -e '
+const plan = JSON.parse(process.env.PIW_PLAN);
+for (const value of [plan.cwd, plan.session, ...plan.args]) process.stdout.write(`${value}\0`);
+')
+
+if ((${#fields[@]} < 2)); then
+  echo "piw: launcher returned an invalid workspace" >&2
+  exit 1
+fi
+
+cd -- "${fields[0]}"
+exec pi --session "${fields[1]}" "${fields[@]:2}"
