@@ -4,33 +4,34 @@ import { randomUUID } from "node:crypto";
 import {
     getAgentDir,
     type ExtensionAPI,
-    type ExtensionCommandContext,
     type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-    buildChildProcessArgs,
+    buildSubagentProcessArgs,
     normalizePersonaContextRequirements,
     SUBAGENT_LIFETIMES,
-    type ChildContextMode,
-    type ChildPersona,
-    type ChildScopedModel,
-    type ChildThinkingLevel,
+    type SubagentContextMode,
+    type SubagentPersona,
+    type SubagentScopedModel,
+    type SubagentThinkingLevel,
     type SubagentLifetime,
 } from "./personas.ts";
+import { createActiveTurnForkSnapshot, type ModelForkContext } from "./fork.ts";
 import {
     parseStoredSubagentBlocker,
     parseSubagentBlockerResponse,
     type ActiveSubagentBlocker,
 } from "./blockers.ts";
 import {
-    ChildSessionController,
+    SubagentSessionController,
     promptFingerprint,
-    runChildDialog,
+    runSubagentDialog,
     type SubagentPromptAttribution,
     type SubagentPromptCompletion,
 } from "./ui.ts";
 
 const REGISTRY_ENTRY_TYPE = "persistent-subagents";
+export const SUBAGENT_REGISTRY_TOOL_DETAILS_KEY = "persistentSubagentRegistry";
 const LEGACY_REGISTRY_VERSION = 1;
 const REGISTRY_VERSION = 2;
 const PROMPT_ATTRIBUTION_VERSION = 1;
@@ -38,7 +39,7 @@ export const MAX_PERSISTENT_SUBAGENTS = 4;
 export const MAX_RETAINED_STOPPED_SUBAGENTS = 20;
 const MAX_PURPOSE_CHARS = 240;
 const SUBAGENT_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
-const THINKING_LEVELS = new Set<ChildThinkingLevel>([
+const THINKING_LEVELS = new Set<SubagentThinkingLevel>([
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
 ]);
 const LIFETIMES = new Set<SubagentLifetime>(SUBAGENT_LIFETIMES);
@@ -54,7 +55,7 @@ export interface PersistentSubagentSummary {
     blocker?: ActiveSubagentBlocker;
     status: PersistentSubagentStatus;
     model?: string;
-    thinking?: ChildThinkingLevel;
+    thinking?: SubagentThinkingLevel;
     sessionFile?: string;
     createdAt: number;
     lastActiveAt: number;
@@ -63,9 +64,13 @@ export interface PersistentSubagentSummary {
 export interface CreatePersistentSubagentOptions {
     name?: string;
     purpose: string;
-    persona?: ChildPersona;
+    persona?: SubagentPersona;
     lifetime?: SubagentLifetime;
-    mode: ChildContextMode;
+    mode: SubagentContextMode;
+    parentSessionFile?: string;
+    skills?: readonly string[];
+    model?: string;
+    thinking?: SubagentThinkingLevel;
 }
 
 export interface PromptPersistentSubagentOptions {
@@ -82,16 +87,17 @@ interface StoredPersistentSubagent {
     id: string;
     name: string;
     purpose: string;
-    persona?: ChildPersona;
+    persona?: SubagentPersona;
+    selectedSkillPaths: string[];
     lifetime: SubagentLifetime;
-    mode: ChildContextMode;
+    mode: SubagentContextMode;
     parentSessionFile?: string;
     sessionFile?: string;
     sessionDir: string;
     cwd: string;
     model?: string;
-    thinking: ChildThinkingLevel;
-    scopedModels: ChildScopedModel[];
+    thinking: SubagentThinkingLevel;
+    scopedModels: SubagentScopedModel[];
     createdAt: number;
     lastActiveAt: number;
     parentContextProvided?: boolean;
@@ -114,7 +120,7 @@ interface RegistryMutation {
 
 interface RuntimePersistentSubagent {
     stored: StoredPersistentSubagent;
-    controller?: ChildSessionController;
+    controller?: SubagentSessionController;
     unsubscribe?: () => void;
     promptAttributions?: SubagentPromptAttribution[];
     contextPromptFingerprints?: Set<string>;
@@ -132,7 +138,7 @@ export function normalizeSubagentPurpose(value: string): string {
     return `${purpose.slice(0, MAX_PURPOSE_CHARS - 1).trimEnd()}…`;
 }
 
-function clonePersona(persona: ChildPersona | undefined): ChildPersona | undefined {
+function clonePersona(persona: SubagentPersona | undefined): SubagentPersona | undefined {
     if (!persona) return undefined;
     return {
         name: persona.name,
@@ -160,6 +166,7 @@ function cloneStoredSubagent(stored: StoredPersistentSubagent): StoredPersistent
     return {
         ...stored,
         persona: clonePersona(stored.persona),
+        selectedSkillPaths: [...stored.selectedSkillPaths],
         ...(stored.activeBlocker ? { activeBlocker: { ...stored.activeBlocker } } : {}),
         scopedModels: stored.scopedModels.map((model) => ({ ...model })),
     };
@@ -174,14 +181,14 @@ function parseStoredSubagent(value: unknown): StoredPersistentSubagent | undefin
     if (typeof value.id !== "string" || typeof value.name !== "string") return undefined;
     if (value.mode !== "fresh" && value.mode !== "fork") return undefined;
     if (typeof value.sessionDir !== "string" || typeof value.cwd !== "string") return undefined;
-    if (typeof value.thinking !== "string" || !THINKING_LEVELS.has(value.thinking as ChildThinkingLevel)) return undefined;
+    if (typeof value.thinking !== "string" || !THINKING_LEVELS.has(value.thinking as SubagentThinkingLevel)) return undefined;
     if (!Array.isArray(value.scopedModels)) return undefined;
     if (typeof value.createdAt !== "number" || typeof value.lastActiveAt !== "number") return undefined;
 
     const persona = isRecord(value.persona) && typeof value.persona.name === "string"
         && typeof value.persona.description === "string" && typeof value.persona.systemPrompt === "string"
         && typeof value.persona.filePath === "string"
-        ? value.persona as unknown as ChildPersona
+        ? value.persona as unknown as SubagentPersona
         : undefined;
 
     const purpose = normalizeSubagentPurpose(
@@ -196,6 +203,9 @@ function parseStoredSubagent(value: unknown): StoredPersistentSubagent | undefin
         name: value.name,
         purpose,
         ...(persona ? { persona: clonePersona(persona) } : {}),
+        selectedSkillPaths: Array.isArray(value.selectedSkillPaths)
+            ? [...new Set(value.selectedSkillPaths.filter((skill): skill is string => typeof skill === "string"))]
+            : [],
         lifetime: typeof value.lifetime === "string" && LIFETIMES.has(value.lifetime as SubagentLifetime)
             ? value.lifetime as SubagentLifetime
             : "persistent",
@@ -205,14 +215,14 @@ function parseStoredSubagent(value: unknown): StoredPersistentSubagent | undefin
         sessionDir: value.sessionDir,
         cwd: value.cwd,
         ...(typeof value.model === "string" ? { model: value.model } : {}),
-        thinking: value.thinking as ChildThinkingLevel,
+        thinking: value.thinking as SubagentThinkingLevel,
         scopedModels: value.scopedModels.filter(isRecord).flatMap((model) =>
             typeof model.provider === "string" && typeof model.id === "string"
                 ? [{
                     provider: model.provider,
                     id: model.id,
-                    ...(typeof model.thinkingLevel === "string" && THINKING_LEVELS.has(model.thinkingLevel as ChildThinkingLevel)
-                        ? { thinkingLevel: model.thinkingLevel as ChildThinkingLevel }
+                    ...(typeof model.thinkingLevel === "string" && THINKING_LEVELS.has(model.thinkingLevel as SubagentThinkingLevel)
+                        ? { thinkingLevel: model.thinkingLevel as SubagentThinkingLevel }
                         : {}),
                 }]
                 : []),
@@ -276,6 +286,8 @@ export class PersistentSubagentRegistry {
     private readonly pi: ExtensionAPI;
     private ownerSessionId: string | undefined;
     private readonly persistedFingerprints = new Map<string, string>();
+    private deferredPersistenceDepth = 0;
+    private deferredMutation: RegistryMutation | undefined;
     private shuttingDown = false;
 
     constructor(pi: ExtensionAPI) {
@@ -285,22 +297,32 @@ export class PersistentSubagentRegistry {
     restore(ctx: ExtensionContext): void {
         this.ownerSessionId = ctx.sessionManager.getSessionId();
         this.shuttingDown = false;
+        this.deferredPersistenceDepth = 0;
+        this.deferredMutation = undefined;
         this.records.clear();
         this.persistedFingerprints.clear();
 
         const restored = new Map<string, StoredPersistentSubagent>();
-        for (const entry of ctx.sessionManager.getBranch()) {
-            if (entry.type !== "custom" || entry.customType !== REGISTRY_ENTRY_TYPE) continue;
-            const snapshot = parseLegacySnapshot(entry.data);
-            if (snapshot?.ownerSessionId === this.ownerSessionId) {
-                restored.clear();
-                for (const stored of snapshot.subagents) restored.set(stored.id, stored);
-                continue;
-            }
-            const mutation = parseRegistryMutation(entry.data);
-            if (mutation?.ownerSessionId !== this.ownerSessionId) continue;
+        const applyMutation = (mutation: RegistryMutation | undefined) => {
+            if (!mutation || mutation.ownerSessionId !== this.ownerSessionId) return;
             for (const id of mutation.removedIds) restored.delete(id);
             for (const stored of mutation.upserts) restored.set(stored.id, stored);
+        };
+        for (const entry of ctx.sessionManager.getBranch()) {
+            if (entry.type === "custom" && entry.customType === REGISTRY_ENTRY_TYPE) {
+                const snapshot = parseLegacySnapshot(entry.data);
+                if (snapshot?.ownerSessionId === this.ownerSessionId) {
+                    restored.clear();
+                    for (const stored of snapshot.subagents) restored.set(stored.id, stored);
+                    continue;
+                }
+                applyMutation(parseRegistryMutation(entry.data));
+                continue;
+            }
+            if (entry.type === "message" && entry.message.role === "toolResult") {
+                const details = isRecord(entry.message.details) ? entry.message.details : undefined;
+                applyMutation(parseRegistryMutation(details?.[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY]));
+            }
         }
 
         for (const stored of restored.values()) {
@@ -314,7 +336,7 @@ export class PersistentSubagentRegistry {
         this.persist();
     }
 
-    create(ctx: ExtensionContext, options: CreatePersistentSubagentOptions): PersistentSubagentSummary {
+    validateCreate(ctx: ExtensionContext, options: CreatePersistentSubagentOptions): void {
         this.ensureOwner(ctx);
         const name = options.name?.trim() || this.nextName(options.persona?.name ?? "subagent");
         if (name.length > 64 || !SUBAGENT_NAME_PATTERN.test(name)) {
@@ -327,11 +349,20 @@ export class PersistentSubagentRegistry {
         if (activeCount >= MAX_PERSISTENT_SUBAGENTS) {
             throw new Error(`Subagent limit reached (${MAX_PERSISTENT_SUBAGENTS}). List and reuse a matching purpose, or stop one before creating another`);
         }
-
-        const parentSessionFile = options.mode === "fork" ? ctx.sessionManager.getSessionFile() ?? undefined : undefined;
-        if (options.mode === "fork" && (!parentSessionFile || !fs.existsSync(parentSessionFile))) {
-            throw new Error("Cannot fork a parent session that has not been persisted yet");
+        if (options.mode === "fork") {
+            const parentSessionFile = options.parentSessionFile ?? ctx.sessionManager.getSessionFile();
+            if (!parentSessionFile || !fs.existsSync(parentSessionFile)) {
+                throw new Error("Cannot fork a parent session that has not been persisted yet");
+            }
         }
+    }
+
+    create(ctx: ExtensionContext, options: CreatePersistentSubagentOptions): PersistentSubagentSummary {
+        this.validateCreate(ctx, options);
+        const name = options.name?.trim() || this.nextName(options.persona?.name ?? "subagent");
+        const parentSessionFile = options.mode === "fork"
+            ? options.parentSessionFile ?? ctx.sessionManager.getSessionFile() ?? undefined
+            : undefined;
 
         const id = `sa_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
         const sessionDir = this.sessionDir(ctx);
@@ -342,6 +373,7 @@ export class PersistentSubagentRegistry {
             name,
             purpose: normalizeSubagentPurpose(options.purpose),
             ...(options.persona ? { persona: clonePersona(options.persona) } : {}),
+            selectedSkillPaths: [...new Set(options.skills ?? [])],
             lifetime: options.lifetime ?? "persistent",
             mode: options.mode,
             ...(parentSessionFile ? { parentSessionFile } : {}),
@@ -349,14 +381,16 @@ export class PersistentSubagentRegistry {
             cwd: ctx.cwd,
             ...(options.persona?.model
                 ? { model: options.persona.model }
-                : ctx.model
-                    ? { model: `${ctx.model.provider}/${ctx.model.id}` }
-                    : {}),
-            thinking: options.persona?.thinking ?? this.pi.getThinkingLevel() as ChildThinkingLevel,
+                : options.model
+                    ? { model: options.model }
+                    : ctx.model
+                        ? { model: `${ctx.model.provider}/${ctx.model.id}` }
+                        : {}),
+            thinking: options.persona?.thinking ?? options.thinking ?? this.pi.getThinkingLevel() as SubagentThinkingLevel,
             scopedModels: ctx.scopedModels.map(({ model, thinkingLevel }) => ({
                 provider: model.provider,
                 id: model.id,
-                ...(thinkingLevel ? { thinkingLevel: thinkingLevel as ChildThinkingLevel } : {}),
+                ...(thinkingLevel ? { thinkingLevel: thinkingLevel as SubagentThinkingLevel } : {}),
             })),
             createdAt: now,
             lastActiveAt: now,
@@ -368,6 +402,26 @@ export class PersistentSubagentRegistry {
         this.records.set(id, record);
         this.persist();
         return this.summary(record);
+    }
+
+    createActiveTurnForkSnapshot(ctx: ExtensionContext): ModelForkContext {
+        this.ensureOwner(ctx);
+        return createActiveTurnForkSnapshot(ctx.sessionManager, path.join(this.sessionDir(ctx), "fork-snapshots"));
+    }
+
+    deferPersistence(): () => RegistryMutation | undefined {
+        this.deferredPersistenceDepth++;
+        let finished = false;
+        return () => {
+            if (finished) return undefined;
+            finished = true;
+            this.deferredPersistenceDepth--;
+            if (this.deferredPersistenceDepth > 0) return undefined;
+            const mutation = this.deferredMutation;
+            this.deferredMutation = undefined;
+            if (mutation) this.markPersisted();
+            return mutation;
+        };
     }
 
     list(): PersistentSubagentSummary[] {
@@ -434,7 +488,7 @@ export class PersistentSubagentRegistry {
     }
 
     async open(
-        ctx: ExtensionCommandContext,
+        ctx: ExtensionContext,
         target: string,
         initialPrompt = "",
     ): Promise<{ action: "return"; text: string } | { action: "cancel" } | undefined> {
@@ -442,7 +496,7 @@ export class PersistentSubagentRegistry {
         if (record.stored.stopped) throw new Error(`Subagent ${record.stored.name} has been stopped`);
         const controller = this.ensureController(ctx, record);
         const persona = record.stored.persona ? ` · ${record.stored.persona.name}` : "";
-        const result = await runChildDialog(ctx, controller, `Subagent · ${record.stored.name}${persona}`, initialPrompt);
+        const result = await runSubagentDialog(ctx, controller, `Subagent · ${record.stored.name}${persona}`, initialPrompt);
         record.stored.lastActiveAt = Date.now();
         this.captureRuntimeState(record);
         this.persist();
@@ -459,8 +513,8 @@ export class PersistentSubagentRegistry {
         record.stored.lifetime = lifetime;
         record.stored.lastActiveAt = Date.now();
 
-        // Lifetime guidance is part of the child system prompt. Restart an idle
-        // promoted child so its next request cannot keep one-shot instructions.
+        // Lifetime guidance is part of the subagent system prompt. Restart an idle
+        // promoted subagent so its next request cannot keep one-shot instructions.
         if (previous !== lifetime && record.controller) {
             record.unsubscribe?.();
             record.unsubscribe = undefined;
@@ -510,7 +564,7 @@ export class PersistentSubagentRegistry {
         this.records.clear();
     }
 
-    private ensureController(ctx: ExtensionContext, record: RuntimePersistentSubagent): ChildSessionController {
+    private ensureController(ctx: ExtensionContext, record: RuntimePersistentSubagent): SubagentSessionController {
         if (record.controller) {
             const state = record.controller.state;
             if (state.connected || state.phase === "Starting subagent Pi…") return record.controller;
@@ -523,7 +577,7 @@ export class PersistentSubagentRegistry {
             ? stored.sessionFile
             : undefined;
         if (stored.sessionFile && !sessionFile) stored.sessionFile = undefined;
-        const args = buildChildProcessArgs({
+        const args = buildSubagentProcessArgs({
             mode: sessionFile ? "fresh" : stored.mode,
             parentSessionFile: sessionFile ? undefined : stored.parentSessionFile,
             sessionFile,
@@ -535,10 +589,11 @@ export class PersistentSubagentRegistry {
             model: stored.model,
             thinking: stored.thinking,
             scopedModels: stored.scopedModels,
+            skills: stored.selectedSkillPaths,
         });
         const promptAttributions = record.promptAttributions ?? this.readPromptAttributions(stored);
         record.promptAttributions = promptAttributions;
-        const controller = new ChildSessionController(ctx, {
+        const controller = new SubagentSessionController(ctx, {
             args,
             cwd: stored.cwd,
             mode: stored.mode,
@@ -575,7 +630,7 @@ export class PersistentSubagentRegistry {
 
     private processSettledBlocker(
         record: RuntimePersistentSubagent,
-        controller: ChildSessionController,
+        controller: SubagentSessionController,
         response: string,
     ): void {
         const revision = controller.settlementRevision;
@@ -684,6 +739,18 @@ export class PersistentSubagentRegistry {
 
     private persist(): void {
         if (this.shuttingDown || !this.ownerSessionId) return;
+        const mutation = this.currentMutation();
+        if (!mutation) return;
+        if (this.deferredPersistenceDepth > 0) {
+            this.deferredMutation = mutation;
+            return;
+        }
+        this.pi.appendEntry(REGISTRY_ENTRY_TYPE, mutation);
+        this.markPersisted();
+    }
+
+    private currentMutation(): RegistryMutation | undefined {
+        if (!this.ownerSessionId) return undefined;
         const upserts: StoredPersistentSubagent[] = [];
         const currentFingerprints = new Map<string, string>();
         for (const { stored } of this.records.values()) {
@@ -694,18 +761,19 @@ export class PersistentSubagentRegistry {
             }
         }
         const removedIds = [...this.persistedFingerprints.keys()].filter((id) => !currentFingerprints.has(id));
-        if (upserts.length === 0 && removedIds.length === 0) return;
-
-        const mutation: RegistryMutation = {
+        if (upserts.length === 0 && removedIds.length === 0) return undefined;
+        return {
             version: REGISTRY_VERSION,
             ownerSessionId: this.ownerSessionId,
             upserts,
             removedIds,
         };
-        this.pi.appendEntry(REGISTRY_ENTRY_TYPE, mutation);
+    }
+
+    private markPersisted(): void {
         this.persistedFingerprints.clear();
-        for (const [id, fingerprint] of currentFingerprints) {
-            this.persistedFingerprints.set(id, fingerprint);
+        for (const { stored } of this.records.values()) {
+            this.persistedFingerprints.set(stored.id, storedFingerprint(stored));
         }
     }
 

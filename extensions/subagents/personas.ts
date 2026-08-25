@@ -4,18 +4,18 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-export type ChildContextMode = "fresh" | "fork";
-export type ChildThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type SubagentContextMode = "fresh" | "fork";
+export type SubagentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export const SUBAGENT_LIFETIMES = ["one-shot", "task", "persistent"] as const;
 export type SubagentLifetime = typeof SUBAGENT_LIFETIMES[number];
 
-export interface ChildScopedModel {
+export interface SubagentScopedModel {
     provider: string;
     id: string;
-    thinkingLevel?: ChildThinkingLevel;
+    thinkingLevel?: SubagentThinkingLevel;
 }
 
-export interface ChildPersona {
+export interface SubagentPersona {
     name: string;
     description: string;
     systemPrompt: string;
@@ -24,38 +24,39 @@ export interface ChildPersona {
     extensions: string[];
     skills: string[];
     model?: string;
-    thinking?: ChildThinkingLevel;
+    thinking?: SubagentThinkingLevel;
     filePath: string;
 }
 
-export interface ChildPersonaDiscovery {
-    personas: ChildPersona[];
+export interface SubagentPersonaDiscovery {
+    personas: SubagentPersona[];
     diagnostics: string[];
 }
 
-export interface ParsedChildCommand {
-    mode: ChildContextMode;
+export interface ParsedSubagentCommand {
+    mode: SubagentContextMode;
     prompt: string;
     error?: string;
 }
 
-export interface ChildProcessOptions {
-    mode: ChildContextMode;
+export interface SubagentProcessOptions {
+    mode: SubagentContextMode;
     parentSessionFile?: string;
     sessionFile?: string;
     sessionDir?: string;
     sessionName?: string;
     purpose?: string;
     lifetime?: SubagentLifetime;
-    persona?: ChildPersona;
+    persona?: SubagentPersona;
     model?: string;
-    thinking?: ChildThinkingLevel;
-    scopedModels?: readonly ChildScopedModel[];
+    thinking?: SubagentThinkingLevel;
+    scopedModels?: readonly SubagentScopedModel[];
+    skills?: readonly string[];
 }
 
 const PERSONA_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_PERSONA_NAME_CHARS = 64;
-const THINKING_LEVELS = new Set<ChildThinkingLevel>([
+const THINKING_LEVELS = new Set<SubagentThinkingLevel>([
     "off",
     "minimal",
     "low",
@@ -64,7 +65,12 @@ const THINKING_LEVELS = new Set<ChildThinkingLevel>([
     "xhigh",
     "max",
 ]);
-export const BUNDLED_PERSONA_DIRECTORY = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "personas");
+const SUBAGENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
+export const BUNDLED_PERSONA_DIRECTORY = path.resolve(SUBAGENT_DIRECTORY, "personas");
+export const SUBAGENT_EXTENSION_PATHS = [
+    path.resolve(SUBAGENT_DIRECTORY, "../codex-tools/index.ts"),
+    path.resolve(SUBAGENT_DIRECTORY, "../prevent-idle.ts"),
+] as const;
 const MAX_CONTEXT_REQUIREMENTS_CHARS = 240;
 const MAX_PERSONA_DESCRIPTION_CHARS = 240;
 
@@ -124,7 +130,7 @@ function resolvePersonaPath(value: string, personaFile: string): string {
     return path.isAbsolute(value) ? path.normalize(value) : path.resolve(path.dirname(personaFile), value);
 }
 
-function loadPersona(filePath: string): ChildPersona {
+function loadPersona(filePath: string): SubagentPersona {
     const content = fs.readFileSync(filePath, "utf8");
     const { frontmatter, body } = parseFrontmatter<PersonaFrontmatter>(content);
     const fallbackName = path.basename(filePath, path.extname(filePath));
@@ -139,7 +145,7 @@ function loadPersona(filePath: string): ChildPersona {
         ? normalizePersonaContextRequirements(contextRequirementsValue)
         : undefined;
     const thinkingValue = stringValue(frontmatter.thinking);
-    if (thinkingValue && !THINKING_LEVELS.has(thinkingValue as ChildThinkingLevel)) {
+    if (thinkingValue && !THINKING_LEVELS.has(thinkingValue as SubagentThinkingLevel)) {
         throw new Error(`invalid thinking level "${thinkingValue}"`);
     }
     const preferredLifetimeValue = stringValue(frontmatter["preferred-lifetime"]);
@@ -165,7 +171,7 @@ function loadPersona(filePath: string): ChildPersona {
     return {
         name,
         description: normalizePersonaDescription(
-            stringValue(frontmatter.description) ?? `Run the ${name} child persona`,
+            stringValue(frontmatter.description) ?? `Run the ${name} subagent persona`,
         ),
         systemPrompt: body.trim(),
         ...(contextRequirements ? { contextRequirements } : {}),
@@ -173,13 +179,13 @@ function loadPersona(filePath: string): ChildPersona {
         extensions,
         skills,
         ...(stringValue(frontmatter.model) ? { model: stringValue(frontmatter.model) } : {}),
-        ...(thinkingValue ? { thinking: thinkingValue as ChildThinkingLevel } : {}),
+        ...(thinkingValue ? { thinking: thinkingValue as SubagentThinkingLevel } : {}),
         filePath,
     };
 }
 
-export function loadChildPersonas(directory: string): ChildPersonaDiscovery {
-    const personas: ChildPersona[] = [];
+export function loadSubagentPersonas(directory: string): SubagentPersonaDiscovery {
+    const personas: SubagentPersona[] = [];
     const diagnostics: string[] = [];
     if (!fs.existsSync(directory)) return { personas, diagnostics };
 
@@ -189,7 +195,7 @@ export function loadChildPersonas(directory: string): ChildPersonaDiscovery {
     } catch (error) {
         return {
             personas,
-            diagnostics: [`Could not read child persona directory ${directory}: ${error instanceof Error ? error.message : String(error)}`],
+            diagnostics: [`Could not read subagent persona directory ${directory}: ${error instanceof Error ? error.message : String(error)}`],
         };
     }
 
@@ -202,24 +208,24 @@ export function loadChildPersonas(directory: string): ChildPersonaDiscovery {
             const persona = loadPersona(filePath);
             const previous = seen.get(persona.name);
             if (previous) {
-                diagnostics.push(`Ignored duplicate child persona "${persona.name}" in ${filePath}; already defined by ${previous}`);
+                diagnostics.push(`Ignored duplicate subagent persona "${persona.name}" in ${filePath}; already defined by ${previous}`);
                 continue;
             }
             seen.set(persona.name, filePath);
             personas.push(persona);
         } catch (error) {
-            diagnostics.push(`Ignored child persona ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+            diagnostics.push(`Ignored subagent persona ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 
     return { personas, diagnostics };
 }
 
-export function loadChildPersonasFromDirectories(directories: readonly string[]): ChildPersonaDiscovery {
-    const personas = new Map<string, ChildPersona>();
+export function loadSubagentPersonasFromDirectories(directories: readonly string[]): SubagentPersonaDiscovery {
+    const personas = new Map<string, SubagentPersona>();
     const diagnostics: string[] = [];
     for (const directory of [...new Set(directories)]) {
-        const discovery = loadChildPersonas(directory);
+        const discovery = loadSubagentPersonas(directory);
         diagnostics.push(...discovery.diagnostics);
         for (const persona of discovery.personas) personas.set(persona.name, persona);
     }
@@ -229,7 +235,7 @@ export function loadChildPersonasFromDirectories(directories: readonly string[])
     };
 }
 
-export function parseChildCommandArgs(args: string): ParsedChildCommand {
+export function parseSubagentCommandArgs(args: string): ParsedSubagentCommand {
     const trimmed = args.trim();
     if (!trimmed) return { mode: "fresh", prompt: "" };
     if (trimmed === "--fork") return { mode: "fork", prompt: "" };
@@ -238,12 +244,12 @@ export function parseChildCommandArgs(args: string): ParsedChildCommand {
     }
     if (trimmed.startsWith("--")) {
         const flag = trimmed.split(/\s+/, 1)[0] ?? trimmed;
-        return { mode: "fresh", prompt: "", error: `Unknown child option: ${flag}` };
+        return { mode: "fresh", prompt: "", error: `Unknown subagent option: ${flag}` };
     }
     return { mode: "fresh", prompt: trimmed };
 }
 
-export function formatChildModelScope(scopedModels: readonly ChildScopedModel[]): string {
+export function formatSubagentModelScope(scopedModels: readonly SubagentScopedModel[]): string {
     return scopedModels
         .map(({ provider, id, thinkingLevel }) => `${provider}/${id}${thinkingLevel ? `:${thinkingLevel}` : ""}`)
         .join(",");
@@ -286,13 +292,13 @@ export function formatSubagentContinuityPrompt(
     ].join("\n");
 }
 
-export function buildChildProcessArgs(options: ChildProcessOptions): string[] {
+export function buildSubagentProcessArgs(options: SubagentProcessOptions): string[] {
     if (options.mode === "fork" && !options.parentSessionFile) {
         throw new Error("Fork mode requires a persisted parent session file");
     }
 
     if (options.mode === "fork" && options.sessionFile) {
-        throw new Error("Fork mode cannot restore an existing child session file");
+        throw new Error("Fork mode cannot restore an existing subagent session file");
     }
 
     const persona = options.persona;
@@ -305,7 +311,9 @@ export function buildChildProcessArgs(options: ChildProcessOptions): string[] {
         "--no-themes",
     ];
 
-    const modelScope = options.scopedModels?.length ? formatChildModelScope(options.scopedModels) : undefined;
+    for (const extension of SUBAGENT_EXTENSION_PATHS) args.push("--extension", extension);
+
+    const modelScope = options.scopedModels?.length ? formatSubagentModelScope(options.scopedModels) : undefined;
     if (modelScope) args.push("--models", modelScope);
     if (options.sessionDir) args.push("--session-dir", options.sessionDir);
     if (options.sessionName) args.push("--name", options.sessionName);
@@ -323,10 +331,19 @@ export function buildChildProcessArgs(options: ChildProcessOptions): string[] {
         // A trailing newline prevents a one-line persona body from being mistaken
         // for a file path by Pi's system-prompt resolver.
         args.push("--system-prompt", `${persona.systemPrompt}\n`);
-        for (const extension of persona.extensions) args.push("--extension", extension);
-        for (const skill of persona.skills) args.push("--skill", skill);
+        for (const extension of persona.extensions) {
+            if (!SUBAGENT_EXTENSION_PATHS.some((defaultExtension) => defaultExtension === extension)) {
+                args.push("--extension", extension);
+            }
+        }
     }
-    // Leave --tools unset so the child uses Pi's normal configured tool set.
+    const skillPaths = new Set<string>();
+    // Persona skills take priority for restored records created before same-name
+    // conflicts were rejected at creation.
+    for (const skill of persona?.skills ?? []) skillPaths.add(skill);
+    for (const skill of options.skills ?? []) skillPaths.add(skill);
+    for (const skill of skillPaths) args.push("--skill", skill);
+    // Leave --tools unset so the subagent uses Pi's normal configured tool set.
     // Ambient resources stay disabled to prevent recursive subagent loading.
     if (options.purpose?.trim()) {
         args.push("--append-system-prompt", formatSubagentContinuityPrompt(

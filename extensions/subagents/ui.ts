@@ -12,16 +12,16 @@ import {
     type KeybindingsManager,
     type TUI,
 } from "@earendil-works/pi-tui";
-import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ChildContextMode, ChildPersona, ChildScopedModel, ChildThinkingLevel } from "./personas.ts";
-import { ChildRpcClient, type ChildModelInfo, type ChildRpcClientOptions, type ChildRpcOutput } from "./rpc.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { SubagentContextMode, SubagentPersona, SubagentScopedModel, SubagentThinkingLevel } from "./personas.ts";
+import { SubagentRpcClient, type SubagentModelInfo, type SubagentRpcClientOptions, type SubagentRpcOutput } from "./rpc.ts";
 
 const MAX_TOOL_OUTPUT_CHARS = 20_000;
 const MAX_TOOL_OUTPUT_LINES = 10;
 const MAX_ERROR_CHARS = 2_000;
 const MAX_TRANSCRIPT_TEXT_CHARS = 100_000;
 const MAX_TRANSCRIPT_TOTAL_CHARS = 500_000;
-export const MAX_CHILD_TRANSCRIPT_ITEMS = 200;
+export const MAX_SUBAGENT_TRANSCRIPT_ITEMS = 200;
 
 type Theme = ExtensionContext["ui"]["theme"];
 type InputMode = "prompt" | "steer" | "followUp";
@@ -75,14 +75,14 @@ interface StatusItem {
 
 type TranscriptItem = UserItem | AssistantItem | ToolItem | StatusItem;
 
-interface ChildViewState {
+interface SubagentViewState {
     revision: number;
     connected: boolean;
     busy: boolean;
     phase: string;
     sessionFile?: string;
-    model?: ChildModelInfo;
-    thinking: ChildThinkingLevel;
+    model?: SubagentModelInfo;
+    thinking: SubagentThinkingLevel;
     items: TranscriptItem[];
     omittedItems: number;
     lastCompletedAssistantText?: string;
@@ -92,21 +92,21 @@ interface ChildViewState {
     extensionWidgets: Map<string, string[]>;
 }
 
-export interface RunChildDialogOptions {
+export interface RunSubagentDialogOptions {
     args: string[];
     cwd: string;
-    mode: ChildContextMode;
-    persona?: ChildPersona;
+    mode: SubagentContextMode;
+    persona?: SubagentPersona;
     initialPrompt: string;
-    scopedModels: readonly ChildScopedModel[];
+    scopedModels: readonly SubagentScopedModel[];
     promptAttributions?: readonly SubagentPromptAttribution[];
     onPromptAccepted?: (attribution: SubagentPromptAttribution) => void;
     onPromptDelivered?: (fingerprint: string) => void;
 }
 
-type ChildRpcFactory = (options: ChildRpcClientOptions) => ChildRpcClient;
+type SubagentRpcFactory = (options: SubagentRpcClientOptions) => SubagentRpcClient;
 
-export type ChildDialogResult =
+export type SubagentDialogResult =
     | { action: "return"; text: string }
     | { action: "cancel" };
 
@@ -118,7 +118,7 @@ export interface SubagentPromptCompletion {
     stopReason?: string;
 }
 
-export function getChildPanelWidths(width: number): { dialogWidth: number; innerWidth: number } | undefined {
+export function getSubagentPanelWidths(width: number): { dialogWidth: number; innerWidth: number } | undefined {
     if (width < 3) return undefined;
     return { dialogWidth: width, innerWidth: width - 2 };
 }
@@ -139,7 +139,7 @@ function boundedError(error: unknown): Error {
 
 function boundedTranscriptText(text: string): string {
     if (text.length <= MAX_TRANSCRIPT_TEXT_CHARS) return text;
-    const notice = "\n\n[Panel display truncated; full content remains in the child session.]";
+    const notice = "\n\n[Panel display truncated; full content remains in the subagent session.]";
     return `${text.slice(0, MAX_TRANSCRIPT_TEXT_CHARS - notice.length)}${notice}`;
 }
 
@@ -227,7 +227,7 @@ function formatToolArgs(name: string, args: unknown): string {
     }
 }
 
-function modelFrom(value: unknown): ChildModelInfo | undefined {
+function modelFrom(value: unknown): SubagentModelInfo | undefined {
     if (!isRecord(value) || typeof value.provider !== "string" || typeof value.id !== "string") return undefined;
     return {
         provider: value.provider,
@@ -251,7 +251,7 @@ function wrapPlain(text: string, width: number): string[] {
     return lines;
 }
 
-function formatUsageLine(state: ChildViewState): string {
+function formatUsageLine(state: SubagentViewState): string {
     const parts: string[] = [];
     if (state.usage.turns) parts.push(`${state.usage.turns} turn${state.usage.turns === 1 ? "" : "s"}`);
     if (state.usage.input) parts.push(`↑${formatTokens(state.usage.input)}`);
@@ -268,7 +268,7 @@ function formatUsageLine(state: ChildViewState): string {
 }
 
 function renderTranscript(
-    state: ChildViewState,
+    state: SubagentViewState,
     width: number,
     theme: Theme,
     showThinking: boolean,
@@ -284,7 +284,7 @@ function renderTranscript(
     if (state.omittedItems > 0) {
         lines.push(theme.fg(
             "dim",
-            `[${state.omittedItems} earlier transcript item${state.omittedItems === 1 ? "" : "s"} omitted from this panel; full history remains in the child session.]`,
+            `[${state.omittedItems} earlier transcript item${state.omittedItems === 1 ? "" : "s"} omitted from this panel; full history remains in the subagent session.]`,
         ));
     }
 
@@ -370,9 +370,9 @@ function renderTranscript(
     return lines.length > 0 ? lines : [theme.fg("dim", "No subagent messages yet. Type a prompt below.")];
 }
 
-export class ChildSessionController {
-    readonly state: ChildViewState;
-    private readonly rpc: ChildRpcClient;
+export class SubagentSessionController {
+    readonly state: SubagentViewState;
+    private readonly rpc: SubagentRpcClient;
     private readonly refreshCallbacks = new Set<() => void>();
     private setInputCallback: ((text: string) => void) | undefined;
     private refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -398,12 +398,12 @@ export class ChildSessionController {
     private toolSequence = 0;
     private readonly promptAttributions: SubagentPromptAttribution[];
     private ctx: ExtensionContext;
-    private readonly options: RunChildDialogOptions;
+    private readonly options: RunSubagentDialogOptions;
 
     constructor(
         ctx: ExtensionContext,
-        options: RunChildDialogOptions,
-        rpcFactory: ChildRpcFactory = (rpcOptions) => new ChildRpcClient(rpcOptions),
+        options: RunSubagentDialogOptions,
+        rpcFactory: SubagentRpcFactory = (rpcOptions) => new SubagentRpcClient(rpcOptions),
     ) {
         this.ctx = ctx;
         this.options = options;
@@ -445,7 +445,7 @@ export class ChildSessionController {
         });
     }
 
-    attach(ctx: ExtensionCommandContext, refresh: () => void, setInput: (text: string) => void): () => void {
+    attach(ctx: ExtensionContext, refresh: () => void, setInput: (text: string) => void): () => void {
         this.ctx = ctx;
         this.refreshCallbacks.add(refresh);
         this.setInputCallback = setInput;
@@ -952,11 +952,11 @@ export class ChildSessionController {
         const model = modelFrom(state.model);
         if (model) this.state.model = model;
         this.state.sessionFile = state.sessionFile ?? undefined;
-        this.state.thinking = state.thinkingLevel as ChildThinkingLevel;
+        this.state.thinking = state.thinkingLevel as SubagentThinkingLevel;
         this.state.busy = state.isStreaming || state.isCompacting;
     }
 
-    private handleOutput(output: ChildRpcOutput): void {
+    private handleOutput(output: SubagentRpcOutput): void {
         if (output.type === "extension_ui_request" && typeof output.method === "string") {
             void this.handleExtensionUi(output as unknown as RpcExtensionUIRequest);
             return;
@@ -1043,7 +1043,7 @@ export class ChildSessionController {
                 this.addStatus(`Subagent extension error${typeof output.extensionPath === "string" ? ` (${output.extensionPath})` : ""}: ${typeof output.error === "string" ? output.error : "unknown error"}`, "error");
                 return;
             case "thinking_level_changed":
-                if (typeof output.level === "string") this.state.thinking = output.level as ChildThinkingLevel;
+                if (typeof output.level === "string") this.state.thinking = output.level as SubagentThinkingLevel;
                 this.touch();
                 return;
             default:
@@ -1077,7 +1077,7 @@ export class ChildSessionController {
         this.touch();
     }
 
-    private handleMessageUpdate(output: ChildRpcOutput): void {
+    private handleMessageUpdate(output: SubagentRpcOutput): void {
         const deltaEvent = isRecord(output.assistantMessageEvent) ? output.assistantMessageEvent : undefined;
         if (!deltaEvent) return;
         if (!this.activeAssistant) {
@@ -1125,7 +1125,7 @@ export class ChildSessionController {
         this.touch();
     }
 
-    private handleToolStart(output: ChildRpcOutput): void {
+    private handleToolStart(output: SubagentRpcOutput): void {
         const id = typeof output.toolCallId === "string" ? output.toolCallId : `tool-${++this.toolSequence}`;
         const name = typeof output.toolName === "string" ? output.toolName : "unknown";
         const item: ToolItem = {
@@ -1142,7 +1142,7 @@ export class ChildSessionController {
         this.touch();
     }
 
-    private handleToolUpdate(output: ChildRpcOutput): void {
+    private handleToolUpdate(output: SubagentRpcOutput): void {
         if (typeof output.toolCallId !== "string") return;
         const item = this.toolsById.get(output.toolCallId);
         if (!item) return;
@@ -1152,7 +1152,7 @@ export class ChildSessionController {
         this.touch(true);
     }
 
-    private handleToolEnd(output: ChildRpcOutput): void {
+    private handleToolEnd(output: SubagentRpcOutput): void {
         if (typeof output.toolCallId !== "string") return;
         const item = this.toolsById.get(output.toolCallId);
         if (!item) return;
@@ -1165,7 +1165,7 @@ export class ChildSessionController {
         this.touch();
     }
 
-    private handleCompactionEnd(output: ChildRpcOutput): void {
+    private handleCompactionEnd(output: SubagentRpcOutput): void {
         const result = isRecord(output.result) ? output.result : undefined;
         this.addUsage(usageFrom(result?.usage), false);
         const error = typeof output.errorMessage === "string" ? output.errorMessage : undefined;
@@ -1282,7 +1282,7 @@ export class ChildSessionController {
         }, 0);
         while (
             this.state.items.length > 1
-            && (this.state.items.length > MAX_CHILD_TRANSCRIPT_ITEMS || totalChars > MAX_TRANSCRIPT_TOTAL_CHARS)
+            && (this.state.items.length > MAX_SUBAGENT_TRANSCRIPT_ITEMS || totalChars > MAX_TRANSCRIPT_TOTAL_CHARS)
         ) {
             const removed = this.state.items.shift();
             if (!removed) break;
@@ -1327,7 +1327,7 @@ export class ChildSessionController {
     }
 }
 
-export class ChildPanel implements Focusable {
+export class SubagentPanel implements Focusable {
     private readonly input = new Input();
     private _focused = false;
     private showThinking = true;
@@ -1342,7 +1342,7 @@ export class ChildPanel implements Focusable {
     private readonly tui: TUI;
     private readonly theme: Theme;
     private readonly keybindings: KeybindingsManager;
-    private readonly controller: ChildSessionController;
+    private readonly controller: SubagentSessionController;
     private readonly title: string;
     private readonly onReturn: (text: string) => void;
     private readonly onCancel: () => void;
@@ -1360,7 +1360,7 @@ export class ChildPanel implements Focusable {
         tui: TUI,
         theme: Theme,
         keybindings: KeybindingsManager,
-        controller: ChildSessionController,
+        controller: SubagentSessionController,
         title: string,
         onReturn: (text: string) => void,
         onCancel: () => void,
@@ -1453,7 +1453,7 @@ export class ChildPanel implements Focusable {
 
     render(width: number): string[] {
         if (width <= 0) return [];
-        const widths = getChildPanelWidths(width);
+        const widths = getSubagentPanelWidths(width);
         if (!widths) return [this.theme.fg("borderMuted", "·".repeat(width))];
 
         const { innerWidth } = widths;
@@ -1544,22 +1544,22 @@ export class ChildPanel implements Focusable {
     }
 }
 
-export async function runChildDialog(
-    ctx: ExtensionCommandContext,
-    controller: ChildSessionController,
+export async function runSubagentDialog(
+    ctx: ExtensionContext,
+    controller: SubagentSessionController,
     title: string,
     initialPrompt = "",
-): Promise<ChildDialogResult | undefined> {
+): Promise<SubagentDialogResult | undefined> {
     let detach: (() => void) | undefined;
     try {
-        return await ctx.ui.custom<ChildDialogResult>((tui, theme, keybindings, done) => {
+        return await ctx.ui.custom<SubagentDialogResult>((tui, theme, keybindings, done) => {
             let finished = false;
-            const finish = (result: ChildDialogResult) => {
+            const finish = (result: SubagentDialogResult) => {
                 if (finished) return;
                 finished = true;
                 done(result);
             };
-            const panel = new ChildPanel(
+            const panel = new SubagentPanel(
                 tui,
                 theme,
                 keybindings,
