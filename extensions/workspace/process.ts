@@ -9,6 +9,7 @@ export interface ProcessResult {
 export interface ProcessOptions {
     cwd?: string;
     stdin?: string;
+    env?: NodeJS.ProcessEnv;
 }
 
 export interface ProcessRunner {
@@ -20,7 +21,7 @@ export class NodeProcessRunner implements ProcessRunner {
         return new Promise((resolve, reject) => {
             const child = spawn(command, args, {
                 cwd: options.cwd,
-                env: process.env,
+                env: options.env ? { ...process.env, ...options.env } : process.env,
                 shell: false,
                 stdio: ["pipe", "pipe", "pipe"],
             });

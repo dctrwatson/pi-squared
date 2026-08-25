@@ -9,6 +9,7 @@ import {
   WorkspaceService,
   parseCommandWords,
   parseNewWorkspace,
+  parseWorkspaceMerge,
   parseWorkspaceTarget,
 } from "../../extensions/workspace/core.ts";
 import { GitRepository } from "../../extensions/workspace/git.ts";
@@ -16,11 +17,12 @@ import { NodeProcessRunner } from "../../extensions/workspace/process.ts";
 import { stableHash } from "../../extensions/workspace/state.ts";
 import { PiSessionStore, workspaceMetadata } from "../../extensions/workspace/sessions.ts";
 import { parseLauncherArguments, resolveLaunch, validateForwardedPiArguments } from "../../extensions/workspace/launcher.ts";
-import workspaceExtension, { WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
+import workspaceExtension, { WORKSPACE_MERGE_FINALIZE_TOOL, WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
 
 const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
        /workspace or /ws new
        /workspace or /ws new <branch> [--from <ref|current>] [--worktree]
+       /workspace or /ws merge <base-branch> [--squash]
        /workspace or /ws prune
 
 No argument: Open the workspace picker.
@@ -29,6 +31,8 @@ branch:<name>: Force a local branch target.
 new: Start a fresh session for the current branch, or create a branch workspace.
 --from: Select the new branch base; current uses the current commit.
 --worktree: Use a managed worktree.
+merge: Prepare, merge, and remove the current managed workspace.
+--squash: Create one commit on the base branch.
 prune: Remove inactive managed workspaces.
 --help, -h: Show this help.`;
 
@@ -176,6 +180,9 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     from: "current",
     parallel: true,
   });
+  assert.deepEqual(parseWorkspaceMerge(["main"]), { base: "main", mode: "ff" });
+  assert.deepEqual(parseWorkspaceMerge(["--squash", "branch:merge"]), { base: "merge", mode: "squash" });
+  assert.throws(() => parseWorkspaceMerge([]), /requires a base branch/);
   assert.deepEqual(parseLauncherArguments(["--worktree", "feature/test"]), {
     parallel: true,
     target: "feature/test",
@@ -274,7 +281,7 @@ test("workspace aliases share local completion discovery and side-effect-free he
     return completions ? completions.map((item) => item.value) : null;
   };
   assert.deepEqual(await values(workspaceCommand, ""), [
-    "--help", "-h", "new", "prune", "--worktree", "feature/auth", "main", "#42",
+    "--help", "-h", "new", "merge", "prune", "--worktree", "feature/auth", "main", "#42",
   ]);
   const discoveryGitCalls = gitCalls;
   assert.ok(discoveryGitCalls > 0);
@@ -308,6 +315,13 @@ test("workspace aliases share local completion discovery and side-effect-free he
     "new feature/new --from main --worktree",
   ]);
   assert.equal(await values(wsCommand, "new feature/new --from main --worktree "), null);
+  assert.deepEqual(await values(workspaceCommand, "merge "), [
+    "merge feature/auth", "merge main", "merge --squash",
+  ]);
+  assert.deepEqual(await values(workspaceCommand, "merge main "), ["merge main --squash"]);
+  assert.deepEqual(await values(workspaceCommand, "merge --squash "), [
+    "merge --squash feature/auth", "merge --squash main",
+  ]);
 
   const failedCommands = new Map();
   let failureDiscoveries = 0;
@@ -333,6 +347,146 @@ test("workspace aliases share local completion discovery and side-effect-free he
   assert.equal(await values(failedCommand, ""), null);
   assert.equal(await values(failedCommand, "new "), null);
   assert.equal(failureDiscoveries, 1);
+});
+
+test("/ws merge starts an agent commit workflow and enables its guarded finalizer", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const rootService = new WorkspaceService(root, { sessions });
+    const created = await rootService.create({ branch: "feature/merge", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    const commands = new Map();
+    const tools = new Map();
+    const messages = [];
+    let activeTools = ["read", "bash"];
+    workspaceExtension({
+      on() {},
+      appendEntry() {},
+      registerCommand(name, command) { commands.set(name, command); },
+      registerTool(tool) { tools.set(tool.name, tool); },
+      getActiveTools() { return activeTools; },
+      setActiveTools(next) { activeTools = next; },
+      sendUserMessage(message) { messages.push(message); },
+    }, {
+      createService: (cwd) => new WorkspaceService(cwd, { sessions }),
+    });
+    const notifications = [];
+    const context = {
+      mode: "tui",
+      cwd: created.record.cwd,
+      sessionManager: { getSessionFile: () => created.record.session },
+      ui: { notify: (...args) => notifications.push(args) },
+    };
+
+    await commands.get("ws").handler("merge main", context);
+
+    assert.deepEqual(notifications, []);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0], /Group the work into logical commits/);
+    assert.match(messages[0], /fast-forward merge into main/);
+    assert.ok(activeTools.includes(WORKSPACE_MERGE_FINALIZE_TOOL));
+    const finalizer = tools.get(WORKSPACE_MERGE_FINALIZE_TOOL);
+    assert.ok(finalizer);
+    const cancelled = await finalizer.execute("call", {}, undefined, undefined, {
+      sessionManager: { getSessionFile: () => created.record.session },
+      ui: { confirm: async () => false },
+    });
+    assert.equal(cancelled.details.cancelled, true);
+    assert.equal(activeTools.includes(WORKSPACE_MERGE_FINALIZE_TOOL), false);
+    assert.equal(git(root, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/recovery"), "");
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("workspace finalizer defers destructive cleanup until Pi shuts down", async () => {
+  const root = await repository();
+  const originalCwd = process.cwd();
+  try {
+    const sessions = new FakeSessions(root);
+    const rootService = new WorkspaceService(root, { sessions });
+    const created = await rootService.create({ branch: "feature/deferred", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    await writeFile(join(created.record.cwd, "feature.txt"), "feature\n");
+    git(created.record.cwd, "add", "feature.txt");
+    git(created.record.cwd, "commit", "-m", "feature");
+    const commands = new Map();
+    const tools = new Map();
+    let sessionShutdown;
+    let activeTools = ["read", "bash"];
+    workspaceExtension({
+      on(event, handler) {
+        if (event === "session_shutdown") sessionShutdown = handler;
+      },
+      appendEntry() {},
+      registerCommand(name, command) { commands.set(name, command); },
+      registerTool(tool) { tools.set(tool.name, tool); },
+      getActiveTools() { return activeTools; },
+      setActiveTools(next) { activeTools = next; },
+      sendUserMessage() {},
+    }, {
+      createService: (cwd) => new WorkspaceService(cwd, { sessions }),
+    });
+    const commandContext = {
+      mode: "tui",
+      cwd: created.record.cwd,
+      sessionManager: { getSessionFile: () => created.record.session },
+      ui: { notify() {} },
+    };
+    await commands.get("ws").handler("merge main", commandContext);
+    let shutdownRequested = false;
+
+    await tools.get(WORKSPACE_MERGE_FINALIZE_TOOL).execute("call", {}, undefined, undefined, {
+      sessionManager: { getSessionFile: () => created.record.session },
+      ui: { confirm: async () => true },
+      shutdown() { shutdownRequested = true; },
+    });
+
+    assert.equal(shutdownRequested, true);
+    assert.equal(await realpath(created.record.cwd), created.record.cwd);
+    assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", "refs/heads/feature/deferred"), true);
+    assert.equal(await readFile(join(root, "feature.txt"), "utf8"), "feature\n");
+    const pendingCleanup = await (await rootService.state()).getMergeCleanup("feature/deferred");
+    assert.equal(pendingCleanup?.phase, "merged");
+    assert.equal(pendingCleanup?.base, "main");
+
+    await sessionShutdown({}, { ui: { notify() {} } });
+
+    process.chdir(originalCwd);
+    await assert.rejects(realpath(created.record.cwd));
+    assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", "refs/heads/feature/deferred"), false);
+    assert.equal(await (await rootService.state()).getMergeCleanup("feature/deferred"), undefined);
+    assert.ok((await readFile(created.record.session, "utf8")).length > 0);
+  } finally {
+    process.chdir(originalCwd);
+    await removeRepository(root);
+  }
+});
+
+test("a prepared merge cleanup resumes the base update before deletion", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const rootService = new WorkspaceService(root, { sessions });
+    const created = await rootService.create({ branch: "feature/resume", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    await writeFile(join(created.record.cwd, "feature.txt"), "feature\n");
+    git(created.record.cwd, "add", "feature.txt");
+    git(created.record.cwd, "commit", "-m", "feature");
+    const service = new WorkspaceService(created.record.cwd, { sessions });
+    const plan = await service.prepareMerge({ base: "main", mode: "ff" }, created.record.session);
+    const merged = await service.mergeWorkspace(plan);
+    git(root, "reset", "--hard", merged.preMergeBaseOid);
+    await (await rootService.state()).putMergeCleanup({ ...merged, phase: "prepared" });
+
+    const pending = await service.pendingMergeCleanup("main", created.record.session);
+    const resumed = await service.resumeMergeCleanup(pending);
+
+    assert.equal(resumed.phase, "merged");
+    assert.equal(git(root, "rev-parse", "main"), resumed.baseOid);
+    await service.cleanupMergedWorkspace(resumed);
+    assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", "refs/heads/feature/resume"), false);
+  } finally {
+    await removeRepository(root);
+  }
 });
 
 test("workspace completions escape ambiguous branch targets", async () => {
@@ -513,6 +667,9 @@ test("managed worktrees use opaque workspace paths and initialize PM repositorie
     const expected = join(workspace, "src");
 
     assert.equal(created.record.cwd, expected);
+    assert.equal(created.record.baseBranch, "main");
+    assert.equal(created.record.baseOid, git(root, "rev-parse", "main"));
+    assert.equal((await state.getWorkspace("feature/a"))?.baseBranch, "main");
     assert.equal(git(root, "-C", expected, "branch", "--show-current"), "feature/a");
     assert.equal(git(root, "-C", join(workspace, "pm"), "rev-parse", "--is-inside-work-tree"), "true");
     assert.equal(git(root, "status", "--porcelain"), "");
@@ -572,6 +729,150 @@ test("piw prune removes an inactive workspace after its remote branch is deleted
   } finally {
     await removeRepository(root);
     await rm(remote, { recursive: true, force: true });
+  }
+});
+
+test("prune removes normally merged and squash-merged local workspaces", async (t) => {
+  for (const mode of ["ff", "squash"]) {
+    await t.test(mode, async () => {
+      const root = await repository();
+      try {
+        const sessions = new FakeSessions(root);
+        const service = new WorkspaceService(root, { sessions });
+        const created = await service.create({ branch: `feature/${mode}`, parallel: true }, { parallel: true, switchSession: switcher([]) });
+        await writeFile(join(created.record.cwd, `${mode}.txt`), `${mode}\n`);
+        git(created.record.cwd, "add", `${mode}.txt`);
+        git(created.record.cwd, "commit", "-m", `${mode} work`);
+        if (mode === "ff") {
+          git(root, "merge", "--ff-only", `feature/${mode}`);
+        } else {
+          git(root, "merge", "--squash", `feature/${mode}`);
+          git(root, "commit", "-m", `squash ${mode}`);
+        }
+        const state = await service.state();
+        await state.releaseLease(created.record);
+
+        const result = await service.prune();
+
+        assert.deepEqual(result.pruned, [`feature/${mode}`]);
+        assert.equal(await state.getWorkspace(`feature/${mode}`), undefined);
+        assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", `refs/heads/feature/${mode}`), true);
+        await assert.rejects(realpath(created.record.cwd));
+      } finally {
+        await removeRepository(root);
+      }
+    });
+  }
+});
+
+test("prune never removes its current managed checkout", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const rootService = new WorkspaceService(root, { sessions });
+    const created = await rootService.create({ branch: "feature/current", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    await writeFile(join(created.record.cwd, "feature.txt"), "feature\n");
+    git(created.record.cwd, "add", "feature.txt");
+    git(created.record.cwd, "commit", "-m", "feature");
+    git(root, "merge", "--ff-only", "feature/current");
+    await (await rootService.state()).releaseLease(created.record);
+
+    const result = await new WorkspaceService(created.record.cwd, { sessions }).prune();
+
+    assert.match(result.skipped.find((entry) => entry.branch === "feature/current")?.reason ?? "", /current checkout/);
+    assert.equal(await realpath(created.record.cwd), created.record.cwd);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("prune keeps a workspace when its matching squash commit was reverted", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const created = await service.create({ branch: "feature/reverted", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    await writeFile(join(created.record.cwd, "feature.txt"), "feature\n");
+    git(created.record.cwd, "add", "feature.txt");
+    git(created.record.cwd, "commit", "-m", "feature");
+    git(root, "merge", "--squash", "feature/reverted");
+    git(root, "commit", "-m", "squash feature");
+    git(root, "revert", "--no-edit", "HEAD");
+    await (await service.state()).releaseLease(created.record);
+
+    const result = await service.prune();
+
+    assert.deepEqual(result.pruned, []);
+    assert.equal(await realpath(created.record.cwd), created.record.cwd);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("workspace merge finalization fast-forwards or creates a squash commit and removes the source", async (t) => {
+  for (const mode of ["ff", "squash"]) {
+    await t.test(mode, async () => {
+      const root = await repository();
+      try {
+        const sessions = new FakeSessions(root);
+        const rootService = new WorkspaceService(root, { sessions });
+        const created = await rootService.create({ branch: `feature/${mode}`, parallel: true }, { parallel: true, switchSession: switcher([]) });
+        if (mode === "squash") {
+          await writeFile(join(root, "base.txt"), "base advance\n");
+          git(root, "add", "base.txt");
+          git(root, "commit", "-m", "advance base");
+        }
+        await writeFile(join(created.record.cwd, "feature.txt"), `${mode}\n`);
+        git(created.record.cwd, "add", "feature.txt");
+        git(created.record.cwd, "commit", "-m", "feature work");
+        const sourceOid = git(created.record.cwd, "rev-parse", "HEAD");
+        const service = new WorkspaceService(created.record.cwd, { sessions });
+        const plan = await service.prepareMerge({ base: "main", mode }, created.record.session);
+
+        const result = await service.finalizeMerge(plan);
+
+        assert.equal(result.source, `feature/${mode}`);
+        assert.equal(git(root, "branch", "--show-current"), "main");
+        assert.equal(await readFile(join(root, "feature.txt"), "utf8"), `${mode}\n`);
+        assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", `refs/heads/feature/${mode}`), false);
+        assert.equal(gitSucceeds(root, "config", "--local", "--get-regexp", `^branch\\.feature/${mode}\\.`), false);
+        assert.equal(await (await rootService.state()).getWorkspace(`feature/${mode}`), undefined);
+        assert.equal(git(root, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/recovery"), "");
+        assert.ok((await readFile(created.record.session, "utf8")).length > 0);
+        await assert.rejects(realpath(created.record.cwd));
+        if (mode === "ff") assert.equal(git(root, "rev-parse", "main"), sourceOid);
+        else assert.notEqual(git(root, "rev-parse", "main"), sourceOid);
+      } finally {
+        await removeRepository(root);
+      }
+    });
+  }
+});
+
+test("workspace fast-forward finalization refuses a source that is not based on the current base tip", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const rootService = new WorkspaceService(root, { sessions });
+    const created = await rootService.create({ branch: "feature/diverged", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    await writeFile(join(root, "base.txt"), "base\n");
+    git(root, "add", "base.txt");
+    git(root, "commit", "-m", "advance base");
+    await writeFile(join(created.record.cwd, "feature.txt"), "feature\n");
+    git(created.record.cwd, "add", "feature.txt");
+    git(created.record.cwd, "commit", "-m", "feature");
+    const service = new WorkspaceService(created.record.cwd, { sessions });
+    const plan = await service.prepareMerge({ base: "main", mode: "ff" }, created.record.session);
+
+    await assert.rejects(service.finalizeMerge(plan), /must be rebased onto main/);
+
+    assert.equal(await realpath(created.record.cwd), created.record.cwd);
+    assert.equal(gitSucceeds(root, "show-ref", "--verify", "--quiet", "refs/heads/feature/diverged"), true);
+    assert.equal(git(root, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/recovery"), plan.recoveryRef);
+    await service.cancelMerge(plan);
+    assert.equal(git(root, "for-each-ref", "--format=%(refname)", "refs/pi-workspace/recovery"), "");
+  } finally {
+    await removeRepository(root);
   }
 });
 

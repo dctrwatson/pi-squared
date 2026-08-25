@@ -17,6 +17,10 @@ import type {
     PullRequestDetails,
     PullRequestDivergence,
     PullRequestDivergenceChoice,
+    WorkspaceMergeCleanup,
+    WorkspaceMergeOptions,
+    WorkspaceMergePlan,
+    WorkspaceMergeResult,
     WorkspaceMetadata,
     WorkspaceRecord,
     WorkspaceStatus,
@@ -176,6 +180,24 @@ export function parseNewWorkspace(words: string[], command = "/ws new"): NewWork
     return { branch, ...(from ? { from } : {}), parallel };
 }
 
+export function parseWorkspaceMerge(words: string[], command = "/ws merge"): WorkspaceMergeOptions {
+    let base: string | undefined;
+    let mode: WorkspaceMergeOptions["mode"] = "ff";
+    for (const word of words) {
+        if (word === "--squash") {
+            mode = "squash";
+            continue;
+        }
+        if (word.startsWith("--")) throw new WorkspaceError(`Unknown workspace merge option: ${word}`);
+        if (base) throw new WorkspaceError(`${command} accepts one base branch`);
+        const target = parseWorkspaceTarget(word);
+        if (!target || target.type !== "branch") throw new WorkspaceError(`${command} requires a local base branch`);
+        base = target.branch;
+    }
+    if (!base) throw new WorkspaceError(`${command} requires a base branch`);
+    return { base, mode };
+}
+
 export class WorkspaceService {
     readonly git: GitRepository;
     readonly sessions: SessionStore;
@@ -316,6 +338,16 @@ export class WorkspaceService {
         if (active) throw new WorkspaceError(`Workspace ${active.record.branch} is active in another Pi session`);
     }
 
+    private async assertMergeBaseAvailable(state: WorkspaceState, cwd: string, sourceSession: string): Promise<void> {
+        for (const record of await state.listWorkspaces()) {
+            if (resolve(record.session) === resolve(sourceSession) || !await samePath(record.cwd, cwd)) continue;
+            const lease = await state.readLease(record.session);
+            if (lease && await state.processIsLive(lease)) {
+                throw new WorkspaceError(`Workspace ${record.branch} is active in another Pi session`);
+            }
+        }
+    }
+
     private async mutableCheckoutForActivation(branch: string, parallel: boolean): Promise<string | undefined> {
         const paths = await this.git.paths();
         const worktree = await this.git.findWorktree(branch);
@@ -363,10 +395,15 @@ export class WorkspaceService {
 
     async prune(): Promise<PruneResult> {
         const state = await this.state();
+        const currentCwd = (await this.git.paths()).currentCwd;
         return state.withMutationLock(async () => {
             const result: PruneResult = { pruned: [], skipped: [] };
             for (const record of await state.listWorkspaces()) {
                 if (!await this.git.isManagedWorktree(record.cwd)) continue;
+                if (await samePath(record.cwd, currentCwd)) {
+                    result.skipped.push({ branch: record.branch, reason: "workspace is the current checkout" });
+                    continue;
+                }
                 const worktree = await this.git.findWorktree(record.branch);
                 if (worktree && !await samePath(worktree.cwd, record.cwd)) {
                     result.skipped.push({ branch: record.branch, reason: "branch is checked out elsewhere" });
@@ -382,22 +419,39 @@ export class WorkspaceService {
                     continue;
                 }
                 if (lease) await state.removeKnownStaleLease(record.session);
-                let remote: string | undefined;
-                let remoteExists: boolean;
-                try {
-                    remote = await this.git.remoteForBranch(record.branch);
-                    if (!remote) {
-                        result.skipped.push({ branch: record.branch, reason: "no remote is configured" });
+                let integrated = false;
+                if (record.baseBranch && record.baseBranch !== record.branch) {
+                    try {
+                        const [sourceOid, baseOid] = await Promise.all([
+                            this.git.localBranchOid(record.branch),
+                            this.git.localBranchOid(record.baseBranch),
+                        ]);
+                        integrated = Boolean(sourceOid && baseOid && record.baseOid && sourceOid !== record.baseOid
+                            && await this.git.integrationIntoBase(sourceOid, baseOid));
+                    } catch {
+                        // A remote deletion can still prove that the workspace is ready to prune.
+                    }
+                }
+                if (!integrated) {
+                    let remote: string | undefined;
+                    let remoteExists: boolean;
+                    try {
+                        remote = await this.git.remoteForBranch(record.branch);
+                        if (!remote) {
+                            const base = record.baseBranch ? ` and is not integrated into ${record.baseBranch}` : " and has no recorded base branch";
+                            result.skipped.push({ branch: record.branch, reason: `no remote is configured${base}` });
+                            continue;
+                        }
+                        remoteExists = await this.git.remoteBranchExists(remote, record.branch);
+                    } catch (error) {
+                        result.skipped.push({ branch: record.branch, reason: `could not verify remote: ${error instanceof Error ? error.message : String(error)}` });
                         continue;
                     }
-                    remoteExists = await this.git.remoteBranchExists(remote, record.branch);
-                } catch (error) {
-                    result.skipped.push({ branch: record.branch, reason: `could not verify remote: ${error instanceof Error ? error.message : String(error)}` });
-                    continue;
-                }
-                if (remoteExists) {
-                    result.skipped.push({ branch: record.branch, reason: `remote branch exists on ${remote}` });
-                    continue;
+                    if (remoteExists) {
+                        const base = record.baseBranch ? ` and branch is not integrated into ${record.baseBranch}` : "";
+                        result.skipped.push({ branch: record.branch, reason: `remote branch exists on ${remote}${base}` });
+                        continue;
+                    }
                 }
                 const workspace = dirname(record.cwd);
                 const workspacePm = join(workspace, "pm");
@@ -414,6 +468,309 @@ export class WorkspaceService {
             }
             return result;
         });
+    }
+
+    async pendingMergeCleanup(
+        base: string,
+        session: string | undefined,
+    ): Promise<WorkspaceMergeCleanup | undefined> {
+        if (!session) return undefined;
+        const state = await this.state();
+        const paths = await this.git.paths();
+        const source = await this.git.branch(paths.currentCwd);
+        const cleanup = await state.getMergeCleanup(source);
+        if (!cleanup) return undefined;
+        if (cleanup.base !== base) throw new WorkspaceError(`Workspace cleanup is pending for base branch ${cleanup.base}`);
+        if (resolve(cleanup.session) !== resolve(session) || !await samePath(cleanup.sourceCwd, paths.currentCwd)) {
+            throw new WorkspaceError("The pending workspace cleanup belongs to another Pi session");
+        }
+        const [sourceOid, baseOid] = await Promise.all([
+            this.git.localBranchOid(source),
+            this.git.localBranchOid(base),
+        ]);
+        if (sourceOid !== cleanup.sourceOid) throw new WorkspaceError("The source branch changed after the pending workspace merge");
+        const expectedBaseOids = cleanup.phase === "merged"
+            ? [cleanup.baseOid]
+            : [cleanup.preMergeBaseOid, cleanup.baseOid];
+        if (!baseOid || !expectedBaseOids.includes(baseOid)) {
+            throw new WorkspaceError("The base branch changed after the pending workspace merge");
+        }
+        return cleanup;
+    }
+
+    async resumeMergeCleanup(cleanup: WorkspaceMergeCleanup, ownerPid = process.pid): Promise<WorkspaceMergeCleanup> {
+        const git = new GitRepository(cleanup.primaryCwd, this.git.runner);
+        const paths = await git.paths();
+        const state = new WorkspaceState(git, paths.commonDir, paths.primaryCwd);
+        return state.withMutationLock(async () => {
+            const record = await state.getWorkspace(cleanup.source);
+            if (!record || resolve(record.session) !== resolve(cleanup.session)) {
+                throw new WorkspaceError("The pending workspace cleanup is stale");
+            }
+            const lease = await state.readLease(record.session);
+            if (!lease || lease.pid !== ownerPid || lease.hostname !== hostname() || lease.session !== record.session) {
+                throw new WorkspaceError("The current Pi process does not own this workspace");
+            }
+            const baseWorktree = await git.findWorktree(cleanup.base);
+            if (!baseWorktree || !await samePath(baseWorktree.cwd, paths.primaryCwd)) {
+                throw new WorkspaceError(`Base branch ${cleanup.base} must be checked out in the primary checkout`);
+            }
+            await this.assertMergeBaseAvailable(state, baseWorktree.cwd, record.session);
+            const [sourceOid, baseOid] = await Promise.all([
+                git.localBranchOid(cleanup.source),
+                git.localBranchOid(cleanup.base),
+            ]);
+            if (sourceOid !== cleanup.sourceOid) throw new WorkspaceError("The source branch changed before workspace cleanup");
+            if (baseOid === cleanup.preMergeBaseOid) {
+                await git.assertClean(baseWorktree.cwd);
+                await git.fastForward(baseWorktree.cwd, cleanup.baseOid);
+            } else if (baseOid !== cleanup.baseOid) {
+                throw new WorkspaceError("The base branch changed before workspace cleanup");
+            }
+            const merged = { ...cleanup, phase: "merged" as const };
+            await state.putMergeCleanup(merged);
+            return merged;
+        });
+    }
+
+    async prepareMerge(
+        options: WorkspaceMergeOptions,
+        session: string | undefined,
+        ownerPid = process.pid,
+    ): Promise<WorkspaceMergePlan> {
+        if (!session) throw new WorkspaceError("The current Pi session is not persisted");
+        const state = await this.state();
+        return state.withMutationLock(async () => {
+            const paths = await this.git.paths();
+            const source = await this.git.branch(paths.currentCwd);
+            if (source === options.base) throw new WorkspaceError("A workspace cannot merge into itself");
+            const record = await state.getWorkspace(source);
+            if (!record || !await samePath(record.cwd, paths.currentCwd) || !await this.git.isManagedWorktree(record.cwd)) {
+                throw new WorkspaceError("/ws merge requires the current managed workspace");
+            }
+            if (resolve(record.session) !== resolve(session)) throw new WorkspaceError("The current session does not own this workspace");
+            const lease = await state.readLease(record.session);
+            if (!lease || lease.pid !== ownerPid || lease.hostname !== hostname() || lease.session !== record.session) {
+                throw new WorkspaceError("The current Pi process does not own this workspace");
+            }
+            const [sourceOid, baseOid] = await Promise.all([
+                this.git.localBranchOid(source),
+                this.git.localBranchOid(options.base),
+            ]);
+            if (!sourceOid) throw new WorkspaceError(`Local branch does not exist: ${source}`);
+            if (!baseOid) throw new WorkspaceError(`Local base branch does not exist: ${options.base}`);
+            const baseWorktree = await this.git.findWorktree(options.base);
+            if (!baseWorktree || !await samePath(baseWorktree.cwd, paths.primaryCwd)) {
+                throw new WorkspaceError(`Base branch ${options.base} must be checked out in the primary checkout`);
+            }
+            await this.assertMergeBaseAvailable(state, baseWorktree.cwd, record.session);
+            await this.git.assertClean(baseWorktree.cwd);
+            if (!record.baseBranch || (record.baseBranch === options.base && !record.baseOid)) {
+                const recordedBaseOid = record.baseOid ?? await this.git.mergeBase(sourceOid, baseOid) ?? baseOid;
+                await state.putWorkspace({ ...record, baseBranch: options.base, baseOid: recordedBaseOid, updatedAt: now() });
+            }
+            const operationId = randomUUID();
+            const recoveryRef = `refs/pi-workspace/recovery/${stableHash(source, 32)}/${Date.now()}-${operationId}`;
+            if (!await this.git.updateRef(recoveryRef, sourceOid, "0".repeat(sourceOid.length))) {
+                throw new WorkspaceError("Could not create a workspace merge recovery ref");
+            }
+            return {
+                ...options,
+                operationId,
+                source,
+                sourceCwd: record.cwd,
+                sourceOid,
+                primaryCwd: paths.primaryCwd,
+                session: record.session,
+                baseOid,
+                recoveryRef,
+            };
+        });
+    }
+
+    private async createSquashCommit(
+        git: GitRepository,
+        state: WorkspaceState,
+        plan: WorkspaceMergePlan,
+        sourceOid: string,
+    ): Promise<string> {
+        const temporary = join(state.root, `.merge-${plan.operationId}`);
+        let worktreeAdded = false;
+        try {
+            await git.addDetachedWorktree(temporary, plan.baseOid);
+            worktreeAdded = true;
+            await git.run(["merge", "--squash", "--no-commit", sourceOid], temporary);
+            await git.run(["commit", "-m", `Merge branch '${plan.source}' into ${plan.base}`], temporary);
+            return git.branchOid(temporary);
+        } finally {
+            if (worktreeAdded) {
+                try {
+                    await git.removeWorktreeForce(temporary);
+                } catch {
+                    // The temporary checkout contains no unique source commits.
+                }
+            }
+            await rm(temporary, { recursive: true, force: true });
+        }
+    }
+
+    async cancelMerge(plan: WorkspaceMergePlan): Promise<void> {
+        const git = new GitRepository(plan.primaryCwd, this.git.runner);
+        await git.updateRef(plan.recoveryRef, undefined, plan.sourceOid);
+    }
+
+    async mergeWorkspace(plan: WorkspaceMergePlan, ownerPid = process.pid): Promise<WorkspaceMergeCleanup> {
+        const git = new GitRepository(plan.primaryCwd, this.git.runner);
+        const paths = await git.paths();
+        if (!await samePath(paths.primaryCwd, plan.primaryCwd)) throw new WorkspaceError("The merge repository changed");
+        const state = new WorkspaceState(git, paths.commonDir, paths.primaryCwd);
+        return state.withMutationLock(async () => {
+            const record = await state.getWorkspace(plan.source);
+            if (!record || resolve(record.session) !== resolve(plan.session) || !await samePath(record.cwd, plan.sourceCwd)) {
+                throw new WorkspaceError("The pending workspace merge is stale");
+            }
+            const lease = await state.readLease(record.session);
+            if (!lease || lease.pid !== ownerPid || lease.hostname !== hostname() || lease.session !== record.session) {
+                throw new WorkspaceError("The current Pi process does not own this workspace");
+            }
+            const baseWorktree = await git.findWorktree(plan.base);
+            if (!baseWorktree || !await samePath(baseWorktree.cwd, paths.primaryCwd)) {
+                throw new WorkspaceError(`Base branch ${plan.base} must be checked out in the primary checkout`);
+            }
+            await this.assertMergeBaseAvailable(state, baseWorktree.cwd, record.session);
+            const [sourceOid, baseOid, recoveryOid] = await Promise.all([
+                git.localBranchOid(plan.source),
+                git.localBranchOid(plan.base),
+                git.refOid(plan.recoveryRef),
+            ]);
+            if (!sourceOid || !baseOid) throw new WorkspaceError("A merge branch no longer exists");
+            if (recoveryOid !== plan.sourceOid) throw new WorkspaceError("The workspace merge recovery ref changed");
+            if (baseOid !== plan.baseOid) throw new WorkspaceError(`Base branch ${plan.base} changed; run /ws merge again`);
+            if (await git.branch(record.cwd) !== plan.source) throw new WorkspaceError("The source worktree changed branches");
+            const workspacePm = join(dirname(record.cwd), "pm");
+            await git.assertClean(record.cwd);
+            if (await pathExists(workspacePm)) await git.assertClean(workspacePm);
+            await git.assertClean(baseWorktree.cwd);
+
+            let mergedOid: string;
+            if (plan.mode === "ff") {
+                if (!await git.isAncestor(baseOid, sourceOid)) {
+                    throw new WorkspaceError(`Branch ${plan.source} must be rebased onto ${plan.base} before a fast-forward merge`);
+                }
+                mergedOid = sourceOid;
+            } else {
+                mergedOid = await this.createSquashCommit(git, state, plan, sourceOid);
+            }
+            let finalRecoveryRef: string | undefined;
+            if (sourceOid !== plan.sourceOid) {
+                finalRecoveryRef = `${plan.recoveryRef}-final`;
+                if (!await git.updateRef(finalRecoveryRef, sourceOid, "0".repeat(sourceOid.length))) {
+                    throw new WorkspaceError("Could not create the final workspace merge recovery ref");
+                }
+            }
+            const cleanup: WorkspaceMergeCleanup = {
+                phase: "prepared",
+                source: plan.source,
+                base: plan.base,
+                baseOid: mergedOid,
+                session: plan.session,
+                sourceCwd: plan.sourceCwd,
+                sourceOid,
+                initialSourceOid: plan.sourceOid,
+                primaryCwd: plan.primaryCwd,
+                preMergeBaseOid: baseOid,
+                recoveryRef: plan.recoveryRef,
+                ...(finalRecoveryRef ? { finalRecoveryRef } : {}),
+            };
+            await state.putMergeCleanup(cleanup);
+            try {
+                await git.fastForward(baseWorktree.cwd, mergedOid);
+            } catch (error) {
+                await state.removeMergeCleanup(plan.source);
+                throw error;
+            }
+            const merged = { ...cleanup, phase: "merged" as const };
+            await state.putMergeCleanup(merged);
+            return merged;
+        });
+    }
+
+    async cleanupMergedWorkspace(
+        cleanup: WorkspaceMergeCleanup,
+        options: { ownerPid?: number; beforeRemove?: () => void } = {},
+    ): Promise<WorkspaceMergeResult> {
+        const ownerPid = options.ownerPid ?? process.pid;
+        if (cleanup.phase !== "merged") throw new WorkspaceError("The base merge is not complete");
+        const git = new GitRepository(cleanup.primaryCwd, this.git.runner);
+        const paths = await git.paths();
+        const state = new WorkspaceState(git, paths.commonDir, paths.primaryCwd);
+        return state.withMutationLock(async () => {
+            const record = await state.getWorkspace(cleanup.source);
+            if (!record || resolve(record.session) !== resolve(cleanup.session) || !await samePath(record.cwd, cleanup.sourceCwd)) {
+                throw new WorkspaceError("The merged workspace cleanup is stale");
+            }
+            const lease = await state.readLease(record.session);
+            if (!lease || lease.pid !== ownerPid || lease.hostname !== hostname() || lease.session !== record.session) {
+                throw new WorkspaceError("The current Pi process does not own this workspace");
+            }
+            const [sourceOid, baseOid] = await Promise.all([
+                git.localBranchOid(cleanup.source),
+                git.localBranchOid(cleanup.base),
+            ]);
+            if (sourceOid !== cleanup.sourceOid || baseOid !== cleanup.baseOid) {
+                throw new WorkspaceError("A merge branch changed before workspace cleanup");
+            }
+            if (await git.branch(record.cwd) !== cleanup.source) throw new WorkspaceError("The source worktree changed branches");
+            const workspace = dirname(record.cwd);
+            const workspacePm = join(workspace, "pm");
+            await git.assertClean(record.cwd);
+            if (await pathExists(workspacePm)) await git.assertClean(workspacePm);
+            options.beforeRemove?.();
+            if (await samePath(process.cwd(), record.cwd)) {
+                throw new WorkspaceError("Workspace cleanup requires Pi to leave the source checkout");
+            }
+            await git.detach(record.cwd, cleanup.sourceOid);
+            if (!await git.updateRef(`refs/heads/${cleanup.source}`, undefined, cleanup.sourceOid)) {
+                try {
+                    await git.run(["checkout", cleanup.source], record.cwd);
+                } catch {
+                    // The source recovery refs retain both known source tips.
+                }
+                throw new WorkspaceError(`Could not delete merged branch ${cleanup.source}`);
+            }
+            try {
+                await git.removeWorktree(record.cwd);
+            } catch (error) {
+                if (await git.updateRef(`refs/heads/${cleanup.source}`, cleanup.sourceOid, "0".repeat(cleanup.sourceOid.length))) {
+                    try {
+                        await git.run(["checkout", cleanup.source], record.cwd);
+                    } catch {
+                        // The detached worktree and recovery refs retain the source.
+                    }
+                }
+                throw error;
+            }
+            await state.releaseLease(record, ownerPid);
+            await rm(workspace, { recursive: true, force: true });
+            await state.removeWorkspace(cleanup.source);
+            await git.removeBranchConfig(cleanup.source);
+            await git.updateRef(cleanup.recoveryRef, undefined, cleanup.initialSourceOid);
+            if (cleanup.finalRecoveryRef) await git.updateRef(cleanup.finalRecoveryRef, undefined, cleanup.sourceOid);
+            return {
+                source: cleanup.source,
+                base: cleanup.base,
+                baseOid: cleanup.baseOid,
+                session: cleanup.session,
+            };
+        });
+    }
+
+    async finalizeMerge(
+        plan: WorkspaceMergePlan,
+        options: { ownerPid?: number; beforeRemove?: () => void } = {},
+    ): Promise<WorkspaceMergeResult> {
+        const cleanup = await this.mergeWorkspace(plan, options.ownerPid);
+        return this.cleanupMergedWorkspace(cleanup, options);
     }
 
     async currentMetadata(session?: string): Promise<WorkspaceMetadata> {
@@ -597,6 +954,11 @@ export class WorkspaceService {
                 : options.from === "current"
                     ? await this.git.assertRef("HEAD")
                     : await this.git.assertRef(options.from);
+            const baseBranch = options.from === undefined
+                ? "main"
+                : options.from === "current"
+                    ? await this.git.branch(paths.currentCwd)
+                    : await this.git.localBranchForRef(options.from);
             await this.git.assertNewBranch(options.branch);
             const rollback: Rollback = {
                 primary,
@@ -613,10 +975,15 @@ export class WorkspaceService {
                     await this.git.createBranch(options.branch, from, primary);
                     cwd = primary;
                 }
-                const record = await this.createRecord(state, options.branch, cwd, undefined);
+                const record = await this.createRecord(state, options.branch, cwd, undefined, baseBranch, from);
                 rollback.record = record;
                 rollback.createdSession = record.session;
-                rollback.config = await state.snapshot([state.sessionKey(options.branch), state.lastKey]);
+                rollback.config = await state.snapshot([
+                    state.sessionKey(options.branch),
+                    state.baseKey(options.branch),
+                    state.baseOidKey(options.branch),
+                    state.lastKey,
+                ]);
                 await state.putWorkspace(record);
                 await state.putLast(record);
                 const result: Activation = {
@@ -881,13 +1248,22 @@ export class WorkspaceService {
         return cwd;
     }
 
-    private async createRecord(state: WorkspaceState, branch: string, cwd: string, pr: PullRequest | undefined): Promise<WorkspaceRecord> {
+    private async createRecord(
+        state: WorkspaceState,
+        branch: string,
+        cwd: string,
+        pr: PullRequest | undefined,
+        baseBranch?: string,
+        baseOid?: string,
+    ): Promise<WorkspaceRecord> {
         const canonicalCwd = await canonicalPath(cwd);
         const session = await this.sessions.create(workspaceMetadata(state.commonDir, branch, canonicalCwd, pr));
         return {
             version: 2,
             repository: state.commonDir,
             branch,
+            ...(baseBranch ? { baseBranch } : {}),
+            ...(baseOid ? { baseOid } : {}),
             session,
             cwd: canonicalCwd,
             ...(pr ? { pr, prUrl: pr.url } : {}),

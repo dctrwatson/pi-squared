@@ -13,6 +13,8 @@ export interface WorkspaceRecord {
     version: 2;
     repository: string;
     branch: string;
+    baseBranch?: string;
+    baseOid?: string;
     session: string;
     cwd: string;
     pr?: PullRequest;
@@ -72,6 +74,42 @@ export interface Activation {
 export interface PruneResult {
     pruned: string[];
     skipped: Array<{ branch: string; reason: string }>;
+}
+
+export type WorkspaceMergeMode = "ff" | "squash";
+
+export interface WorkspaceMergeOptions {
+    base: string;
+    mode: WorkspaceMergeMode;
+}
+
+export interface WorkspaceMergePlan extends WorkspaceMergeOptions {
+    operationId: string;
+    source: string;
+    sourceCwd: string;
+    sourceOid: string;
+    primaryCwd: string;
+    session: string;
+    baseOid: string;
+    recoveryRef: string;
+}
+
+export interface WorkspaceMergeResult {
+    source: string;
+    base: string;
+    baseOid: string;
+    session: string;
+}
+
+export interface WorkspaceMergeCleanup extends WorkspaceMergeResult {
+    phase: "prepared" | "merged";
+    sourceCwd: string;
+    sourceOid: string;
+    initialSourceOid: string;
+    primaryCwd: string;
+    preMergeBaseOid: string;
+    recoveryRef: string;
+    finalRecoveryRef?: string;
 }
 
 export interface PullRequestDivergence {

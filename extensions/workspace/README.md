@@ -16,11 +16,15 @@ Install this package as a global Pi package. Put `bin/piw` on your `PATH`. The l
 - `/ws new <branch>` creates a branch workspace.
 - `/ws new <branch> --from <ref>` selects the base ref. Use `--from current` to use the current commit.
 - `/ws new <branch> --worktree` creates the branch in a managed worktree and switches the current Pi session.
-- `/ws prune` removes inactive managed workspaces when their remote branch no longer exists.
+- `/ws merge <base-branch>` asks Pi to group the work into logical commits, run checks, fast-forward the base branch, and remove the managed workspace.
+- `/ws merge <base-branch> --squash` creates one commit on the base branch before it removes the managed workspace.
+- `/ws prune` removes inactive managed workspaces when their remote branch no longer exists or their work is integrated into the recorded local base branch.
 
-Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
+Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `merge`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` and `merge` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
 
-Without `--from`, `/ws new <branch>` and `piw new <branch>` use only `refs/heads/main`. They fail when that local branch is absent. They do not fetch or use `origin/main`.
+Without `--from`, `/ws new <branch>` and `piw new <branch>` use only `refs/heads/main`. They fail when that local branch is absent. They do not fetch or use `origin/main`. The workspace records the local base branch and its initial commit for merge checks.
+
+`/ws merge` is an agent workflow. Pi reviews the source work and commits it in logical groups. For the default mode, Pi rebases the source when necessary and the finalizer uses a fast-forward merge. With `--squash`, the finalizer creates the squash commit in a temporary worktree. Before it merges, the finalizer asks for confirmation. Pi saves recovery refs and cleanup state, merges the base, and requests shutdown. During shutdown, it removes the source worktree, PM repository, workspace binding, lease, local source branch, and recovery state. It preserves the Pi session file. If Pi exits before cleanup starts, run `/ws merge <base-branch>` again from the source workspace to resume it. The base branch must be clean and checked out in the primary checkout.
 
 The picker reads local Git, session, and lease state only. It does not call `gh`. Active workspaces are shown in a status message and are not choices. A stale pull request row tells you to run `/ws #N`. That explicit command can contact GitHub to repair the workspace.
 
@@ -56,11 +60,14 @@ The extension stores only these workspace keys in shared local Git config:
 
 - `branch.<branch>.pi-workspace-session` is the central session path.
 - `branch.<branch>.pi-workspace-pr` is the canonical PR URL when the branch is bound.
+- `branch.<branch>.pi-workspace-base` is the local base branch when it is known.
+- `branch.<branch>.pi-workspace-base-oid` is the base commit at workspace creation.
+- `branch.<branch>.pi-workspace-merge-cleanup` is temporary recovery state after a workspace merge.
 - `pi-workspace.last` is the last branch name.
 
 Session headers and `pi-workspace` custom session metadata contain the detailed workspace validation data. Git branch rename moves branch-scoped config bindings. Lease names use the central session path, so a rename keeps its live lease. Managed worktrees are at `<repo>/.ws/<12-character-branch-hash>/src`. The extension initializes an empty Git repository at the sibling `pm` path for durable project records. While its workspace is active, the `workspace-pm` skill is available for plans, tasks, decisions, and related records. It adds `/.ws/` to `.git/info/exclude`. Lease files remain below `<git-common-dir>/pi-workspaces/.state`. A private Git ref provides the operation lock.
 
-`/ws prune` and `piw prune` use `git ls-remote` to check each managed branch. They use its configured remote, `origin`, or the only configured remote. They skip active or dirty workspaces and branches that have no remote. Pruning removes the `src` worktree, its sibling `pm` repository, and the workspace binding. It preserves the local branch and Pi session.
+`/ws prune` and `piw prune` first check the recorded local base branch. They recognize a normal merge by Git ancestry. They recognize an exact squash merge by comparing the complete source patch with commits on the base branch. If local integration is not proven, they use `git ls-remote` to check each managed branch. They use its configured remote, `origin`, or the only configured remote. They skip active or dirty workspaces when neither local integration nor remote deletion is proven. Pruning removes the `src` worktree, its sibling `pm` repository, and the workspace binding. It preserves the local branch and Pi session.
 
 `git clean -ffdx` can remove ignored `.ws` workspaces. Do not run it when you need those workspaces.
 

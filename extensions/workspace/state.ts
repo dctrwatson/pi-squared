@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { GitRepository } from "./git.ts";
 import { WorkspaceError } from "./process.ts";
 import { readWorkspaceSession } from "./sessions.ts";
-import type { LeaseRecord, WorkspaceRecord } from "./types.ts";
+import type { LeaseRecord, WorkspaceMergeCleanup, WorkspaceRecord } from "./types.ts";
 
 const CONFIG_PREFIX = "pi-workspace";
 const MUTATION_LOCK_REF = "refs/pi-workspace/mutation-lock";
@@ -87,6 +87,18 @@ export class WorkspaceState {
         return `branch.${branch}.pi-workspace-pr`;
     }
 
+    baseKey(branch: string): string {
+        return `branch.${branch}.pi-workspace-base`;
+    }
+
+    baseOidKey(branch: string): string {
+        return `branch.${branch}.pi-workspace-base-oid`;
+    }
+
+    mergeCleanupKey(branch: string): string {
+        return `branch.${branch}.pi-workspace-merge-cleanup`;
+    }
+
     get lastKey(): string {
         return `${CONFIG_PREFIX}.last`;
     }
@@ -111,19 +123,52 @@ export class WorkspaceState {
         const session = await this.getConfig(this.sessionKey(branch));
         if (!session) return undefined;
         const stored = await readWorkspaceSession(session);
-        const prUrl = await this.getConfig(this.prKey(branch));
+        const [prUrl, baseBranch, baseOid] = await Promise.all([
+            this.getConfig(this.prKey(branch)),
+            this.getConfig(this.baseKey(branch)),
+            this.getConfig(this.baseOidKey(branch)),
+        ]);
         const metadata = stored?.metadata;
         const pr = metadata?.pr && prUrl && sameUrl(metadata.pr.url, prUrl) ? metadata.pr : undefined;
         return {
             version: 2,
             repository: metadata?.repository ?? this.commonDir,
             branch,
+            ...(baseBranch ? { baseBranch } : {}),
+            ...(baseOid ? { baseOid } : {}),
             session,
             cwd: metadata?.cwd ?? stored?.header.cwd ?? this.commonDir,
             ...(pr ? { pr } : {}),
             ...(prUrl ? { prUrl } : {}),
             updatedAt: now(),
         };
+    }
+
+    async getMergeCleanup(branch: string): Promise<WorkspaceMergeCleanup | undefined> {
+        const value = await this.getConfig(this.mergeCleanupKey(branch));
+        if (!value) return undefined;
+        try {
+            const cleanup = JSON.parse(value) as Partial<WorkspaceMergeCleanup>;
+            if (typeof cleanup.source !== "string" || typeof cleanup.base !== "string" || typeof cleanup.baseOid !== "string"
+                || cleanup.phase !== "prepared" && cleanup.phase !== "merged"
+                || typeof cleanup.session !== "string" || typeof cleanup.sourceCwd !== "string" || typeof cleanup.sourceOid !== "string"
+                || typeof cleanup.initialSourceOid !== "string" || typeof cleanup.primaryCwd !== "string"
+                || typeof cleanup.preMergeBaseOid !== "string" || typeof cleanup.recoveryRef !== "string" || cleanup.source !== branch
+                || cleanup.finalRecoveryRef !== undefined && typeof cleanup.finalRecoveryRef !== "string") {
+                throw new Error("invalid cleanup");
+            }
+            return cleanup as WorkspaceMergeCleanup;
+        } catch {
+            throw new WorkspaceError(`Workspace merge cleanup state is invalid for ${branch}`);
+        }
+    }
+
+    async putMergeCleanup(cleanup: WorkspaceMergeCleanup): Promise<void> {
+        await this.setConfig(this.mergeCleanupKey(cleanup.source), JSON.stringify(cleanup));
+    }
+
+    async removeMergeCleanup(branch: string): Promise<void> {
+        await this.unsetConfig(this.mergeCleanupKey(branch));
     }
 
     async listWorkspaces(): Promise<WorkspaceRecord[]> {
@@ -151,6 +196,8 @@ export class WorkspaceState {
         const prUrl = current.pr?.url ?? current.prUrl;
         if (prUrl) await this.setConfig(this.prKey(current.branch), prUrl);
         else await this.unsetConfig(this.prKey(current.branch));
+        if (current.baseBranch) await this.setConfig(this.baseKey(current.branch), current.baseBranch);
+        if (current.baseOid) await this.setConfig(this.baseOidKey(current.branch), current.baseOid);
     }
 
     async putLast(record: WorkspaceRecord): Promise<void> {
@@ -160,6 +207,9 @@ export class WorkspaceState {
     async removeWorkspace(branch: string): Promise<void> {
         await this.unsetConfig(this.sessionKey(branch));
         await this.unsetConfig(this.prKey(branch));
+        await this.unsetConfig(this.baseKey(branch));
+        await this.unsetConfig(this.baseOidKey(branch));
+        await this.unsetConfig(this.mergeCleanupKey(branch));
         if (await this.getLast() === branch) await this.unsetConfig(this.lastKey);
     }
 
