@@ -601,7 +601,8 @@ export class WorkspaceService {
             worktreeAdded = true;
             await git.run(["merge", "--squash", "--no-commit", sourceOid], temporary);
             await git.run(["commit", "-m", `Merge branch '${plan.source}' into ${plan.base}`], temporary);
-            return git.branchOid(temporary);
+            // Wait for Git before the finally block removes the temporary worktree.
+            return await git.branchOid(temporary);
         } finally {
             if (worktreeAdded) {
                 try {

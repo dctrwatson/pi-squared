@@ -32,7 +32,7 @@
     "check": "node ./node_modules/typescript/bin/tsc --noEmit",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
-    "test": "npm run test:extensions && npm run test:skills",
+    "test": "node --experimental-strip-types --test tests/extensions/*.test.mjs tests/skills/*.test.mjs",
     "test:extensions": "node --experimental-strip-types --test tests/extensions/*.test.mjs",
     "test:skills": "node --test tests/skills/*.test.mjs"
   },
