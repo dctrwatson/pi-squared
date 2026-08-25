@@ -41,7 +41,6 @@ piw prune                   # Remove workspaces for deleted remote branches
 piw -- --model anthropic/claude-sonnet-4-5
 ```
 
-Put Pi arguments after `--`. `piw` rejects forwarded session and extension-disable options. `piw new <branch>` creates a branch workspace. Add `--worktree` to create it in a managed worktree. Bare `piw` uses the branch checked out in its current directory. Run `piw` from any repository path to resume that branch workspace. A plain `pi` session remains independent and does not change workspace bindings unless you run `/ws`.
 
 An explicit PR command can contact GitHub. If its trusted local branch differs from the current PR head, use `/ws #N` in Pi to choose one of these actions:
 
