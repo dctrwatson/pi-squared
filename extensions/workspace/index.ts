@@ -2,10 +2,12 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { registerArgumentCommand } from "../support/command-support.ts";
 import { WorkspaceError } from "./process.ts";
 import { WorkspaceService, parseCommandWords, parseNewWorkspace, parseWorkspaceTarget } from "./core.ts";
 import { sessionHasAutomaticWorkspaceName, WORKSPACE_SESSION_NAME_TYPE, WORKSPACE_SESSION_TYPE } from "./sessions.ts";
-import type { PruneResult, PullRequestDivergenceChoice, WorkspaceStatus } from "./types.ts";
+import type { PruneResult, PullRequestDivergenceChoice, WorkspaceRecord, WorkspaceStatus } from "./types.ts";
 
 export const WORKSPACE_PM_SKILL_PATH = join(
     dirname(fileURLToPath(import.meta.url)),
@@ -13,6 +15,17 @@ export const WORKSPACE_PM_SKILL_PATH = join(
     "workspace-pm",
     "SKILL.md",
 );
+
+export interface WorkspaceExtensionOptions {
+    createService?: (cwd: string) => WorkspaceService;
+    completionCwd?: () => string;
+}
+
+interface WorkspaceCompletionCandidates {
+    branches: readonly string[];
+    refs: readonly string[];
+    pullRequests: readonly number[];
+}
 
 function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
@@ -37,15 +50,15 @@ function recency(timestamp: number | undefined): string {
     return `${Math.round(seconds / 86_400)}d`;
 }
 
-function pullRequestNumber(status: WorkspaceStatus): number | undefined {
-    if (status.record.pr) return status.record.pr.number;
-    const match = status.record.prUrl?.match(/\/pull\/(\d+)$/i);
+function pullRequestNumber(record: Pick<WorkspaceRecord, "pr" | "prUrl">): number | undefined {
+    if (record.pr) return record.pr.number;
+    const match = record.prUrl?.match(/\/pull\/(\d+)$/i);
     return match?.[1] ? Number(match[1]) : undefined;
 }
 
 function workspaceLabel(status: WorkspaceStatus): string {
     const parts = [status.record.branch];
-    const number = pullRequestNumber(status);
+    const number = pullRequestNumber(status.record);
     if (number) parts.push(`#${number}`);
     parts.push(status.placement === "primary" ? "primary" : "worktree");
     parts.push(recency(status.recency));
@@ -62,6 +75,206 @@ function pruneText(result: PruneResult): string {
     const pruned = result.pruned.length > 0 ? `Pruned: ${result.pruned.join(", ")}.` : "No workspace was pruned.";
     const skipped = result.skipped.map((entry) => `${entry.branch} (${entry.reason})`);
     return skipped.length > 0 ? `${pruned} Skipped: ${skipped.join("; ")}.` : pruned;
+}
+
+const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
+       /workspace or /ws new
+       /workspace or /ws new <branch> [--from <ref|current>] [--worktree]
+       /workspace or /ws prune
+
+No argument: Open the workspace picker.
+target: Local branch, pull request number, or GitHub pull request URL.
+branch:<name>: Force a local branch target.
+new: Start a fresh session for the current branch, or create a branch workspace.
+--from: Select the new branch base; current uses the current commit.
+--worktree: Use a managed worktree.
+prune: Remove inactive managed workspaces.
+--help, -h: Show this help.`;
+const WORKSPACE_TOP_LEVEL_COMPLETIONS: readonly AutocompleteItem[] = [
+    { value: "new", label: "new", description: "Create a workspace" },
+    { value: "prune", label: "prune", description: "Remove inactive managed workspaces" },
+    { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
+];
+const WORKSPACE_NEW_OPTION_COMPLETIONS: readonly AutocompleteItem[] = [
+    { value: "--from", label: "--from", description: "Select the base ref" },
+    { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
+];
+const WORKSPACE_WORKTREE_COMPLETION: readonly AutocompleteItem[] = [
+    { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
+];
+
+function completionValue(words: readonly string[], value: string): string {
+    return [...words, value].join(" ");
+}
+
+function prefixedCompletions(
+    words: readonly string[],
+    prefix: string,
+    candidates: readonly AutocompleteItem[],
+): AutocompleteItem[] {
+    return candidates
+        .filter((candidate) => candidate.value.startsWith(prefix))
+        .map((candidate) => ({ ...candidate, value: completionValue(words, candidate.value) }));
+}
+
+function requiresBranchTargetPrefix(branch: string): boolean {
+    return branch === "new" || branch === "prune" || /^#?\d+$/.test(branch) || branch.startsWith("branch:");
+}
+
+function branchTargetValue(branch: string): string {
+    return requiresBranchTargetPrefix(branch) ? `branch:${branch}` : branch;
+}
+
+function branchCompletionValue(branch: string, prefix: string): string {
+    if (prefix.startsWith("branch:") && !requiresBranchTargetPrefix(branch)) return `branch:${branch}`;
+    return branchTargetValue(branch);
+}
+
+function workspaceTargetCompletions(
+    words: readonly string[],
+    prefix: string,
+    candidates: WorkspaceCompletionCandidates,
+): AutocompleteItem[] {
+    const branches = candidates.branches.flatMap((branch) => {
+        const value = branchCompletionValue(branch, prefix);
+        if (!branch.startsWith(prefix) && !value.startsWith(prefix)) return [];
+        return [{
+            value: completionValue(words, value),
+            label: branch,
+            description: "Local branch",
+        }];
+    });
+    const pullRequests = candidates.pullRequests
+        .filter((number) => {
+            const value = String(number);
+            return value.startsWith(prefix) || `#${value}`.startsWith(prefix);
+        })
+        .map((number) => ({
+            value: completionValue(words, `#${number}`),
+            label: `#${number}`,
+            description: "Known pull request",
+        }));
+    return [...branches, ...pullRequests];
+}
+
+function isKnownWorkspaceTarget(value: string, candidates: WorkspaceCompletionCandidates): boolean {
+    let target: ReturnType<typeof parseWorkspaceTarget>;
+    try {
+        target = parseWorkspaceTarget(value);
+    } catch {
+        return false;
+    }
+    if (!target) return false;
+    if (target.type === "branch") {
+        return candidates.branches.includes(target.branch)
+            && (value.startsWith("branch:") || !requiresBranchTargetPrefix(target.branch));
+    }
+    return candidates.pullRequests.includes(target.number);
+}
+
+function completionTokens(argumentPrefix: string): { words: string[]; prefix: string } | undefined {
+    try {
+        const words = parseCommandWords(argumentPrefix);
+        if (/\s$/.test(argumentPrefix)) return { words, prefix: "" };
+        return { words: words.slice(0, -1), prefix: words.at(-1) ?? "" };
+    } catch {
+        return undefined;
+    }
+}
+
+function newCompletionState(words: readonly string[]): {
+    awaitingRef: boolean;
+    hasFrom: boolean;
+    hasWorktree: boolean;
+} | undefined {
+    let awaitingRef = false;
+    let hasFrom = false;
+    let hasWorktree = false;
+    let hasBranch = false;
+    for (const word of words) {
+        if (awaitingRef) {
+            awaitingRef = false;
+            hasFrom = true;
+            continue;
+        }
+        if (word === "--from") {
+            if (hasFrom) return undefined;
+            awaitingRef = true;
+            continue;
+        }
+        if (word === "--worktree") {
+            if (hasWorktree) return undefined;
+            hasWorktree = true;
+            continue;
+        }
+        if (word.startsWith("--") || hasBranch) return undefined;
+        hasBranch = true;
+    }
+    return { awaitingRef, hasFrom, hasWorktree };
+}
+
+function newWorkspaceCompletions(
+    words: readonly string[],
+    prefix: string,
+    candidates: WorkspaceCompletionCandidates,
+): AutocompleteItem[] {
+    const state = newCompletionState(words.slice(1));
+    if (!state) return [];
+    if (state.awaitingRef) {
+        const refs: AutocompleteItem[] = [
+            { value: "current", label: "current", description: "Current checkout" },
+            ...candidates.refs
+                .filter((ref) => ref !== "current")
+                .map((ref) => ({ value: ref, label: ref, description: "Local Git ref" })),
+        ];
+        return prefixedCompletions(words, prefix, refs);
+    }
+    if (prefix && !prefix.startsWith("--")) return [];
+
+    const options = WORKSPACE_NEW_OPTION_COMPLETIONS.filter((option) =>
+        (option.value !== "--from" || !state.hasFrom)
+        && (option.value !== "--worktree" || !state.hasWorktree));
+    return prefixedCompletions(words, prefix, options);
+}
+
+function getWorkspaceArgumentCompletions(
+    argumentPrefix: string,
+    candidates: WorkspaceCompletionCandidates,
+): AutocompleteItem[] | null {
+    const tokens = completionTokens(argumentPrefix);
+    if (!tokens) return null;
+    const { words, prefix } = tokens;
+    let completions: AutocompleteItem[];
+    if (words.length === 0) {
+        completions = [
+            ...prefixedCompletions(words, prefix, WORKSPACE_TOP_LEVEL_COMPLETIONS),
+            ...workspaceTargetCompletions(words, prefix, candidates),
+        ];
+    } else if (words[0] === "new") {
+        completions = newWorkspaceCompletions(words, prefix, candidates);
+    } else if (words.length === 1 && words[0] === "--worktree") {
+        completions = workspaceTargetCompletions(words, prefix, candidates);
+    } else if (words.length === 1 && isKnownWorkspaceTarget(words[0]!, candidates)) {
+        completions = prefixedCompletions(words, prefix, WORKSPACE_WORKTREE_COMPLETION);
+    } else {
+        completions = [];
+    }
+    return completions.length > 0 ? completions : null;
+}
+
+async function discoverWorkspaceCompletionCandidates(service: WorkspaceService): Promise<WorkspaceCompletionCandidates> {
+    const [state, branches, refs] = await Promise.all([
+        service.state(),
+        service.git.localBranches(),
+        service.git.localRefs(),
+    ]);
+    const records = await state.listWorkspaces();
+    const pullRequests = [...new Set(
+        records
+            .map(pullRequestNumber)
+            .filter((number): number is number => number !== undefined && Number.isSafeInteger(number)),
+    )].sort((left, right) => left - right);
+    return { branches, refs, pullRequests };
 }
 
 function isTui(ctx: ExtensionCommandContext): boolean {
@@ -146,7 +359,7 @@ export async function picker(service: WorkspaceService, ctx: ExtensionCommandCon
     const status = selectable.find((candidate) => workspaceLabel(candidate) === selected);
     if (!status) return;
     if (status.stale) {
-        const number = pullRequestNumber(status);
+        const number = pullRequestNumber(status.record);
         if (number) {
             ctx.ui.notify(`Workspace #${number} is stale. Run /ws #${number} to repair it.`, "info");
             return;
@@ -214,14 +427,36 @@ export async function handleWorkspace(args: string, ctx: ExtensionCommandContext
     }
 }
 
-export default function workspaceExtension(pi: ExtensionAPI): void {
-    pi.registerCommand("workspace", {
+export default function workspaceExtension(
+    pi: ExtensionAPI,
+    options: WorkspaceExtensionOptions = {},
+): void {
+    const createService = options.createService ?? ((cwd: string) => new WorkspaceService(cwd));
+    let workspaceCwd: string | undefined;
+    let completionCandidates: Promise<WorkspaceCompletionCandidates> | undefined;
+    const loadCompletionCandidates = (): Promise<WorkspaceCompletionCandidates> => {
+        if (!completionCandidates) {
+            completionCandidates = Promise.resolve()
+                .then(() => discoverWorkspaceCompletionCandidates(createService(options.completionCwd?.() ?? workspaceCwd ?? process.cwd())));
+        }
+        return completionCandidates;
+    };
+    const getArgumentCompletions = async (argumentPrefix: string): Promise<AutocompleteItem[] | null> =>
+        getWorkspaceArgumentCompletions(argumentPrefix, await loadCompletionCandidates());
+    const handleCommand = async (args: string, ctx: ExtensionCommandContext): Promise<void> =>
+        handleWorkspace(args, ctx, createService(ctx.cwd));
+
+    registerArgumentCommand(pi, "workspace", {
         description: "Open or switch a branch workspace",
-        handler: handleWorkspace,
+        helpText: WORKSPACE_HELP_TEXT,
+        getArgumentCompletions,
+        handler: handleCommand,
     });
-    pi.registerCommand("ws", {
+    registerArgumentCommand(pi, "ws", {
         description: "Open or switch a branch workspace",
-        handler: handleWorkspace,
+        helpText: WORKSPACE_HELP_TEXT,
+        getArgumentCompletions,
+        handler: handleCommand,
     });
 
     let owned: { branch: string; session: string } | undefined;
@@ -231,8 +466,9 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
         systemPrompt: `${event.systemPrompt}\n\nActive workspace PM: \`../pm\`. Load \`workspace-pm\` for durable project records.`,
     } : undefined);
     pi.on("session_start", async (_event, ctx) => {
+        workspaceCwd = ctx.cwd;
         pmPath = undefined;
-        const service = new WorkspaceService(ctx.cwd);
+        const service = createService(ctx.cwd);
         try {
             const session = ctx.sessionManager.getSessionFile();
             if (!session) return;
@@ -261,7 +497,7 @@ export default function workspaceExtension(pi: ExtensionAPI): void {
     pi.on("session_shutdown", async (_event, ctx) => {
         if (!owned) return;
         try {
-            const state = await new WorkspaceService(ctx.cwd).state();
+            const state = await createService(ctx.cwd).state();
             await state.releaseLease(owned);
         } finally {
             owned = undefined;

@@ -4,8 +4,11 @@
  * Starts a fresh session with a focused context transfer in the editor.
  *
  * Usage:
- *   /handoff          Transfer the last complete assistant response verbatim.
- *   /handoff generate Generate a self-contained handoff from active context.
+ *   /handoff [generate]
+ *
+ * Default (verbatim): Transfer the last complete assistant response.
+ * generate: Generate a self-contained handoff from active context.
+ * --help, -h: Show this help.
  */
 
 import { type AssistantMessage, type Message, uuidv7 } from "@earendil-works/pi-ai";
@@ -18,6 +21,8 @@ import {
     type ExtensionContext,
     type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { registerArgumentCommand } from "./support/command-support.ts";
 
 export const HANDOFF_SYSTEM_PROMPT = `You are a session handoff writer. Your only task is to produce the first user message for a fresh coding-agent session. The new session cannot access this conversation.
 
@@ -40,6 +45,18 @@ Rules:
 
 export const HANDOFF_MAX_TOKENS = 4_096;
 const HANDOFF_GENERATION_REQUEST = "Create the handoff now.";
+const HANDOFF_HELP_TEXT = `Usage: /handoff [generate]
+
+Default (verbatim): Transfer the last complete assistant response.
+generate: Generate a self-contained handoff from active context.
+--help, -h: Show this help.`;
+const HANDOFF_ARGUMENT_COMPLETIONS: readonly AutocompleteItem[] = [
+    {
+        value: "generate",
+        label: "generate",
+        description: "Generate a self-contained handoff from active context",
+    },
+];
 
 type HandoffMode = "verbatim" | "generate";
 type ActiveModel = NonNullable<ExtensionContext["model"]>;
@@ -49,6 +66,14 @@ export function parseHandoffMode(args: string): HandoffMode | undefined {
     if (!value) return "verbatim";
     if (value === "generate") return "generate";
     return undefined;
+}
+
+function getHandoffArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+    if (/\s/.test(argumentPrefix)) return null;
+
+    const completions = HANDOFF_ARGUMENT_COMPLETIONS.filter((item) =>
+        item.value.startsWith(argumentPrefix));
+    return completions.length > 0 ? completions : null;
 }
 
 /** Extract only visible assistant text, preserving text-block order and contents. */
@@ -176,8 +201,10 @@ async function generateWithLoader(
 }
 
 export default function (pi: ExtensionAPI) {
-    pi.registerCommand("handoff", {
+    registerArgumentCommand(pi, "handoff", {
         description: "Start a fresh session with the latest response or generated context handoff",
+        helpText: HANDOFF_HELP_TEXT,
+        getArgumentCompletions: getHandoffArgumentCompletions,
         handler: async (args, ctx) => {
             if (ctx.mode !== "tui") {
                 if (ctx.hasUI) ctx.ui.notify("/handoff requires TUI mode", "error");

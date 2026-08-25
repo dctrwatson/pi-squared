@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const {
+  default: qa,
   extractQuestionsWithModel,
   formatExtractionInput,
   formatQaAnswers,
@@ -17,6 +18,23 @@ const {
   MAX_SELECTED_SKILL_METADATA_CHARS,
   readRoots,
 } = await import("../../extensions/skill-loader.ts");
+
+test("qa and skill loader register no-argument commands directly", () => {
+  const commands = new Map();
+  const pi = {
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+  };
+  qa(pi);
+  skillLoader(pi);
+
+  const qaCommand = commands.get("qa");
+  const skillLoaderCommand = commands.get("skill-loader");
+  assert.ok(qaCommand);
+  assert.ok(skillLoaderCommand);
+  assert.equal(qaCommand.getArgumentCompletions, undefined);
+  assert.equal(skillLoaderCommand.getArgumentCompletions, undefined);
+});
 
 test("parseExtractedQuestions accepts only bounded, unique question strings", () => {
   const result = parseExtractedQuestions(`Here is the result:\n[\n  {"question":"Which database should we use?"},\n  {"question":"Which database should we use?"},\n  {"question":42},\n  "not an object"\n]`);

@@ -103,6 +103,20 @@ export class GitRepository {
         return this.refOid(`refs/heads/${branch}`);
     }
 
+    private async localRefNames(prefixes: readonly string[]): Promise<string[]> {
+        const result = await this.tryRun(["for-each-ref", "--format=%(refname:short)", ...prefixes]);
+        if (!result.ok) throw new WorkspaceError("Could not list local Git refs");
+        return [...new Set(result.stdout.split("\n").map((ref) => ref.trim()).filter(Boolean))].sort();
+    }
+
+    async localBranches(): Promise<string[]> {
+        return this.localRefNames(["refs/heads"]);
+    }
+
+    async localRefs(): Promise<string[]> {
+        return this.localRefNames(["refs/heads", "refs/tags"]);
+    }
+
     async remoteForBranch(branch: string): Promise<string | undefined> {
         const configured = await this.tryRun(["config", "--local", "--get", `branch.${branch}.remote`]);
         if (configured.ok && configured.stdout.trim()) return configured.stdout.trim() === "." ? undefined : configured.stdout.trim();

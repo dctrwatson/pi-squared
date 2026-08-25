@@ -11,6 +11,11 @@ const {
   getLastCompleteAssistantText,
   parseHandoffMode,
 } = handoffModule;
+const HANDOFF_HELP_TEXT = `Usage: /handoff [generate]
+
+Default (verbatim): Transfer the last complete assistant response.
+generate: Generate a self-contained handoff from active context.
+--help, -h: Show this help.`;
 
 function assistantEntry(content, stopReason = "stop") {
   return {
@@ -32,18 +37,19 @@ function assistantEntry(content, stopReason = "stop") {
 }
 
 function registerHandoffCommand() {
-  let handler;
+  let command;
   handoffModule.default({
-    registerCommand(name, command) {
+    registerCommand(name, registeredCommand) {
       assert.equal(name, "handoff");
-      handler = command.handler;
+      command = registeredCommand;
     },
     getThinkingLevel() {
       return "off";
     },
   });
-  assert.equal(typeof handler, "function");
-  return handler;
+  assert.equal(typeof command?.handler, "function");
+  assert.equal(typeof command?.getArgumentCompletions, "function");
+  return command;
 }
 
 test("handoff accepts only its default mode and generate", () => {
@@ -52,6 +58,57 @@ test("handoff accepts only its default mode and generate", () => {
   assert.equal(parseHandoffMode(" generate "), "generate");
   assert.equal(parseHandoffMode("transfer"), undefined);
   assert.equal(parseHandoffMode("generate now"), undefined);
+});
+
+test("handoff help runs before TUI checks and side effects", async () => {
+  const { handler } = registerHandoffCommand();
+  const notifications = [];
+  let generated = false;
+  let sessionCreated = false;
+  const context = {
+    get mode() {
+      throw new Error("Help must run before the TUI check");
+    },
+    ui: {
+      notify: (...args) => notifications.push(args),
+      custom: async () => {
+        generated = true;
+      },
+    },
+    newSession: async () => {
+      sessionCreated = true;
+      return { cancelled: false };
+    },
+  };
+
+  await handler("--help", context);
+  await handler("-h", context);
+
+  assert.deepEqual(notifications, [
+    [HANDOFF_HELP_TEXT, "info"],
+    [HANDOFF_HELP_TEXT, "info"],
+  ]);
+  assert.equal(generated, false);
+  assert.equal(sessionCreated, false);
+});
+
+test("handoff completes only its generate first argument", async () => {
+  const { getArgumentCompletions } = registerHandoffCommand();
+  const values = async (prefix) => {
+    const completions = await getArgumentCompletions(prefix);
+    return completions ? completions.map((item) => item.value) : null;
+  };
+
+  assert.deepEqual(await values(""), ["--help", "-h", "generate"]);
+  assert.deepEqual(await values("--"), ["--help"]);
+  assert.deepEqual(await values("-h"), ["-h"]);
+  assert.deepEqual(await getArgumentCompletions("g"), [{
+    value: "generate",
+    label: "generate",
+    description: "Generate a self-contained handoff from active context",
+  }]);
+  assert.equal(await values("transfer"), null);
+  assert.equal(await values("generate more"), null);
 });
 
 test("handoff extracts only visible assistant text verbatim", () => {
@@ -167,7 +224,7 @@ test("generated handoffs dispatch through the model runtime without retaining ca
 });
 
 test("default handoff creates a linked blank session and leaves the draft in its editor", async () => {
-  const handler = registerHandoffCommand();
+  const { handler } = registerHandoffCommand();
   const notifications = [];
   const replacementNotifications = [];
   let newSessionOptions;
@@ -205,7 +262,7 @@ test("default handoff creates a linked blank session and leaves the draft in its
 });
 
 test("handoff rejects active sessions and does not create a destination", async () => {
-  const handler = registerHandoffCommand();
+  const { handler } = registerHandoffCommand();
   const notifications = [];
 
   await handler("", {
@@ -224,7 +281,7 @@ test("handoff rejects active sessions and does not create a destination", async 
 });
 
 test("handoff falls back to generation when there is no complete response", async () => {
-  const handler = registerHandoffCommand();
+  const { handler } = registerHandoffCommand();
   const notifications = [];
 
   await handler("", {

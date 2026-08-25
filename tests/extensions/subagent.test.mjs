@@ -34,10 +34,19 @@ const {
   parseSubagentBlockerResponse,
   parseSubagentsCommandArgs,
   PersistentSubagentRegistry,
+  SUBAGENT_COMMAND_HELP_TEXT,
   SUBAGENT_EXECUTION_PROFILES,
   SUBAGENT_EXTENSION_PATHS,
   SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
 } = subagentsModule;
+const SUBAGENTS_HELP_TEXT = `Usage: /subagents [name-or-id]
+       /subagents --stop [name-or-id]
+       /subagents --enable | --disable
+
+name-or-id: Open an active subagent.
+--stop: Stop an active subagent.
+--enable, --disable: Enable or disable the model subagent tool.
+--help, -h: Show this help.`;
 
 function makeControllerHarness({
   mode = "fresh",
@@ -248,6 +257,225 @@ test("subagent command accepts only a leading complete --fork option", () => {
     prompt: "",
     error: "Unknown subagent option: --forked",
   });
+});
+
+test("subagent creation commands share help and complete only before prompts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-command-help-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const personaDirectory = join(root, "personas");
+  await mkdir(personaDirectory);
+  await writeFile(join(personaDirectory, "help-scout.md"), `---
+name: help-scout
+description: Inspect a focused area
+---
+Inspect only the requested area.
+`);
+
+  const commands = new Map();
+  let registryEntries = 0;
+  subagentsModule.default({
+    appendEntry() { registryEntries++; },
+    getThinkingLevel() { return "off"; },
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
+    registerTool() {},
+  }, { personaDirectory });
+
+  const baseCommand = commands.get("subagent");
+  const personaCommand = commands.get("subagent:help-scout");
+  assert.ok(baseCommand);
+  assert.ok(personaCommand);
+
+  let created = 0;
+  let opened = 0;
+  const originalCreate = PersistentSubagentRegistry.prototype.create;
+  const originalOpen = PersistentSubagentRegistry.prototype.open;
+  PersistentSubagentRegistry.prototype.create = function () {
+    created++;
+    throw new Error("Help must not create a registry entry");
+  };
+  PersistentSubagentRegistry.prototype.open = async function () {
+    opened++;
+    throw new Error("Help must not start a subagent process");
+  };
+  t.after(() => {
+    PersistentSubagentRegistry.prototype.create = originalCreate;
+    PersistentSubagentRegistry.prototype.open = originalOpen;
+  });
+
+  const notifications = [];
+  const helpContext = {
+    get mode() {
+      throw new Error("Help must run before the TUI check");
+    },
+    ui: {
+      notify: (...args) => notifications.push(args),
+    },
+  };
+  await baseCommand.handler("--help", helpContext);
+  await personaCommand.handler("-h", helpContext);
+
+  assert.deepEqual(notifications, [
+    [SUBAGENT_COMMAND_HELP_TEXT, "info"],
+    [SUBAGENT_COMMAND_HELP_TEXT, "info"],
+  ]);
+  assert.equal(created, 0);
+  assert.equal(opened, 0);
+  assert.equal(registryEntries, 0);
+
+  const values = async (command, prefix) => {
+    const completions = await command.getArgumentCompletions(prefix);
+    return completions ? completions.map((item) => item.value) : null;
+  };
+  for (const command of [baseCommand, personaCommand]) {
+    assert.deepEqual(await values(command, ""), ["--help", "-h", "--fork"]);
+    assert.deepEqual(await values(command, "--"), ["--help", "--fork"]);
+    assert.deepEqual(await values(command, "-h"), ["-h"]);
+    assert.deepEqual(await values(command, "--f"), ["--fork"]);
+    assert.equal(await values(command, "--forked"), null);
+    assert.equal(await values(command, "review this area"), null);
+    assert.equal(await values(command, "--fork review this area"), null);
+  }
+});
+
+test("subagents help is side-effect free and completion uses active targets", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagents-command-help-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const personaDirectory = join(root, "personas");
+  await mkdir(personaDirectory);
+  await writeFile(join(personaDirectory, "target-scout.md"), `---
+name: target-scout
+description: Inspect a target area
+---
+Inspect only the requested target area.
+`);
+
+  const commands = new Map();
+  const tools = new Map();
+  const persistedEntries = [];
+  const toolToggles = [];
+  let activeTools = ["read", "subagent"];
+  const pi = {
+    appendEntry(...args) { persistedEntries.push(args); },
+    getActiveTools() { return [...activeTools]; },
+    getThinkingLevel() { return "off"; },
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
+    registerTool(tool) { tools.set(tool.name, tool); },
+    setActiveTools(next) {
+      toolToggles.push(next);
+      activeTools = [...next];
+    },
+  };
+  subagentsModule.default(pi, { personaDirectory });
+  const command = commands.get("subagents");
+  assert.ok(command);
+
+  let opened = 0;
+  let stopped = 0;
+  const originalOpen = PersistentSubagentRegistry.prototype.open;
+  const originalStop = PersistentSubagentRegistry.prototype.stop;
+  PersistentSubagentRegistry.prototype.open = async function () {
+    opened++;
+    throw new Error("Help must not open a subagent");
+  };
+  PersistentSubagentRegistry.prototype.stop = async function () {
+    stopped++;
+    throw new Error("Help must not stop a subagent");
+  };
+  const notifications = [];
+  try {
+    const helpContext = {
+      get mode() {
+        throw new Error("Help must run before the TUI check");
+      },
+      ui: {
+        notify: (...args) => notifications.push(args),
+      },
+    };
+    await command.handler("--help", helpContext);
+    await command.handler("-h", helpContext);
+  } finally {
+    PersistentSubagentRegistry.prototype.open = originalOpen;
+    PersistentSubagentRegistry.prototype.stop = originalStop;
+  }
+
+  assert.deepEqual(notifications, [
+    [SUBAGENTS_HELP_TEXT, "info"],
+    [SUBAGENTS_HELP_TEXT, "info"],
+  ]);
+  assert.equal(opened, 0);
+  assert.equal(stopped, 0);
+  assert.deepEqual(toolToggles, []);
+  assert.deepEqual(persistedEntries, []);
+
+  const values = async (prefix) => {
+    const completions = await command.getArgumentCompletions(prefix);
+    return completions ? completions.map((item) => item.value) : null;
+  };
+  assert.deepEqual(await values(""), ["--help", "-h", "--stop", "--enable", "--disable"]);
+  assert.deepEqual(await values("--"), ["--help", "--stop", "--enable", "--disable"]);
+  assert.deepEqual(await values("-h"), ["-h"]);
+  assert.deepEqual(await values("--e"), ["--enable"]);
+  assert.equal(await values("--stop "), null);
+
+  const commandContext = {
+    cwd: root,
+    model: undefined,
+    scopedModels: [],
+    sessionManager: {
+      getSessionId: () => "subagents-completion-parent",
+      getSessionFile: () => undefined,
+    },
+  };
+  const subagentTool = tools.get("subagent");
+  const signal = new AbortController().signal;
+  const createTarget = async (name, purpose) => {
+    const result = await subagentTool.execute(`create-${name}`, {
+      action: "create",
+      name,
+      persona: "target-scout",
+      purpose,
+    }, signal, undefined, commandContext);
+    assert.equal(result.details.ok, true);
+    return result.details.subagent;
+  };
+
+  const archived = await createTarget("archived-scout", "Inspect archived records");
+  await subagentTool.execute("stop-archived", {
+    action: "stop",
+    id: archived.id,
+  }, signal, undefined, commandContext);
+  const active = await Promise.all([
+    createTarget("active-auth", "Inspect authentication flow"),
+    createTarget("active-billing", "Inspect billing flow"),
+    createTarget("active-cache", "Inspect cache flow"),
+    createTarget("active-deploy", "Inspect deployment flow"),
+  ]);
+
+  const openByName = await command.getArgumentCompletions("active-auth");
+  assert.deepEqual(openByName, [{
+    value: "active-auth",
+    label: "active-auth",
+    description: "dormant: Inspect authentication flow",
+  }]);
+  const openById = await command.getArgumentCompletions(active[0].id);
+  assert.deepEqual(openById, [{
+    value: active[0].id,
+    label: `active-auth (${active[0].id})`,
+    description: "dormant: Inspect authentication flow",
+  }]);
+
+  const stopTargets = await command.getArgumentCompletions("--stop ");
+  assert.equal(stopTargets.length, MAX_PERSISTENT_SUBAGENTS);
+  assert.ok(stopTargets.every((item) => item.value.startsWith("--stop active-")));
+  assert.ok(stopTargets.every((item) => item.description?.startsWith("dormant: Inspect")));
+  assert.deepEqual(await values("--stop active-auth"), ["--stop active-auth"]);
+  assert.deepEqual(await values(`--stop ${active[0].id}`), [`--stop ${active[0].id}`]);
+  assert.equal(await values("archived-scout"), null);
+  assert.equal(await values("--stop archived-scout"), null);
 });
 
 test("subagents command accepts direct open and explicit stop actions", () => {

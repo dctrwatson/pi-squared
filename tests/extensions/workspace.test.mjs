@@ -18,6 +18,20 @@ import { PiSessionStore, workspaceMetadata } from "../../extensions/workspace/se
 import { parseLauncherArguments, resolveLaunch, validateForwardedPiArguments } from "../../extensions/workspace/launcher.ts";
 import workspaceExtension, { WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
 
+const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
+       /workspace or /ws new
+       /workspace or /ws new <branch> [--from <ref|current>] [--worktree]
+       /workspace or /ws prune
+
+No argument: Open the workspace picker.
+target: Local branch, pull request number, or GitHub pull request URL.
+branch:<name>: Force a local branch target.
+new: Start a fresh session for the current branch, or create a branch workspace.
+--from: Select the new branch base; current uses the current commit.
+--worktree: Use a managed worktree.
+prune: Remove inactive managed workspaces.
+--help, -h: Show this help.`;
+
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
@@ -154,6 +168,8 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     branch: "https://github.com/a/b/pull/123/unknown",
   });
   assert.deepEqual(parseWorkspaceTarget("branch:123"), { type: "branch", branch: "123" });
+  assert.deepEqual(parseWorkspaceTarget("branch:#123"), { type: "branch", branch: "#123" });
+  assert.deepEqual(parseWorkspaceTarget("branch:branch:legacy"), { type: "branch", branch: "branch:legacy" });
   assert.deepEqual(parseCommandWords("new 'feature/test name' --from current"), ["new", "feature/test name", "--from", "current"]);
   assert.deepEqual(parseNewWorkspace(["feature/test", "--from", "current", "--worktree"]), {
     branch: "feature/test",
@@ -185,6 +201,186 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
   assert.throws(() => parseNewWorkspace(["feature/test", "--parallel"]), /Unknown workspace option/);
   assert.throws(() => parseLauncherArguments(["--parallel"]), /Unknown piw option/);
   assert.throws(() => parseLauncherArguments(["--here"]), /Unknown piw option/);
+});
+
+test("workspace aliases share local completion discovery and side-effect-free help", async (t) => {
+  const root = await repository();
+  t.after(() => removeRepository(root));
+  git(root, "branch", "feature/auth");
+  git(root, "tag", "v1.0");
+  const sessions = new FakeSessions(root);
+  const nodeRunner = new NodeProcessRunner();
+  let gitCalls = 0;
+  const networkCalls = [];
+  const runner = {
+    async run(command, args, options) {
+      if (command === "gh" || ["fetch", "ls-remote"].includes(args[0])) {
+        networkCalls.push({ command, args });
+        throw new Error("workspace completion must not use the network");
+      }
+      gitCalls++;
+      return nodeRunner.run(command, args, options);
+    },
+  };
+  const createService = (cwd) => new WorkspaceService(cwd, {
+    git: new GitRepository(cwd, runner),
+    sessions,
+  });
+  const service = createService(root);
+  await mapWorkspace(service, sessions, "feature/auth", root, {
+    number: 42,
+    url: "https://github.com/example/project/pull/42",
+    baseRepository: "example/project",
+    headRepository: "example/project",
+    headRef: "feature/auth",
+  });
+
+  const commands = new Map();
+  let serviceCreations = 0;
+  workspaceExtension({
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+  }, {
+    completionCwd: () => root,
+    createService(cwd) {
+      serviceCreations++;
+      return createService(cwd);
+    },
+  });
+  const workspaceCommand = commands.get("workspace");
+  const wsCommand = commands.get("ws");
+  assert.ok(workspaceCommand);
+  assert.ok(wsCommand);
+
+  const notifications = [];
+  const helpContext = {
+    get mode() {
+      throw new Error("Help must run before the TUI check");
+    },
+    ui: {
+      notify: (...args) => notifications.push(args),
+    },
+  };
+  await workspaceCommand.handler("--help", helpContext);
+  await wsCommand.handler("-h", helpContext);
+  assert.deepEqual(notifications, [
+    [WORKSPACE_HELP_TEXT, "info"],
+    [WORKSPACE_HELP_TEXT, "info"],
+  ]);
+  assert.equal(serviceCreations, 0);
+
+  const values = async (command, prefix) => {
+    const completions = await command.getArgumentCompletions(prefix);
+    return completions ? completions.map((item) => item.value) : null;
+  };
+  assert.deepEqual(await values(workspaceCommand, ""), [
+    "--help", "-h", "new", "prune", "--worktree", "feature/auth", "main", "#42",
+  ]);
+  const discoveryGitCalls = gitCalls;
+  assert.ok(discoveryGitCalls > 0);
+  assert.deepEqual(networkCalls, []);
+  assert.equal(serviceCreations, 1);
+  assert.deepEqual(await values(wsCommand, "4"), ["#42"]);
+  assert.deepEqual(await values(wsCommand, "--worktree 4"), ["--worktree #42"]);
+  assert.equal(gitCalls, discoveryGitCalls);
+  assert.equal(serviceCreations, 1);
+
+  assert.deepEqual(await workspaceCommand.getArgumentCompletions("feature/auth"), [{
+    value: "feature/auth",
+    label: "feature/auth",
+    description: "Local branch",
+  }]);
+  assert.deepEqual(await values(wsCommand, "feature/auth "), ["feature/auth --worktree"]);
+  assert.deepEqual(await values(wsCommand, "#42 "), ["#42 --worktree"]);
+  assert.deepEqual(await values(workspaceCommand, "new "), ["new --from", "new --worktree"]);
+  assert.deepEqual(await values(wsCommand, "new feature/new "), [
+    "new feature/new --from",
+    "new feature/new --worktree",
+  ]);
+  assert.deepEqual(await values(workspaceCommand, "new feature/new --from "), [
+    "new feature/new --from current",
+    "new feature/new --from feature/auth",
+    "new feature/new --from main",
+    "new feature/new --from v1.0",
+  ]);
+  assert.deepEqual(await values(wsCommand, "new --worktree "), ["new --worktree --from"]);
+  assert.deepEqual(await values(workspaceCommand, "new feature/new --from main "), [
+    "new feature/new --from main --worktree",
+  ]);
+  assert.equal(await values(wsCommand, "new feature/new --from main --worktree "), null);
+
+  const failedCommands = new Map();
+  let failureDiscoveries = 0;
+  workspaceExtension({
+    on() {},
+    registerCommand(name, command) { failedCommands.set(name, command); },
+  }, {
+    completionCwd: () => root,
+    createService() {
+      failureDiscoveries++;
+      return {
+        state: async () => {
+          throw new Error("local discovery failed");
+        },
+        git: {
+          localBranches: async () => [],
+          localRefs: async () => [],
+        },
+      };
+    },
+  });
+  const failedCommand = failedCommands.get("workspace");
+  assert.equal(await values(failedCommand, ""), null);
+  assert.equal(await values(failedCommand, "new "), null);
+  assert.equal(failureDiscoveries, 1);
+});
+
+test("workspace completions escape ambiguous branch targets", async () => {
+  const commands = new Map();
+  workspaceExtension({
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+  }, {
+    createService() {
+      return {
+        state: async () => ({ listWorkspaces: async () => [] }),
+        git: {
+          localBranches: async () => ["#7", "42", "branch:legacy", "feature/auth", "new", "prune"],
+          localRefs: async () => [],
+        },
+      };
+    },
+  });
+  const command = commands.get("workspace");
+  assert.ok(command);
+  const values = async (prefix) => {
+    const completions = await command.getArgumentCompletions(prefix);
+    return completions ? completions.map((item) => item.value) : null;
+  };
+
+  const completions = await command.getArgumentCompletions("");
+  assert.deepEqual(completions?.filter((item) => item.description === "Local branch"), [
+    { value: "branch:#7", label: "#7", description: "Local branch" },
+    { value: "branch:42", label: "42", description: "Local branch" },
+    { value: "branch:branch:legacy", label: "branch:legacy", description: "Local branch" },
+    { value: "feature/auth", label: "feature/auth", description: "Local branch" },
+    { value: "branch:new", label: "new", description: "Local branch" },
+    { value: "branch:prune", label: "prune", description: "Local branch" },
+  ]);
+  assert.deepEqual(await values("branch:n"), ["branch:new"]);
+  assert.deepEqual(await values("branch:feat"), ["branch:feature/auth"]);
+  assert.deepEqual(await values("branch:new "), ["branch:new --worktree"]);
+  assert.deepEqual(await values("branch:feature/auth "), ["branch:feature/auth --worktree"]);
+  assert.deepEqual(await values("--worktree branch:n"), ["--worktree branch:new"]);
+  assert.deepEqual(await values("--worktree branch:feat"), ["--worktree branch:feature/auth"]);
+  assert.deepEqual(await values("--worktree "), [
+    "--worktree branch:#7",
+    "--worktree branch:42",
+    "--worktree branch:branch:legacy",
+    "--worktree feature/auth",
+    "--worktree branch:new",
+    "--worktree branch:prune",
+  ]);
 });
 
 test("workspace routing uses the primary checkout when called from another checkout", async () => {

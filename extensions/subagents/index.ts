@@ -16,19 +16,24 @@ import {
     type ExtensionCommandContext,
     type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { registerArgumentCommand } from "../support/command-support.ts";
 import type { ToolFailureDetails } from "../codex-tools/tool-result.ts";
 import {
     BUNDLED_PERSONA_DIRECTORY,
+    getSubagentCommandArgumentCompletions,
     loadSubagentPersonas,
     loadSubagentPersonasFromDirectories,
     parseSubagentCommandArgs,
+    SUBAGENT_COMMAND_HELP_TEXT,
     SUBAGENT_LIFETIMES,
     type SubagentPersona,
     type SubagentLifetime,
 } from "./personas.ts";
 import {
     formatSubagentSummary,
+    MAX_PERSISTENT_SUBAGENTS,
     normalizeSubagentPurpose,
     PersistentSubagentRegistry,
     registryErrorMessage,
@@ -41,9 +46,11 @@ export {
     buildSubagentProcessArgs,
     formatSubagentModelScope,
     formatSubagentContinuityPrompt,
+    getSubagentCommandArgumentCompletions,
     loadSubagentPersonas,
     loadSubagentPersonasFromDirectories,
     parseSubagentCommandArgs,
+    SUBAGENT_COMMAND_HELP_TEXT,
     SUBAGENT_EXTENSION_PATHS,
     type SubagentContextMode,
     type SubagentPersona,
@@ -424,6 +431,75 @@ export function parseSubagentsCommandArgs(args: string): SubagentsCommandArgs {
     return { action: "open", target: trimmed };
 }
 
+const SUBAGENTS_HELP_TEXT = `Usage: /subagents [name-or-id]
+       /subagents --stop [name-or-id]
+       /subagents --enable | --disable
+
+name-or-id: Open an active subagent.
+--stop: Stop an active subagent.
+--enable, --disable: Enable or disable the model subagent tool.
+--help, -h: Show this help.`;
+const SUBAGENTS_COMMAND_COMPLETIONS: readonly AutocompleteItem[] = [
+    { value: "--stop", label: "--stop", description: "Stop an active subagent" },
+    { value: "--enable", label: "--enable", description: "Enable the model subagent tool" },
+    { value: "--disable", label: "--disable", description: "Disable the model subagent tool" },
+];
+const MAX_SUBAGENT_COMPLETION_DESCRIPTION_CHARS = 80;
+
+function subagentCompletionDescription(subagent: PersistentSubagentSummary): string {
+    const purpose = subagent.purpose.trim();
+    if (!purpose) return subagent.status;
+    const abbreviatedPurpose = purpose.length <= MAX_SUBAGENT_COMPLETION_DESCRIPTION_CHARS
+        ? purpose
+        : `${purpose.slice(0, MAX_SUBAGENT_COMPLETION_DESCRIPTION_CHARS - 3)}...`;
+    return `${subagent.status}: ${abbreviatedPurpose}`;
+}
+
+function subagentTargetCompletions(
+    targetPrefix: string,
+    valuePrefix: string,
+    subagents: readonly PersistentSubagentSummary[],
+): AutocompleteItem[] {
+    return subagents
+        .filter((subagent) => subagent.status !== "stopped")
+        .slice(0, MAX_PERSISTENT_SUBAGENTS)
+        .flatMap((subagent) => {
+            const target = subagent.name.startsWith(targetPrefix)
+                ? subagent.name
+                : subagent.id.startsWith(targetPrefix)
+                    ? subagent.id
+                    : undefined;
+            if (!target) return [];
+            return [{
+                value: `${valuePrefix}${target}`,
+                label: target === subagent.name ? subagent.name : `${subagent.name} (${subagent.id})`,
+                description: subagentCompletionDescription(subagent),
+            }];
+        });
+}
+
+function getSubagentsArgumentCompletions(
+    argumentPrefix: string,
+    subagents: readonly PersistentSubagentSummary[],
+): AutocompleteItem[] | null {
+    const stopMatch = argumentPrefix.match(/^--stop\s+(.*)$/);
+    if (stopMatch) {
+        const targetPrefix = stopMatch[1] ?? "";
+        if (/\s/.test(targetPrefix)) return null;
+        const completions = subagentTargetCompletions(targetPrefix, "--stop ", subagents);
+        return completions.length > 0 ? completions : null;
+    }
+    if (/\s/.test(argumentPrefix)) return null;
+
+    const commandCompletions = SUBAGENTS_COMMAND_COMPLETIONS.filter((item) =>
+        item.value.startsWith(argumentPrefix));
+    const targetCompletions = argumentPrefix.startsWith("--")
+        ? []
+        : subagentTargetCompletions(argumentPrefix, "", subagents);
+    const completions = [...commandCompletions, ...targetCompletions];
+    return completions.length > 0 ? completions : null;
+}
+
 export default function (
     pi: ExtensionAPI,
     options: { personaDirectory?: string } = {},
@@ -635,20 +711,27 @@ export default function (
         }
     };
 
-    pi.registerCommand("subagent", {
+    registerArgumentCommand(pi, "subagent", {
         description: "Create and open a persistent subagent; add --fork for parent context",
+        helpText: SUBAGENT_COMMAND_HELP_TEXT,
+        getArgumentCompletions: getSubagentCommandArgumentCompletions,
         handler: async (args, ctx) => createAndOpen(args, ctx),
     });
 
     for (const persona of discovery.personas) {
-        pi.registerCommand(`subagent:${persona.name}`, {
+        registerArgumentCommand(pi, `subagent:${persona.name}`, {
             description: `${persona.description} (persistent subagent)`,
+            helpText: SUBAGENT_COMMAND_HELP_TEXT,
+            getArgumentCompletions: getSubagentCommandArgumentCompletions,
             handler: async (args, ctx) => createAndOpen(args, ctx, persona),
         });
     }
 
-    pi.registerCommand("subagents", {
+    registerArgumentCommand(pi, "subagents", {
         description: "Manage named subagents or toggle model access with --enable/--disable",
+        helpText: SUBAGENTS_HELP_TEXT,
+        getArgumentCompletions: (argumentPrefix) =>
+            getSubagentsArgumentCompletions(argumentPrefix, registry.list()),
         handler: manageExisting,
     });
     pi.registerShortcut("ctrl+shift+a", {
