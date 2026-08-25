@@ -12,3 +12,9 @@ git subtree pull --prefix=extensions/observational-memory --squash \
 ```
 
 Keep local changes in separate commits with the `pi: patch observational-memory:` prefix.
+
+## Local patch
+
+- `src/mode.ts` adds session-local observational memory modes. It accepts the `observational-memory:session-mode` event, stores only user overrides, and provides `/om:mode`.
+- `src/runtime.ts` applies the effective mode through `config.passive`, so existing triggers and status output stay unchanged.
+- `src/index.ts` registers the local mode module.

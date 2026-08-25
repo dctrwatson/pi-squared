@@ -4,12 +4,14 @@ import { registerViewCommand } from "./commands/view.js";
 import { registerCompactionHook } from "./hooks/compaction-hook.js";
 import { registerCompactionTrigger } from "./hooks/compaction-trigger.js";
 import { registerConsolidationTrigger } from "./hooks/consolidation-trigger.js";
+import { registerSessionMode } from "./mode.js";
 import { Runtime } from "./runtime.js";
 import { registerRecallTool } from "./tools/recall-observation.js";
 
 export default function observationalMemory(pi: ExtensionAPI) {
 	const runtime = new Runtime();
 
+	registerSessionMode(pi, runtime);
 	registerConsolidationTrigger(pi, runtime);
 	registerCompactionTrigger(pi, runtime);
 	registerCompactionHook(pi, runtime);

@@ -40,6 +40,8 @@ export interface LaunchCtx {
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
+	private configuredPassive = DEFAULTS.passive;
+	private passiveOverride: boolean | undefined;
 	consolidationInFlight = false;
 	consolidationPromise: Promise<void> | null = null;
 	consolidationPhase: ConsolidationPhase | undefined;
@@ -60,6 +62,20 @@ export class Runtime {
 		if (this.configLoaded) return;
 		this.config = loadConfig(cwd);
 		this.configLoaded = true;
+		this.configuredPassive = this.config.passive;
+		this.applyPassiveMode();
+	}
+
+	setPassiveOverride(passive: boolean | undefined): void {
+		this.passiveOverride = passive;
+		this.applyPassiveMode();
+	}
+
+	private applyPassiveMode(): void {
+		this.config = {
+			...this.config,
+			passive: this.passiveOverride ?? this.configuredPassive,
+		};
 	}
 
 	async resolveModel(ctx: ResolveCtx): Promise<ResolveResult> {
