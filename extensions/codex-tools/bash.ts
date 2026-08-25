@@ -69,6 +69,7 @@ export type BashToolDetails = ProcessToolDetails;
 
 export interface CodexBashToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
+  cleanupLimitMs?: number;
 }
 
 export interface NormalizedBashInput {
@@ -348,11 +349,12 @@ async function runBash(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<BashToolDetails> | undefined,
-  onArtifactCreated?: (artifact: ProcessArtifact) => void,
+  options: CodexBashToolOptions,
 ): Promise<FormattedProcessResult> {
   if (signal?.aborted) throw new BashToolError("CANCELLED", "Bash command was cancelled");
+  const cleanupLimitMs = options.cleanupLimitMs ?? STOP_GRACE_MS + STOP_FORCE_WAIT_MS;
   const artifact = await createBashArtifact();
-  onArtifactCreated?.(artifact);
+  options.onArtifactCreated?.(artifact);
   let stdoutFile: WriteStream;
   let stderrFile: WriteStream;
   try {
@@ -438,7 +440,7 @@ async function runBash(
     cleanupStartedAt ??= Date.now();
     resolveStopRequested();
     if (!child || !childExit || stopPromise) return;
-    stopPromise = terminateProcessGroup(child, STOP_GRACE_MS + STOP_FORCE_WAIT_MS).catch((error: unknown) => {
+    stopPromise = terminateProcessGroup(child, cleanupLimitMs).catch((error: unknown) => {
       stopError = error instanceof BashToolError
         ? error
         : new BashToolError("PROCESS_CONTROL_FAILED", String(error));
@@ -581,7 +583,7 @@ async function runBash(
         requestStop();
         if (stopPromise) await stopPromise;
         if (stopError) throw stopError;
-        const cleanupDeadline = (cleanupStartedAt ?? Date.now()) + STOP_GRACE_MS + STOP_FORCE_WAIT_MS;
+        const cleanupDeadline = (cleanupStartedAt ?? Date.now()) + cleanupLimitMs;
         if (!await waitForPromise(childExit, Math.max(0, cleanupDeadline - Date.now()))) {
           throw new BashToolError("PROCESS_CONTROL_FAILED", "Bash did not exit during cleanup");
         }
@@ -596,12 +598,12 @@ async function runBash(
 
       if (!stopPromise) {
         cleanupStartedAt ??= Date.now();
-        stopPromise = terminateProcessGroup(child, STOP_GRACE_MS + STOP_FORCE_WAIT_MS);
+        stopPromise = terminateProcessGroup(child, cleanupLimitMs);
       }
       await stopPromise;
       if (stopError) throw stopError;
 
-      const cleanupDeadline = (cleanupStartedAt ?? Date.now()) + STOP_GRACE_MS + STOP_FORCE_WAIT_MS;
+      const cleanupDeadline = (cleanupStartedAt ?? Date.now()) + cleanupLimitMs;
       const drainDeadline = cleanupDeadline - FORCED_CLOSE_RESERVE_MS;
       const drained = await waitForPromise(
         Promise.all([childClose ?? Promise.resolve(), stdoutDone, stderrDone]),
@@ -661,7 +663,7 @@ async function runBash(
 
   } catch (error) {
     if (child && childExit && !stopPromise) {
-      await terminateProcessGroup(child, STOP_GRACE_MS + STOP_FORCE_WAIT_MS).catch(() => undefined);
+      await terminateProcessGroup(child, cleanupLimitMs).catch(() => undefined);
     }
     forcedOutputClose = true;
     child?.stdout?.destroy();
@@ -693,7 +695,7 @@ export function createCodexBashTool(options: CodexBashToolOptions = {}): ToolDef
           environmentForTool(ctx),
           signal,
           onUpdate,
-          options.onArtifactCreated,
+          options,
         );
         return {
           content: [{ type: "text", text: result.text }],

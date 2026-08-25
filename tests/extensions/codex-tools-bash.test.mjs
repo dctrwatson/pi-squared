@@ -334,7 +334,7 @@ test("bash reports final incomplete capture per stream", async () => {
   await withDirectory(async (directory) => {
     const command = "perl -e 'setpgrp(0,0); open(my $fh, \">\", \"escaped.pid\") or die $!; print $fh \"$$\\n\"; close($fh); sleep 10' 2>/dev/null & while [ ! -s escaped.pid ]; do sleep 0.01; done";
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createCodexBashTool({ cleanupLimitMs: 500 }),
       { command, timeout_seconds: 0.1 },
       directory,
     );

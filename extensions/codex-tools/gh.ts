@@ -51,6 +51,7 @@ export type GhToolDetails = ProcessToolDetails;
 
 export interface CodexGhToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
+  cleanupLimitMs?: number;
 }
 
 interface NormalizedGhInput {
@@ -202,6 +203,7 @@ async function executeGh(
       signal,
       onUpdate,
       onArtifactCreated: options.onArtifactCreated,
+      cleanupLimitMs: options.cleanupLimitMs,
     });
   } catch (error) {
     if (error instanceof GhToolError || error instanceof DirectProcessError) {

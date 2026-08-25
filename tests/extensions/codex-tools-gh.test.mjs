@@ -64,10 +64,10 @@ function restoreEnvironment(name, value) {
   else process.env[name] = value;
 }
 
-async function withFakeGh(callback) {
+async function withFakeGh(callback, executableSource) {
   await withDirectory(async (directory) => {
     const executable = join(directory, "gh");
-    await writeFile(executable, `#!/usr/bin/env node
+    await writeFile(executable, executableSource ?? `#!/usr/bin/env node
 const { spawn } = require("node:child_process");
 const { existsSync, readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
@@ -414,7 +414,7 @@ test("gh terminates its process group on timeout", async () => {
   await withFakeGh(async (directory) => {
     const result = await execute(ghModule.createCodexGhTool(), {
       args: ["linger"],
-      timeout_seconds: 0.3,
+      timeout_seconds: 1,
     }, directory);
     try {
       assert.equal(result.ok, true);
@@ -426,12 +426,15 @@ test("gh terminates its process group on timeout", async () => {
     } finally {
       await removeArtifact(result);
     }
-  });
+  }, `#!/usr/bin/env bash
+sleep 10 &
+printf 'PID:%s\\n' "$!"
+`);
 });
 
 test("gh reports final incomplete capture per stream", async () => {
   await withFakeGh(async (directory) => {
-    const result = await execute(ghModule.createCodexGhTool(), {
+    const result = await execute(ghModule.createCodexGhTool({ cleanupLimitMs: 500 }), {
       args: ["hold"],
       timeout_seconds: 1,
     }, directory);

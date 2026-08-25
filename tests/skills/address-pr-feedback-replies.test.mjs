@@ -11,13 +11,13 @@ import {
   commitFile,
   parseOutput,
   createFixture,
+  createPreparedFixture,
   prepare,
   replyManifest,
 } from "./address-pr-feedback-test-support.mjs";
 
 test("publication refuses to rewrite a commit that appeared on the remote", async (t) => {
-  const fixture = await createFixture(t);
-  const prepared = prepare(fixture, "--mode", "execute");
+  const { fixture, prepared } = await createPreparedFixture(t);
   commitFile(fixture.work, "published.txt", "published\n", "pi: published outside workflow");
   git(fixture.work, "push", "origin", "feature");
   const result = run("bash", [join(scripts, "publish-feedback-commits.sh"), "--state", prepared.output.STATE], { cwd: fixture.work, env: fixture.env, allowFailure: true });
@@ -51,8 +51,7 @@ test("dry-run preparation state previews replies without publication or posting"
 });
 
 test("reply batches preview exact bodies, verify heads, and retry without duplicates", async (t) => {
-  const fixture = await createFixture(t);
-  const prepared = prepare(fixture, "--mode", "execute");
+  const { fixture, prepared } = await createPreparedFixture(t);
   const publication = run("bash", [join(scripts, "publish-feedback-commits.sh"), "--state", prepared.output.STATE], { cwd: fixture.work, env: fixture.env });
   const publishedState = parseOutput(publication.stdout).STATE;
   const publishedHead = git(fixture.work, "rev-parse", "HEAD");

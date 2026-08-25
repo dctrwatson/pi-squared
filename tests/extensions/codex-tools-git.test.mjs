@@ -64,10 +64,10 @@ function restoreEnvironment(name, value) {
   else process.env[name] = value;
 }
 
-async function withFakeGit(callback) {
+async function withFakeGit(callback, executableSource) {
   await withDirectory(async (directory) => {
     const executable = join(directory, "git");
-    await writeFile(executable, `#!/usr/bin/env node
+    await writeFile(executable, executableSource ?? `#!/usr/bin/env node
 const { spawn } = require("node:child_process");
 const { writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
@@ -465,7 +465,7 @@ test("git terminates a process group on timeout", async () => {
     const startedAt = Date.now();
     const result = await execute(
       gitModule.createCodexGitTool(),
-      { args: ["linger"], timeout_seconds: 0.3 },
+      { args: ["linger"], timeout_seconds: 1 },
       directory,
     );
     try {
@@ -479,13 +479,16 @@ test("git terminates a process group on timeout", async () => {
     } finally {
       await removeArtifact(result);
     }
-  });
+  }, `#!/usr/bin/env bash
+sleep 10 &
+printf 'PID:%s\\n' "$!"
+`);
 });
 
 test("git reports final incomplete capture without claiming complete output", async () => {
   await withFakeGit(async (directory) => {
     const result = await execute(
-      gitModule.createCodexGitTool(),
+      gitModule.createCodexGitTool({ cleanupLimitMs: 500 }),
       { args: ["hold"], timeout_seconds: 1 },
       directory,
     );

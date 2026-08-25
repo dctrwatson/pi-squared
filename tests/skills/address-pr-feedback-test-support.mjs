@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,8 +33,8 @@ async function writeJson(path, value) {
 
 function commitFile(work, path, content, subject, body = "") {
   const absolute = join(work, path);
-  execFileSync("mkdir", ["-p", resolve(absolute, "..")]);
-  execFileSync("bash", ["-c", `printf '%s' "$1" > "$2"`, "_", content, absolute]);
+  mkdirSync(resolve(absolute, ".."), { recursive: true });
+  writeFileSync(absolute, content);
   git(work, "add", path);
   const args = ["commit", "-m", subject];
   if (body) args.push("-m", body);
@@ -194,18 +195,50 @@ const fixtureTemplate = await mkdtemp(join(tmpdir(), "address-feedback-template-
 await initializeFixture(fixtureTemplate);
 test.after(() => rm(fixtureTemplate, { recursive: true, force: true }));
 
-async function createFixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "address-feedback-test-"));
+async function copyFixture(t, source, prefix) {
+  const root = await mkdtemp(join(tmpdir(), prefix));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await cp(fixtureTemplate, root, { recursive: true });
+  await cp(source, root, { recursive: true });
   const fixture = fixtureAt(root);
   git(fixture.work, "remote", "set-url", "origin", fixture.origin);
   return fixture;
 }
 
+async function createFixture(t) {
+  return copyFixture(t, fixtureTemplate, "address-feedback-test-");
+}
+
 function prepare(fixture, ...args) {
   const result = run("bash", [join(scripts, "prepare-feedback.sh"), ...args], { cwd: fixture.work, env: fixture.env });
   return { result, output: parseOutput(result.stdout) };
+}
+
+let preparedFixtureTemplate;
+test.after(async () => {
+  if (preparedFixtureTemplate) await rm(preparedFixtureTemplate.root, { recursive: true, force: true });
+});
+
+async function getPreparedFixtureTemplate() {
+  if (preparedFixtureTemplate) return preparedFixtureTemplate;
+  const root = await mkdtemp(join(tmpdir(), "address-feedback-prepared-template-"));
+  await cp(fixtureTemplate, root, { recursive: true });
+  const fixture = fixtureAt(root);
+  git(fixture.work, "remote", "set-url", "origin", fixture.origin);
+  const prepared = prepare(fixture, "--mode", "execute", "--workdir", join(root, "prepared"));
+  preparedFixtureTemplate = { root, output: prepared.output };
+  return preparedFixtureTemplate;
+}
+
+async function createPreparedFixture(t) {
+  const template = await getPreparedFixtureTemplate();
+  const fixture = await copyFixture(t, template.root, "address-feedback-prepared-test-");
+  const output = Object.fromEntries(Object.entries(template.output).map(([key, value]) => [
+    key,
+    value.replaceAll(template.root, fixture.root),
+  ]));
+  const state = await readFile(output.STATE, "utf8");
+  await writeFile(output.STATE, state.replaceAll(template.root, fixture.root));
+  return { fixture, prepared: { output } };
 }
 
 async function replyManifest(root, head, replies) {
@@ -225,6 +258,7 @@ export {
   git,
   writeJson,
   createFixture,
+  createPreparedFixture,
   prepare,
   commitFile,
   parseOutput,
