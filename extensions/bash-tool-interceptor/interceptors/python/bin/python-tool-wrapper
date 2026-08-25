@@ -1,7 +1,0 @@
-#!/bin/sh
-
-printf '%s\n' \
-  "Use uv for Python work. Preserve the task's goal and choose the appropriate uv command (for example: uv run, uv add, uv sync, uv pip, or uv tool)." \
-  "Do not mechanically substitute the command name." >&2
-
-exit 1

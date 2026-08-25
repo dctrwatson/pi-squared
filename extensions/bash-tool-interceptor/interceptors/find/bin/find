@@ -1,7 +1,0 @@
-#!/bin/sh
-
-printf '%s\n' \
-  "Use fd for file discovery, or Pi's built-in find tool. Preserve the task's goal and choose the appropriate fd pattern, root, glob, or type filter." \
-  "Do not mechanically substitute find syntax." >&2
-
-exit 1
