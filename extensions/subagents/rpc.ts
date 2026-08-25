@@ -1,14 +1,14 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams as SubagentProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { RpcExtensionUIResponse, RpcSessionState, SessionStats } from "@earendil-works/pi-coding-agent";
-import type { ChildThinkingLevel } from "./personas.ts";
+import type { SubagentThinkingLevel } from "./personas.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_STDERR_CHARS = 64 * 1024;
 
-export interface ChildModelInfo {
+export interface SubagentModelInfo {
     provider: string;
     id: string;
     name?: string;
@@ -16,10 +16,10 @@ export interface ChildModelInfo {
     reasoning?: boolean;
 }
 
-export type ChildRpcOutput = Record<string, unknown>;
+export type SubagentRpcOutput = Record<string, unknown>;
 
 type PendingRequest = {
-    resolve: (value: ChildRpcOutput) => void;
+    resolve: (value: SubagentRpcOutput) => void;
     reject: (error: Error) => void;
     timer?: ReturnType<typeof setTimeout>;
 };
@@ -31,11 +31,11 @@ type ExitDetails = {
     intentional: boolean;
 };
 
-export interface ChildRpcClientOptions {
+export interface SubagentRpcClientOptions {
     cwd: string;
     args: string[];
     invocation?: { command: string; args: string[] };
-    onOutput: (output: ChildRpcOutput) => void;
+    onOutput: (output: SubagentRpcOutput) => void;
     onExit: (details: ExitDetails) => void;
 }
 
@@ -53,12 +53,12 @@ export function getPiInvocation(args: string[]): { command: string; args: string
     return { command: "pi", args };
 }
 
-function isRecord(value: unknown): value is ChildRpcOutput {
+function isRecord(value: unknown): value is SubagentRpcOutput {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export class ChildRpcClient {
-    private process: ChildProcessWithoutNullStreams | null = null;
+export class SubagentRpcClient {
+    private process: SubagentProcess | null = null;
     private readonly pending = new Map<string, PendingRequest>();
     private requestId = 0;
     private stderr = "";
@@ -66,42 +66,42 @@ export class ChildRpcClient {
     private readonly decoder = new StringDecoder("utf8");
     private stopping = false;
     private exitError: Error | undefined;
-    private readonly options: ChildRpcClientOptions;
+    private readonly options: SubagentRpcClientOptions;
 
-    constructor(options: ChildRpcClientOptions) {
+    constructor(options: SubagentRpcClientOptions) {
         this.options = options;
     }
 
     async start(): Promise<void> {
-        if (this.process) throw new Error("Child RPC process already started");
+        if (this.process) throw new Error("Subagent RPC process already started");
         const invocation = this.options.invocation ?? getPiInvocation(this.options.args);
-        const child = spawn(invocation.command, invocation.args, {
+        const subagent = spawn(invocation.command, invocation.args, {
             cwd: this.options.cwd,
             env: process.env,
             shell: false,
             stdio: ["pipe", "pipe", "pipe"],
         });
-        this.process = child;
+        this.process = subagent;
 
-        child.stdout.on("data", (chunk: Buffer | string) => this.consumeStdout(chunk));
-        child.stdout.on("end", () => this.finishStdout());
-        child.stderr.on("data", (chunk: Buffer | string) => {
+        subagent.stdout.on("data", (chunk: Buffer | string) => this.consumeStdout(chunk));
+        subagent.stdout.on("end", () => this.finishStdout());
+        subagent.stderr.on("data", (chunk: Buffer | string) => {
             this.stderr = (this.stderr + chunk.toString()).slice(-MAX_STDERR_CHARS);
         });
-        child.stdin.on("error", (error) => {
+        subagent.stdin.on("error", (error) => {
             if (this.stopping) return;
-            this.failPending(new Error(`Child RPC stdin failed: ${error.message}`));
+            this.failPending(new Error(`Subagent RPC stdin failed: ${error.message}`));
         });
-        child.once("error", (error) => {
-            if (this.process !== child) return;
-            this.exitError = new Error(`Could not start child Pi: ${error.message}`);
+        subagent.once("error", (error) => {
+            if (this.process !== subagent) return;
+            this.exitError = new Error(`Could not start subagent Pi: ${error.message}`);
             this.failPending(this.exitError);
         });
-        child.once("close", (code, signal) => {
-            if (this.process !== child) return;
+        subagent.once("close", (code, signal) => {
+            if (this.process !== subagent) return;
             this.process = null;
             const error = this.exitError ?? new Error(
-                `Child Pi exited (code=${code ?? "none"}, signal=${signal ?? "none"})${this.stderr.trim() ? `: ${this.stderr.trim()}` : ""}`,
+                `Subagent Pi exited (code=${code ?? "none"}, signal=${signal ?? "none"})${this.stderr.trim() ? `: ${this.stderr.trim()}` : ""}`,
             );
             this.failPending(error);
             this.options.onExit({ code, signal, stderr: this.stderr, intentional: this.stopping });
@@ -113,16 +113,16 @@ export class ChildRpcClient {
     }
 
     async stop(): Promise<void> {
-        const child = this.process;
-        if (!child) return;
+        const subagent = this.process;
+        if (!subagent) return;
         this.stopping = true;
         for (const request of this.pending.values()) {
             if (request.timer) clearTimeout(request.timer);
-            request.reject(new Error("Child RPC process stopped"));
+            request.reject(new Error("Subagent RPC process stopped"));
         }
         this.pending.clear();
 
-        child.kill("SIGTERM");
+        subagent.kill("SIGTERM");
         await new Promise<void>((resolve) => {
             let settled = false;
             const finish = () => {
@@ -132,10 +132,10 @@ export class ChildRpcClient {
                 resolve();
             };
             const killTimer = setTimeout(() => {
-                child.kill("SIGKILL");
+                subagent.kill("SIGKILL");
                 finish();
             }, 1_000);
-            child.once("close", finish);
+            subagent.once("close", finish);
         });
     }
 
@@ -174,27 +174,27 @@ export class ChildRpcClient {
         return this.data<SessionStats>(await this.send({ type: "get_session_stats" }));
     }
 
-    async getAvailableModels(): Promise<ChildModelInfo[]> {
-        const data = this.data<{ models: ChildModelInfo[] }>(await this.send({ type: "get_available_models" }));
+    async getAvailableModels(): Promise<SubagentModelInfo[]> {
+        const data = this.data<{ models: SubagentModelInfo[] }>(await this.send({ type: "get_available_models" }));
         return data.models;
     }
 
-    async setModel(provider: string, modelId: string): Promise<ChildModelInfo> {
-        return this.data<ChildModelInfo>(await this.send({ type: "set_model", provider, modelId }));
+    async setModel(provider: string, modelId: string): Promise<SubagentModelInfo> {
+        return this.data<SubagentModelInfo>(await this.send({ type: "set_model", provider, modelId }));
     }
 
-    async cycleModel(): Promise<{ model: ChildModelInfo; thinkingLevel: ChildThinkingLevel } | null> {
-        return this.data<{ model: ChildModelInfo; thinkingLevel: ChildThinkingLevel } | null>(
+    async cycleModel(): Promise<{ model: SubagentModelInfo; thinkingLevel: SubagentThinkingLevel } | null> {
+        return this.data<{ model: SubagentModelInfo; thinkingLevel: SubagentThinkingLevel } | null>(
             await this.send({ type: "cycle_model" }),
         );
     }
 
-    async setThinkingLevel(level: ChildThinkingLevel): Promise<void> {
+    async setThinkingLevel(level: SubagentThinkingLevel): Promise<void> {
         this.data<void>(await this.send({ type: "set_thinking_level", level }));
     }
 
-    async cycleThinkingLevel(): Promise<{ level: ChildThinkingLevel } | null> {
-        return this.data<{ level: ChildThinkingLevel } | null>(await this.send({ type: "cycle_thinking_level" }));
+    async cycleThinkingLevel(): Promise<{ level: SubagentThinkingLevel } | null> {
+        return this.data<{ level: SubagentThinkingLevel } | null>(await this.send({ type: "cycle_thinking_level" }));
     }
 
     respondToExtensionUI(response: RpcExtensionUIResponse): void {
@@ -243,19 +243,19 @@ export class ChildRpcClient {
         this.options.onOutput(parsed);
     }
 
-    private async send(command: ChildRpcOutput, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ChildRpcOutput> {
+    private async send(command: SubagentRpcOutput, timeoutMs = REQUEST_TIMEOUT_MS): Promise<SubagentRpcOutput> {
         if (this.exitError) throw this.exitError;
-        const child = this.process;
-        if (!child || child.exitCode !== null || !child.stdin.writable || child.stdin.destroyed) {
-            throw new Error(`Child RPC process is not available${this.stderr.trim() ? `: ${this.stderr.trim()}` : ""}`);
+        const subagent = this.process;
+        if (!subagent || subagent.exitCode !== null || !subagent.stdin.writable || subagent.stdin.destroyed) {
+            throw new Error(`Subagent RPC process is not available${this.stderr.trim() ? `: ${this.stderr.trim()}` : ""}`);
         }
 
-        const id = `child_${++this.requestId}`;
-        return new Promise<ChildRpcOutput>((resolve, reject) => {
+        const id = `subagent_${++this.requestId}`;
+        return new Promise<SubagentRpcOutput>((resolve, reject) => {
             const timer = timeoutMs > 0
                 ? setTimeout(() => {
                     this.pending.delete(id);
-                    reject(new Error(`Timed out waiting for child RPC response to ${String(command.type)}`));
+                    reject(new Error(`Timed out waiting for subagent RPC response to ${String(command.type)}`));
                 }, timeoutMs)
                 : undefined;
             this.pending.set(id, { resolve, reject, timer });
@@ -269,15 +269,15 @@ export class ChildRpcClient {
         });
     }
 
-    private write(value: ChildRpcOutput | RpcExtensionUIResponse): void {
+    private write(value: SubagentRpcOutput | RpcExtensionUIResponse): void {
         const stdin = this.process?.stdin;
-        if (!stdin || !stdin.writable || stdin.destroyed) throw new Error("Child RPC stdin is not writable");
+        if (!stdin || !stdin.writable || stdin.destroyed) throw new Error("Subagent RPC stdin is not writable");
         stdin.write(`${JSON.stringify(value)}\n`);
     }
 
-    private data<T>(response: ChildRpcOutput): T {
+    private data<T>(response: SubagentRpcOutput): T {
         if (response.success !== true) {
-            throw new Error(typeof response.error === "string" ? response.error : "Child RPC command failed");
+            throw new Error(typeof response.error === "string" ? response.error : "Subagent RPC command failed");
         }
         return response.data as T;
     }

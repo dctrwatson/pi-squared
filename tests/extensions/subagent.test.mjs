@@ -1,38 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const subagentsModule = await import("../../extensions/subagents/index.ts");
 const {
-  ChildPanel,
-  ChildSessionController,
-  MAX_CHILD_TRANSCRIPT_ITEMS,
+  SubagentPanel,
+  SubagentSessionController,
+  MAX_SUBAGENT_TRANSCRIPT_ITEMS,
   promptFingerprint,
 } = await import("../../extensions/subagents/ui.ts");
-const { ChildRpcClient } = await import("../../extensions/subagents/rpc.ts");
+const { SubagentRpcClient } = await import("../../extensions/subagents/rpc.ts");
 const { normalizePersonaDescription } = await import("../../extensions/subagents/personas.ts");
 const {
   BUNDLED_PERSONA_DIRECTORY,
   boundedSubagentResponse,
-  buildChildProcessArgs,
-  formatChildModelScope,
+  buildSubagentProcessArgs,
+  formatSubagentModelScope,
   formatPersonaForModel,
   formatSubagentContinuityPrompt,
   formatSubagentRequest,
-  getChildPanelWidths,
-  loadChildPersonas,
-  loadChildPersonasFromDirectories,
+  getSubagentPanelWidths,
+  resolveSelectedSubagentSkills,
+  createActiveTurnForkSnapshot,
+  loadSubagentPersonas,
+  loadSubagentPersonasFromDirectories,
   MAX_PERSISTENT_SUBAGENTS,
   MAX_RETAINED_STOPPED_SUBAGENTS,
   MAX_SUBAGENT_RESPONSE_BYTES,
   MAX_SUBAGENT_RESPONSE_LINES,
-  parseChildCommandArgs,
+  parseSubagentCommandArgs,
   parseSubagentBlockerResponse,
   parseSubagentsCommandArgs,
   PersistentSubagentRegistry,
   SUBAGENT_EXECUTION_PROFILES,
+  SUBAGENT_EXTENSION_PATHS,
+  SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
 } = subagentsModule;
 
 function makeControllerHarness({
@@ -76,7 +80,7 @@ function makeControllerHarness({
     };
   };
   const context = { ui: {} };
-  const controller = new ChildSessionController(context, {
+  const controller = new SubagentSessionController(context, {
     args: [],
     cwd: "/tmp",
     mode,
@@ -145,6 +149,7 @@ async function waitFor(predicate) {
 test("extension exposes one concise subagent tool and persistent-session commands", async () => {
   const tools = [];
   const commands = [];
+  const shortcuts = [];
   const events = [];
   subagentsModule.default({
     registerTool(tool) {
@@ -152,6 +157,9 @@ test("extension exposes one concise subagent tool and persistent-session command
     },
     registerCommand(name) {
       commands.push(name);
+    },
+    registerShortcut(shortcut, options) {
+      shortcuts.push({ shortcut, description: options.description });
     },
     on(name) {
       events.push(name);
@@ -161,22 +169,32 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.deepEqual(tools.map(({ name }) => name), ["subagent"]);
   assert.deepEqual(tools[0].parameters.properties.action.enum, ["create", "list", "prompt", "status", "stop"]);
   assert.deepEqual(Object.keys(tools[0].parameters.properties), [
-    "action", "id", "name", "purpose", "persona", "profile", "lifetime", "prompt", "context", "kind", "offset", "limit",
+    "action", "id", "name", "purpose", "persona", "profile", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
   ]);
-  assert.equal(tools[0].parameters.properties.purpose.description, "Stable context domain for create");
+  assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
-  assert.match(tools[0].parameters.properties.persona.description, /existing persona required.*list personas/i);
+  assert.match(tools[0].parameters.properties.persona.description, /optional persona.*require purpose, lifetime, and skills/i);
   assert.deepEqual(tools[0].parameters.properties.profile.enum, ["fast", "balanced", "deep"]);
-  assert.match(tools[0].parameters.properties.profile.description, /fast=Luna.*balanced=Terra.*deep=Sol/);
+  assert.match(tools[0].parameters.properties.profile.description, /fast=Luna.*balanced=Terra default.*deep=Sol escalation/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
   assert.match(tools[0].parameters.properties.lifetime.description, /one-shot needs prompt.*overrides persona default/i);
+  assert.deepEqual(tools[0].parameters.properties.mode.enum, ["fresh", "fork"]);
+  assert.match(tools[0].parameters.properties.mode.description, /fresh default.*fork parent history/i);
+  assert.equal(tools[0].parameters.properties.skills.items.maxLength, 64);
+  assert.equal(tools[0].parameters.properties.skills.description, "Exact parent skill names");
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
-  assert.match(tools[0].parameters.properties.context.description, /do not paste source or diffs/i);
+  assert.equal(tools[0].parameters.properties.context.description, "Concise background");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, list personas or reusable subagents when options are unknown and provide required context; choose the cheapest sufficient profile, and reserve deep for high-risk work, ambiguous work that needs cross-system analysis, or when a cheaper profile was insufficient.",
-    "Use subagent one-shot for one-response work, task through validation, and persistent across objectives; satisfy a blocked subagent's NEEDS before reprompting, and stop completed ones.",
-    "Give each subagent the exact objective, scope, and requested output; do not add adjacent work.",
+    "Before subagent create, list when options are unknown and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, and deep only after cheaper failure or unsafe ambiguity.",
+    "Use subagent one-shot for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+    "Give each subagent exact objective, scope, and output; avoid adjacent work.",
+    "Create a subagent only when isolation from large intermediate context or retained continuity materially helps; do not delegate simple work.",
+    "Prefer fresh context. Fork only when parent history is material and a concise handoff is insufficient. Use one task subagent for the complete objective and reuse it.",
   ]);
+  assert.match(tools[0].description, /isolate conversation context/);
+  assert.match(tools[0].description, /share the parent worktree/);
+  assert.match(tools[0].description, /host authority/);
+  assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
   assert.ok(tools[0].promptGuidelines.every((guideline) => guideline.includes("subagent")));
   const modelFacingDefinition = JSON.stringify({
     description: tools[0].description,
@@ -184,7 +202,8 @@ test("extension exposes one concise subagent tool and persistent-session command
     promptGuidelines: tools[0].promptGuidelines,
     parameters: tools[0].parameters,
   });
-  assert.ok(Buffer.byteLength(modelFacingDefinition, "utf8") <= 2_050);
+  const modelFacingBytes = Buffer.byteLength(modelFacingDefinition, "utf8");
+  assert.ok(modelFacingBytes <= 2_400, `model-facing subagent definition is ${modelFacingBytes} bytes`);
   const personaPage = await tools[0].execute(
     "list-personas",
     { action: "list", kind: "personas", offset: 0, limit: 1 },
@@ -202,22 +221,32 @@ test("extension exposes one concise subagent tool and persistent-session command
     balanced: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
     deep: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
   });
-  assert.deepEqual(commands.filter((name) => ["child", "subagents", "children"].includes(name)), [
-    "child", "subagents", "children",
+  assert.deepEqual(commands.filter((name) => ["subagent", "subagents"].includes(name)), [
+    "subagent", "subagents",
   ]);
+  assert.deepEqual(shortcuts, [{ shortcut: "ctrl+shift+a", description: "Show subagents" }]);
+  assert.equal(commands.includes("child"), false);
+  assert.equal(commands.includes("children"), false);
+  assert.equal(commands.some((name) => name.startsWith("child:")), false);
   assert.equal(commands.includes("subagent-blockers"), false);
-  assert.deepEqual(events, ["session_start", "session_tree", "session_shutdown"]);
+  assert.deepEqual(events, ["before_agent_start", "session_start", "session_tree", "session_shutdown"]);
+  const controlHeavyField = "\u0000".repeat(1_000);
+  const boundedError = await tools[0].execute("bounded-subagent-error", {
+    action: "list",
+    [controlHeavyField]: true,
+  });
+  assert.ok(Buffer.byteLength(boundedError.content[0].text, "utf8") <= 2_000);
 });
 
-test("child command accepts only a leading complete --fork option", () => {
-  assert.deepEqual(parseChildCommandArgs(""), { mode: "fresh", prompt: "" });
-  assert.deepEqual(parseChildCommandArgs("review the diff"), { mode: "fresh", prompt: "review the diff" });
-  assert.deepEqual(parseChildCommandArgs(" --fork review the diff "), { mode: "fork", prompt: "review the diff" });
-  assert.deepEqual(parseChildCommandArgs("--fork"), { mode: "fork", prompt: "" });
-  assert.deepEqual(parseChildCommandArgs("--forked review"), {
+test("subagent command accepts only a leading complete --fork option", () => {
+  assert.deepEqual(parseSubagentCommandArgs(""), { mode: "fresh", prompt: "" });
+  assert.deepEqual(parseSubagentCommandArgs("review the diff"), { mode: "fresh", prompt: "review the diff" });
+  assert.deepEqual(parseSubagentCommandArgs(" --fork review the diff "), { mode: "fork", prompt: "review the diff" });
+  assert.deepEqual(parseSubagentCommandArgs("--fork"), { mode: "fork", prompt: "" });
+  assert.deepEqual(parseSubagentCommandArgs("--forked review"), {
     mode: "fresh",
     prompt: "",
-    error: "Unknown child option: --forked",
+    error: "Unknown subagent option: --forked",
   });
 });
 
@@ -240,8 +269,8 @@ test("subagents command accepts direct open and explicit stop actions", () => {
   });
 });
 
-test("fresh subagent args use Pi tool defaults, disable ambient resources, and persist sessions", () => {
-  const args = buildChildProcessArgs({
+test("fresh subagent args load bundled extensions, disable ambient resources, and persist sessions", () => {
+  const args = buildSubagentProcessArgs({
     mode: "fresh",
     model: "anthropic/claude-sonnet-4-6",
     thinking: "high",
@@ -255,10 +284,16 @@ test("fresh subagent args use Pi tool defaults, disable ambient resources, and p
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
+    "--extension", SUBAGENT_EXTENSION_PATHS[0],
+    "--extension", SUBAGENT_EXTENSION_PATHS[1],
     "--session-dir", "/sessions/subagents",
     "--name", "auth-scout",
     "--model", "anthropic/claude-sonnet-4-6",
     "--thinking", "high",
+  ]);
+  assert.deepEqual(SUBAGENT_EXTENSION_PATHS, [
+    join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "codex-tools", "index.ts"),
+    join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "prevent-idle.ts"),
   ]);
   assert.equal(args.includes("--tools"), false);
   assert.equal(args.includes("--no-session"), false);
@@ -301,7 +336,7 @@ test("subagents receive purpose-aware progressive-disclosure guidance", () => {
   assert.match(taskGuidance, /follow-up and validation prompts/i);
   assert.match(taskGuidance, /hard scope boundary/i);
 
-  const args = buildChildProcessArgs({
+  const args = buildSubagentProcessArgs({
     mode: "fresh",
     sessionName: "auth-scout",
     purpose: "Authentication architecture and token lifecycle",
@@ -344,6 +379,32 @@ test("parent context is labeled separately from the subagent request", () => {
   );
 });
 
+test("selected subagent skills use exact parent names and canonical paths", () => {
+  const discovered = [
+    { name: "create-pr", filePath: "/skills/create-pr/SKILL.md" },
+    { name: "writing-style", filePath: "/skills/writing-style/SKILL.md" },
+  ];
+  assert.deepEqual(
+    resolveSelectedSubagentSkills(["create-pr", "writing-style", "create-pr"], discovered),
+    ["/skills/create-pr/SKILL.md", "/skills/writing-style/SKILL.md"],
+  );
+  assert.throws(
+    () => resolveSelectedSubagentSkills(["Create-PR"], discovered),
+    /Unknown subagent skill "Create-PR"; use an exact parent skill name/,
+  );
+  assert.throws(
+    () => resolveSelectedSubagentSkills(["/tmp/untrusted/SKILL.md"], discovered),
+    /Unknown subagent skill.*exact parent skill name/,
+  );
+  assert.throws(
+    () => resolveSelectedSubagentSkills(["create-pr"], [...discovered, {
+      name: "create-pr",
+      filePath: "/other/create-pr/SKILL.md",
+    }]),
+    /Ambiguous subagent skill "create-pr"; use a unique exact parent skill name/,
+  );
+});
+
 test("truncated responses direct the parent back to the persistent subagent", () => {
   assert.equal(boundedSubagentResponse("Short answer", "auth-scout"), "Short answer");
   const longAnswer = Array.from({ length: 3_000 }, (_, index) => `section line ${index + 1}`).join("\n");
@@ -365,17 +426,17 @@ test("truncated responses direct the parent back to the persistent subagent", ()
   assert.ok(Buffer.byteLength(multibyte, "utf8") <= MAX_SUBAGENT_RESPONSE_BYTES);
 });
 
-test("child panel sizing never exceeds the supplied terminal width", () => {
-  assert.equal(getChildPanelWidths(1), undefined);
-  assert.equal(getChildPanelWidths(2), undefined);
-  assert.deepEqual(getChildPanelWidths(40), { dialogWidth: 40, innerWidth: 38 });
-  assert.deepEqual(getChildPanelWidths(72), { dialogWidth: 72, innerWidth: 70 });
+test("subagent panel sizing never exceeds the supplied terminal width", () => {
+  assert.equal(getSubagentPanelWidths(1), undefined);
+  assert.equal(getSubagentPanelWidths(2), undefined);
+  assert.deepEqual(getSubagentPanelWidths(40), { dialogWidth: 40, innerWidth: 38 });
+  assert.deepEqual(getSubagentPanelWidths(72), { dialogWidth: 72, innerWidth: 70 });
 });
 
-test("busy subagent panels can detach without interrupting the child", () => {
+test("busy subagent panels can detach without interrupting the subagent", () => {
   let detached = 0;
   let interrupted = 0;
-  const panel = new ChildPanel(
+  const panel = new SubagentPanel(
     { requestRender() {} },
     {},
     {
@@ -397,8 +458,8 @@ test("busy subagent panels can detach without interrupting the child", () => {
   assert.equal(interrupted, 0);
 });
 
-test("child RPC commands reject unsuccessful protocol responses", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "pi-child-rpc-protocol-"));
+test("subagent RPC commands reject unsuccessful protocol responses", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-rpc-protocol-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const server = join(root, "rpc-server.mjs");
   await writeFile(server, `
@@ -431,7 +492,7 @@ process.stdin.on("data", (chunk) => {
   }
 });
 `);
-  const client = new ChildRpcClient({
+  const client = new SubagentRpcClient({
     cwd: root,
     args: [],
     invocation: { command: process.execPath, args: [server] },
@@ -448,7 +509,7 @@ process.stdin.on("data", (chunk) => {
   await client.stop();
 });
 
-test("handled child prompts settle without an agent run", async () => {
+test("handled subagent prompts settle without an agent run", async () => {
   const harness = makeControllerHarness({ promptStartsAgent: false });
   const result = await harness.controller.promptAndWait("/local-command");
   assert.deepEqual({
@@ -464,16 +525,16 @@ test("handled child prompts settle without an agent run", async () => {
   await harness.controller.stop();
 });
 
-test("child prompt rejection preserves the RPC error", async () => {
-  const harness = makeControllerHarness({ promptError: "No credentials for child model" });
+test("subagent prompt rejection preserves the RPC error", async () => {
+  const harness = makeControllerHarness({ promptError: "No credentials for subagent model" });
   await assert.rejects(
     harness.controller.promptAndWait("Inspect authentication"),
-    /No credentials for child model/,
+    /No credentials for subagent model/,
   );
   await harness.controller.stop();
 });
 
-test("queued child prompts remain serialized when an intermediate request is aborted", async () => {
+test("queued subagent prompts remain serialized when an intermediate request is aborted", async () => {
   const harness = makeControllerHarness();
   const first = harness.controller.promptAndWait("First request");
   await waitFor(() => harness.calls.prompt.length === 1);
@@ -495,7 +556,7 @@ test("queued child prompts remain serialized when an intermediate request is abo
   await harness.controller.stop();
 });
 
-test("child prompt completions preserve non-success stop reasons", async () => {
+test("subagent prompt completions preserve non-success stop reasons", async () => {
   const harness = makeControllerHarness();
   const pending = harness.controller.promptAndWait("Produce a long response");
   await waitFor(() => harness.calls.prompt.length === 1);
@@ -507,12 +568,12 @@ test("child prompt completions preserve non-success stop reasons", async () => {
   await harness.controller.stop();
 });
 
-test("child panel transcript memory is bounded", async () => {
+test("subagent panel transcript memory is bounded", async () => {
   const harness = makeControllerHarness();
-  for (let index = 0; index < MAX_CHILD_TRANSCRIPT_ITEMS + 25; index++) {
+  for (let index = 0; index < MAX_SUBAGENT_TRANSCRIPT_ITEMS + 25; index++) {
     harness.controller.setTransientStatus(`error ${index}`, "error");
   }
-  assert.equal(harness.controller.state.items.length, MAX_CHILD_TRANSCRIPT_ITEMS);
+  assert.equal(harness.controller.state.items.length, MAX_SUBAGENT_TRANSCRIPT_ITEMS);
   assert.equal(harness.controller.state.omittedItems, 25);
   await harness.controller.stop();
 });
@@ -599,6 +660,87 @@ test("restored transcripts retain parent, human, and fork-context attribution", 
     ],
   );
   await harness.controller.stop();
+});
+
+test("active-turn fork snapshots end at the latest parent user request", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-active-fork-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const parentSession = join(root, "parent.jsonl");
+  const header = {
+    type: "session",
+    version: 3,
+    id: "7dca2c28-8505-4549-aa8c-fd6032d575bf",
+    timestamp: "2026-03-12T00:00:00.000Z",
+    cwd: root,
+  };
+  await writeFile(parentSession, `${JSON.stringify(header)}\n`);
+  const branch = [
+    {
+      type: "message",
+      id: "user-1",
+      parentId: null,
+      timestamp: "2026-03-12T00:00:01.000Z",
+      message: { role: "user", content: "Earlier request", timestamp: 1 },
+    },
+    {
+      type: "message",
+      id: "assistant-1",
+      parentId: "user-1",
+      timestamp: "2026-03-12T00:00:02.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Earlier response" }], stopReason: "stop", timestamp: 2 },
+    },
+    {
+      type: "message",
+      id: "user-2",
+      parentId: "assistant-1",
+      timestamp: "2026-03-12T00:00:03.000Z",
+      message: { role: "user", content: "Create the pull request", timestamp: 3 },
+    },
+    {
+      type: "message",
+      id: "assistant-current",
+      parentId: "user-2",
+      timestamp: "2026-03-12T00:00:04.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_subagent", name: "subagent", arguments: { action: "create" } }],
+        stopReason: "toolUse",
+        timestamp: 4,
+      },
+    },
+    {
+      type: "message",
+      id: "tool-current",
+      parentId: "assistant-current",
+      timestamp: "2026-03-12T00:00:05.000Z",
+      message: { role: "toolResult", toolCallId: "call_subagent", toolName: "subagent", content: [], isError: false, timestamp: 5 },
+    },
+  ];
+  const originalBranch = structuredClone(branch);
+  const sessionManager = {
+    getSessionFile: () => parentSession,
+    getHeader: () => header,
+    getBranch: () => branch,
+    getLeafId: () => "assistant-current",
+  };
+  const snapshot = createActiveTurnForkSnapshot(sessionManager, join(root, "snapshots"));
+  assert.equal(snapshot.mode, "fork");
+  assert.equal(sessionManager.getLeafId(), "assistant-current");
+  assert.deepEqual(branch, originalBranch);
+  const entries = (await readFile(snapshot.parentSessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(entries[0].parentSession, parentSession);
+  assert.deepEqual(entries.slice(1).map(({ id }) => id), ["user-1", "assistant-1", "user-2"]);
+  assert.match(JSON.stringify(entries), /Create the pull request/);
+  assert.doesNotMatch(JSON.stringify(entries), /call_subagent|assistant-current|tool-current/);
+
+  const ephemeral = createActiveTurnForkSnapshot({
+    ...sessionManager,
+    getSessionFile: () => undefined,
+  }, join(root, "unused"));
+  assert.deepEqual(ephemeral, { mode: "fresh", fallback: "parent-session-not-persisted" });
 });
 
 test("persistent subagent registry stores branch-local mutations and restores dormant instances", async (t) => {
@@ -745,6 +887,7 @@ test("persistent subagent registry stores branch-local mutations and restores do
     name: "product-scout",
     purpose: "Product requirements and tradeoffs",
     lifetime: "task",
+    skills: ["/parent/skills/create-pr/SKILL.md", "/parent/skills/create-pr/SKILL.md", "/parent/skills/writing-style/SKILL.md"],
     persona: {
       name: "product-manager",
       description: "Explore product decisions",
@@ -758,6 +901,10 @@ test("persistent subagent registry stores branch-local mutations and restores do
   });
   let storedSkilled = latestStoredSubagent(entries, "parent-session-id", skilled.id);
   const storedPersona = storedSkilled.persona;
+  assert.deepEqual(storedSkilled.selectedSkillPaths, [
+    "/parent/skills/create-pr/SKILL.md",
+    "/parent/skills/writing-style/SKILL.md",
+  ]);
   assert.deepEqual(storedPersona.skills, ["/personas/skills/product/SKILL.md"]);
   assert.deepEqual(storedPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(storedPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
@@ -850,6 +997,10 @@ NEEDS: A release decision from the parent`;
     },
   });
   assert.equal(restoredSkills.summaryFor(skilled.id).status, "blocked");
+  assert.deepEqual(restoredSkills.resolve(skilled.id).stored.selectedSkillPaths, [
+    "/parent/skills/create-pr/SKILL.md",
+    "/parent/skills/writing-style/SKILL.md",
+  ]);
   await restoredSkills.stop(skilled.id);
   storedSkilled = latestStoredSubagent(entries, "parent-session-id", skilled.id);
   assert.equal(storedSkilled.activeBlocker, undefined);
@@ -860,6 +1011,10 @@ NEEDS: A release decision from the parent`;
   assert.equal(restoredPersona.preferredLifetime, "task");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, true);
+  assert.deepEqual(storedSkilled.selectedSkillPaths, [
+    "/parent/skills/create-pr/SKILL.md",
+    "/parent/skills/writing-style/SKILL.md",
+  ]);
 
   const otherParent = new PersistentSubagentRegistry(pi);
   otherParent.restore({
@@ -956,23 +1111,277 @@ test("lifetime promotion restarts a live controller before follow-up", async (t)
   assert.equal(promoted.status, "dormant");
 });
 
-test("model creation is unavailable when no personas are configured", async (t) => {
+test("model creation supports controlled persona-less skills and active-turn forks", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-controlled-create-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const personaDirectory = join(root, "personas");
+  const personaSkillDirectory = join(root, "persona-skills", "create-pr");
+  await mkdir(personaDirectory);
+  await mkdir(personaSkillDirectory, { recursive: true });
+  await writeFile(join(personaSkillDirectory, "SKILL.md"), `---
+name: create-pr
+description: Create pull requests with persona-specific policy.
+---
+Preserve the persona-specific pull request policy.
+`);
+  await writeFile(join(personaDirectory, "implementer.md"), `---
+name: implementer
+description: Implement a bounded change
+context-requirements: Provide the objective, scope, and constraints.
+skills:
+  - ../persona-skills/create-pr/SKILL.md
+---
+Implement the requested change.
+`);
+  const parentSession = join(root, "parent.jsonl");
+  const header = {
+    type: "session",
+    version: 3,
+    id: "3e4a8b1f-863f-41b4-8849-a6d9f9e22c24",
+    timestamp: "2026-03-12T00:00:00.000Z",
+    cwd: root,
+  };
+  await writeFile(parentSession, `${JSON.stringify(header)}\n`);
+  const branch = [
+    {
+      type: "message",
+      id: "user-request",
+      parentId: null,
+      timestamp: "2026-03-12T00:00:01.000Z",
+      message: { role: "user", content: "Create the requested pull request", timestamp: 1 },
+    },
+    {
+      type: "message",
+      id: "assistant-tool-call",
+      parentId: "user-request",
+      timestamp: "2026-03-12T00:00:02.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "subagent-call", name: "subagent", arguments: { action: "create" } }],
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+    },
+  ];
+  const entries = [];
+  let parentLeaf = "assistant-tool-call";
+  const tools = new Map();
+  const events = new Map();
+  const pi = {
+    registerTool(tool) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    registerShortcut() {},
+    on(name, handler) { events.set(name, handler); },
+    getThinkingLevel() { return "low"; },
+    appendEntry(customType, data) {
+      entries.push({ type: "custom", customType, data });
+      parentLeaf = `custom-${entries.length}`;
+    },
+  };
+  let parentPersisted = true;
+  const context = {
+    cwd: root,
+    model: undefined,
+    scopedModels: [],
+    sessionManager: {
+      getSessionId: () => "controlled-create-parent",
+      getSessionFile: () => parentPersisted ? parentSession : join(root, "ephemeral-parent.jsonl"),
+      getHeader: () => header,
+      getBranch: () => branch,
+      getLeafId: () => parentLeaf,
+    },
+  };
+  subagentsModule.default(pi, { personaDirectory });
+  events.get("session_start")({}, context);
+  events.get("before_agent_start")({
+    systemPromptOptions: {
+      skills: [
+        { name: "create-pr", filePath: "/parent/skills/create-pr/SKILL.md", disableModelInvocation: false },
+        { name: "writing-style", filePath: "/parent/skills/writing-style/SKILL.md", disableModelInvocation: false },
+        { name: "command-only", filePath: "/parent/skills/command-only/SKILL.md", disableModelInvocation: true },
+      ],
+    },
+  }, context);
+  const tool = tools.get("subagent");
+  const signal = new AbortController().signal;
+
+  for (const [id, input, expected] of [
+    ["missing-purpose", { action: "create", lifetime: "task", skills: ["create-pr"] }, /explicit purpose/],
+    ["missing-lifetime", { action: "create", purpose: "Create a pull request", skills: ["create-pr"] }, /explicit lifetime/],
+    ["missing-skills", { action: "create", purpose: "Create a pull request", lifetime: "task" }, /at least one skill/],
+    ["command-only-skill", { action: "create", purpose: "Create a pull request", lifetime: "task", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
+  ]) {
+    const result = await tool.execute(id, input, signal, undefined, context);
+    assert.equal(result.details.ok, false, id);
+    assert.equal(result.details.error.code, "INVALID_INPUT", id);
+    assert.match(result.details.error.message, expected, id);
+  }
+
+  const fresh = await tool.execute("persona-less-fresh", {
+    action: "create",
+    mode: "fresh",
+    name: "workflow-fresh",
+    purpose: "Create the requested pull request",
+    lifetime: "task",
+    skills: ["create-pr", "writing-style", "create-pr"],
+  }, signal, undefined, context);
+  assert.equal(fresh.content[0].text, "Created workflow-fresh.");
+  assert.equal(fresh.details.subagent.persona, undefined);
+  assert.equal(fresh.details.subagent.model, "openai-codex/gpt-5.6-terra");
+  assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", fresh.details.subagent.id).selectedSkillPaths, [
+    "/parent/skills/create-pr/SKILL.md",
+    "/parent/skills/writing-style/SKILL.md",
+  ]);
+
+  const additive = await tool.execute("persona-with-selected-skills", {
+    action: "create",
+    name: "workflow-persona",
+    persona: "implementer",
+    purpose: "Create and validate the pull request",
+    lifetime: "task",
+    skills: ["writing-style"],
+  }, signal, undefined, context);
+  assert.equal(additive.details.subagent.persona, "implementer");
+  assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", additive.details.subagent.id).selectedSkillPaths, [
+    "/parent/skills/writing-style/SKILL.md",
+  ]);
+
+  const conflict = await tool.execute("persona-with-conflicting-skill", {
+    action: "create",
+    name: "workflow-persona-conflict",
+    persona: "implementer",
+    purpose: "Create a pull request with conflicting policy",
+    lifetime: "task",
+    skills: ["create-pr"],
+  }, signal, undefined, context);
+  assert.equal(conflict.details.ok, false);
+  assert.equal(conflict.details.error.code, "INVALID_INPUT");
+  assert.match(conflict.details.error.message, /selected skill.*conflicts with persona.*different path/i);
+
+  parentLeaf = "assistant-tool-call";
+  const persistedEntriesBeforeFork = entries.length;
+  const fork = await tool.execute("persona-less-fork", {
+    action: "create",
+    mode: "fork",
+    name: "workflow-fork",
+    purpose: "Create the requested pull request from parent context",
+    lifetime: "task",
+    skills: ["create-pr"],
+  }, signal, undefined, context);
+  const storedFork = fork.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts[0];
+  assert.equal(fork.content[0].text, "Created workflow-fork.");
+  assert.ok(storedFork.parentSessionFile.startsWith(join(root, "persistent-subagents", "controlled-create-parent", "fork-snapshots")));
+  assert.deepEqual(storedFork.selectedSkillPaths, ["/parent/skills/create-pr/SKILL.md"]);
+  assert.equal(entries.length, persistedEntriesBeforeFork);
+  assert.equal(context.sessionManager.getLeafId(), "assistant-tool-call");
+  assert.doesNotMatch(await readFile(storedFork.parentSessionFile, "utf8"), /assistant-tool-call|subagent-call/);
+  const restoredFork = new PersistentSubagentRegistry(pi);
+  restoredFork.restore({
+    ...context,
+    sessionManager: {
+      ...context.sessionManager,
+      getBranch: () => [...branch, {
+        type: "message",
+        id: "fork-tool-result",
+        parentId: "assistant-tool-call",
+        timestamp: "2026-03-12T00:00:03.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "subagent-call",
+          toolName: "subagent",
+          content: [],
+          isError: false,
+          details: { [SUBAGENT_REGISTRY_TOOL_DETAILS_KEY]: fork.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY] },
+          timestamp: 3,
+        },
+      }],
+    },
+  });
+  assert.deepEqual(restoredFork.resolve("workflow-fork").stored.selectedSkillPaths, [
+    "/parent/skills/create-pr/SKILL.md",
+  ]);
+
+  parentPersisted = false;
+  const fallback = await tool.execute("ephemeral-parent-fallback", {
+    action: "create",
+    mode: "fork",
+    name: "workflow-fallback",
+    purpose: "Create the requested pull request with a fresh fallback",
+    lifetime: "task",
+    skills: ["create-pr"],
+  }, signal, undefined, context);
+  assert.match(fallback.content[0].text, /^Parent session was not persisted; created with fresh context\./);
+  assert.deepEqual(fallback.details.fork, {
+    requested: "fork",
+    mode: "fresh",
+    fallback: "parent-session-not-persisted",
+  });
+  const storedFallback = fallback.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts[0];
+  assert.equal(storedFallback.mode, "fresh");
+  assert.equal(storedFallback.parentSessionFile, undefined);
+
+  await tool.execute("stop-persona-before-fork-prompt", {
+    action: "stop",
+    id: "workflow-persona",
+  }, signal, undefined, context);
+  const originalPrompt = PersistentSubagentRegistry.prototype.prompt;
+  PersistentSubagentRegistry.prototype.prompt = async function (_ctx, target) {
+    return {
+      summary: this.summaryFor(target),
+      text: "Inherited context accepted",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      responseProduced: true,
+      handledWithoutAgent: false,
+      stopReason: "stop",
+    };
+  };
+  t.after(() => { PersistentSubagentRegistry.prototype.prompt = originalPrompt; });
+  parentPersisted = true;
+  const personaFork = await tool.execute("persona-fork-inherits-required-context", {
+    action: "create",
+    mode: "fork",
+    name: "workflow-persona-fork",
+    persona: "implementer",
+    purpose: "Create the requested pull request with inherited context",
+    lifetime: "task",
+    skills: ["writing-style"],
+    prompt: "Create the pull request from inherited context.",
+  }, signal, undefined, context);
+  assert.match(personaFork.content[0].text, /^Saved as workflow-persona-fork\./);
+  assert.equal(personaFork.details.subagent.persona, "implementer");
+  assert.equal(personaFork.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts[0].parentContextProvided, true);
+
+  const status = await tool.execute("status-without-skill-metadata", {
+    action: "status",
+    id: "workflow-fresh",
+  }, signal, undefined, context);
+  const listed = await tool.execute("list-without-skill-metadata", { action: "list" }, signal, undefined, context);
+  for (const result of [fresh, status, listed]) {
+    assert.doesNotMatch(result.content[0].text, /SKILL\.md|writing-style|selectedSkillPaths/);
+  }
+  assert.equal(status.details.subagent.selectedSkillPaths, undefined);
+  await events.get("session_shutdown")({}, context);
+});
+
+test("persona-based model creation remains unavailable when no personas are configured", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-no-subagent-personas-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const tools = new Map();
   subagentsModule.default({
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand() {},
+    registerShortcut() {},
     on() {},
   }, { personaDirectory: join(root, "missing") });
 
-  await assert.rejects(
-    tools.get("subagent").execute("create-without-personas", {
-      action: "create",
-      purpose: "Attempt generic delegation",
-    }, undefined, undefined, {}),
-    /No subagent personas are configured; create requires an existing persona/i,
-  );
+  const result = await tools.get("subagent").execute("create-without-personas", {
+    action: "create",
+    persona: "reviewer",
+    purpose: "Attempt generic delegation",
+  }, undefined, undefined, {});
+  assert.equal(result.details.ok, false);
+  assert.equal(result.details.tool, "subagent");
+  assert.match(result.details.error.message, /No subagent personas are configured; create requires an existing persona/i);
 });
 
 test("model-created subagents honor persona lifetime preferences and explicit overrides", async (t) => {
@@ -1043,6 +1452,7 @@ NEEDS: The expected behavior from the parent`;
   const pi = {
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand() {},
+    registerShortcut() {},
     on(name, handler) { events.set(name, handler); },
     getThinkingLevel() { return "low"; },
     appendEntry() {},
@@ -1068,15 +1478,15 @@ NEEDS: The expected behavior from the parent`;
   }, signal, undefined, context);
   assert.match(personas.content[0].text, /bounded-analyst: Complete bounded analysis \[prefers one-shot\]/);
   assert.equal(personas.details.personas[0].preferredLifetime, "one-shot");
-  await assert.rejects(
-    tool.execute("preferred-one-shot-without-prompt", {
-      action: "create",
-      name: "invalid-preferred-one-shot",
-      persona: "bounded-analyst",
-      purpose: "Invalid dormant preferred one-shot",
-    }, signal, undefined, context),
-    /one-shot subagents require an initial prompt/i,
-  );
+  const invalidOneShot = await tool.execute("preferred-one-shot-without-prompt", {
+    action: "create",
+    name: "invalid-preferred-one-shot",
+    persona: "bounded-analyst",
+    purpose: "Invalid dormant preferred one-shot",
+  }, signal, undefined, context);
+  assert.equal(invalidOneShot.details.ok, false);
+  assert.equal(invalidOneShot.details.error.code, "INVALID_INPUT");
+  assert.match(invalidOneShot.details.error.message, /one-shot subagents require an initial prompt/i);
 
   const oneShot = await tool.execute("one-shot", {
     action: "create",
@@ -1170,16 +1580,16 @@ NEEDS: The expected behavior from the parent`;
     id: "empty-one-shot",
   }, signal, undefined, context);
 
-  await assert.rejects(
-    tool.execute("failed-one-shot", {
-      action: "create",
-      name: "failed-one-shot",
-      persona: "bounded-analyst",
-      purpose: "Fail one bounded request",
-      prompt: "FAIL",
-    }, signal, undefined, context),
-    /Synthetic one-shot failure/,
-  );
+  const failedOneShot = await tool.execute("failed-one-shot", {
+    action: "create",
+    name: "failed-one-shot",
+    persona: "bounded-analyst",
+    purpose: "Fail one bounded request",
+    prompt: "FAIL",
+  }, signal, undefined, context);
+  assert.equal(failedOneShot.details.ok, false);
+  assert.equal(failedOneShot.details.error.code, "SUBAGENT_FAILED");
+  assert.match(failedOneShot.details.error.message, /Synthetic one-shot failure/);
   const failed = await tool.execute("failed-status", {
     action: "status",
     id: "failed-one-shot",
@@ -1196,7 +1606,10 @@ NEEDS: The expected behavior from the parent`;
     prompt: "CANCEL",
   }, cancellation.signal, undefined, context);
   cancellation.abort(new Error("Parent canceled one-shot"));
-  await assert.rejects(canceledPrompt, /Parent canceled one-shot/);
+  const canceledResult = await canceledPrompt;
+  assert.equal(canceledResult.details.ok, false);
+  assert.equal(canceledResult.details.error.code, "CANCELLED");
+  assert.match(canceledResult.details.error.message, /Parent canceled one-shot/);
   const canceled = await tool.execute("canceled-status", {
     action: "status",
     id: "canceled-one-shot",
@@ -1227,6 +1640,7 @@ Inspect the project without changing it.
   const pi = {
     registerTool(tool) { tools.set(tool.name, tool); },
     registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
     on(name, handler) { events.set(name, handler); },
     getActiveTools() { return [...activeTools]; },
     setActiveTools(next) { activeTools = [...next]; },
@@ -1263,111 +1677,32 @@ Inspect the project without changing it.
   await commands.get("subagents").handler("--disable", context);
   assert.deepEqual(activeTools, ["read"]);
   assert.ok(notifications.some(({ message }) => message === "Model subagent tool disabled."));
-  await commands.get("children").handler("--enable", context);
+  await commands.get("subagents").handler("--enable", context);
   assert.deepEqual(activeTools, ["read", "subagent"]);
   assert.ok(notifications.some(({ message }) => message === "Model subagent tool enabled."));
 
-  await assert.rejects(
-    subagentTool.execute("create-without-persona", {
-      action: "create",
-      name: "persona-less",
-      purpose: "Attempt persona-less delegation",
-    }, signal, undefined, context),
-    /persona is required for create.*list personas/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("create-unknown-persona", {
-      action: "create",
-      persona: "unknown",
-      purpose: "Attempt unknown delegation",
-    }, signal, undefined, context),
-    /Unknown subagent persona "unknown".*list personas/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("context-without-prompt", {
-      action: "create",
-      name: "context-only",
-      purpose: "Context without an accompanying request",
-      persona: "test-scout",
-      context: "Goal: inspect the project",
-    }, signal, undefined, context),
-    /context requires an accompanying prompt/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("context-on-list", {
-      action: "list",
-      context: "Not valid for list",
-    }, signal, undefined, context),
-    /context is only valid with create or prompt/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("oversized-context", {
-      action: "list",
-      context: "x".repeat(8_001),
-    }, signal, undefined, context),
-    /context exceeds 8000 characters/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("profile-on-list", {
-      action: "list",
-      profile: "fast",
-    }, signal, undefined, context),
-    /profile is only valid with create/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("lifetime-on-list", {
-      action: "list",
-      lifetime: "task",
-    }, signal, undefined, context),
-    /lifetime is only valid with create/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("persona-on-list", {
-      action: "list",
-      persona: "test-scout",
-    }, signal, undefined, context),
-    /persona is not valid for subagent action "list"/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("offset-on-subagent-list", {
-      action: "list",
-      offset: 1,
-    }, signal, undefined, context),
-    /offset and limit are only valid for persona lists/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("kind-on-create", {
-      action: "create",
-      kind: "personas",
-      persona: "test-scout",
-      purpose: "Invalid create field",
-    }, signal, undefined, context),
-    /kind is not valid for subagent action "create"/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("purpose-on-status", {
-      action: "status",
-      id: "missing",
-      purpose: "Invalid status field",
-    }, signal, undefined, context),
-    /purpose is not valid for subagent action "status"/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("unknown-field", {
-      action: "list",
-      unexpected: true,
-    }, signal, undefined, context),
-    /unexpected is not valid for subagent action "list"/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("one-shot-without-prompt", {
-      action: "create",
-      persona: "test-scout",
-      purpose: "Invalid dormant one-shot",
-      lifetime: "one-shot",
-    }, signal, undefined, context),
-    /one-shot subagents require an initial prompt/i,
-  );
+  const invalidCalls = [
+    ["create-without-persona", { action: "create", name: "persona-less", purpose: "Attempt persona-less delegation" }, /Persona-less create requires explicit lifetime, at least one skill/i],
+    ["create-unknown-persona", { action: "create", persona: "unknown", purpose: "Attempt unknown delegation" }, /Unknown subagent persona "unknown".*list personas/i],
+    ["context-without-prompt", { action: "create", name: "context-only", purpose: "Context without an accompanying request", persona: "test-scout", context: "Goal: inspect the project" }, /context requires an accompanying prompt/i],
+    ["context-on-list", { action: "list", context: "Not valid for list" }, /context is only valid with create or prompt/i],
+    ["oversized-context", { action: "list", context: "x".repeat(8_001) }, /context exceeds 8000 characters/i],
+    ["profile-on-list", { action: "list", profile: "fast" }, /profile is only valid with create/i],
+    ["lifetime-on-list", { action: "list", lifetime: "task" }, /lifetime is only valid with create/i],
+    ["persona-on-list", { action: "list", persona: "test-scout" }, /persona is not valid for subagent action "list"/i],
+    ["offset-on-subagent-list", { action: "list", offset: 1 }, /offset and limit are only valid for persona lists/i],
+    ["kind-on-create", { action: "create", kind: "personas", persona: "test-scout", purpose: "Invalid create field" }, /kind is not valid for subagent action "create"/i],
+    ["purpose-on-status", { action: "status", id: "missing", purpose: "Invalid status field" }, /purpose is not valid for subagent action "status"/i],
+    ["unknown-field", { action: "list", unexpected: true }, /unexpected is not valid for subagent action "list"/i],
+    ["one-shot-without-prompt", { action: "create", persona: "test-scout", purpose: "Invalid dormant one-shot", lifetime: "one-shot" }, /one-shot subagents require an initial prompt/i],
+  ];
+  for (const [id, input, message] of invalidCalls) {
+    const result = await subagentTool.execute(id, input, signal, undefined, context);
+    assert.equal(result.details.ok, false, id);
+    assert.equal(result.details.tool, "subagent", id);
+    assert.equal(result.details.error.code, "INVALID_INPUT", id);
+    assert.match(result.details.error.message, message, id);
+  }
 
   const profileNames = ["fast", "balanced", "deep"];
   const createdWithProfiles = [];
@@ -1391,24 +1726,24 @@ Inspect the project without changing it.
       { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
     ],
   );
-  await assert.rejects(
-    subagentTool.execute("create-duplicate-purpose", {
-      action: "create",
-      name: "duplicate-area",
-      persona: "test-scout",
-      purpose: "retain context for project area 1",
-    }, signal, undefined, context),
-    /agent-1 .*already retains context.*action "prompt"/i,
-  );
-  await assert.rejects(
-    subagentTool.execute("create-over-limit", {
-      action: "create",
-      name: "agent-over-limit",
-      persona: "test-scout",
-      purpose: "This purpose should be rejected by the limit",
-    }, signal, undefined, context),
-    /limit reached \(4\)/i,
-  );
+  const duplicate = await subagentTool.execute("create-duplicate-purpose", {
+    action: "create",
+    name: "duplicate-area",
+    persona: "test-scout",
+    purpose: "retain context for project area 1",
+  }, signal, undefined, context);
+  assert.equal(duplicate.details.ok, false);
+  assert.equal(duplicate.details.error.code, "SUBAGENT_FAILED");
+  assert.match(duplicate.details.error.message, /agent-1 .*already retains context.*action "prompt"/i);
+  const overLimit = await subagentTool.execute("create-over-limit", {
+    action: "create",
+    name: "agent-over-limit",
+    persona: "test-scout",
+    purpose: "This purpose should be rejected by the limit",
+  }, signal, undefined, context);
+  assert.equal(overLimit.details.ok, false);
+  assert.equal(overLimit.details.error.code, "SUBAGENT_FAILED");
+  assert.match(overLimit.details.error.message, /limit reached \(4\)/i);
 
   await commands.get("subagents").handler("--stop agent-1", context);
   assert.equal(confirmations.length, 1);
@@ -1440,40 +1775,41 @@ Inspect the project without changing it.
   await events.get("session_shutdown")({}, context);
 });
 
-test("child args preserve the parent's scoped model cycle", () => {
+test("subagent args preserve the parent's scoped model cycle", () => {
   const scopedModels = [
     { provider: "anthropic", id: "claude-sonnet-4-6", thinkingLevel: "high" },
     { provider: "openai", id: "gpt-5.4" },
   ];
   assert.equal(
-    formatChildModelScope(scopedModels),
+    formatSubagentModelScope(scopedModels),
     "anthropic/claude-sonnet-4-6:high,openai/gpt-5.4",
   );
 
-  const args = buildChildProcessArgs({ mode: "fresh", scopedModels });
+  const args = buildSubagentProcessArgs({ mode: "fresh", scopedModels });
   assert.deepEqual(args.slice(args.indexOf("--models"), args.indexOf("--models") + 2), [
     "--models",
     "anthropic/claude-sonnet-4-6:high,openai/gpt-5.4",
   ]);
 });
 
-test("forked persona args load declared resources with Pi's normal tool selection", () => {
+test("forked persona args load bundled and declared resources with Pi's normal tool selection", () => {
   const persona = {
     name: "reviewer",
     description: "Review changes",
     systemPrompt: "You are a reviewer.",
-    extensions: ["/personas/extensions/review.ts"],
+    extensions: [SUBAGENT_EXTENSION_PATHS[0], "/personas/extensions/review.ts"],
     skills: ["/personas/skills/review/SKILL.md"],
     model: "openai/gpt-5.4",
     thinking: "medium",
     filePath: "/personas/reviewer.md",
   };
-  const args = buildChildProcessArgs({
+  const args = buildSubagentProcessArgs({
     mode: "fork",
     parentSessionFile: "/sessions/parent.jsonl",
     persona,
     model: "anthropic/ignored",
     thinking: "off",
+    skills: ["/parent/skills/create-pr/SKILL.md", "/personas/skills/review/SKILL.md"],
   });
 
   assert.deepEqual(args, [
@@ -1482,18 +1818,22 @@ test("forked persona args load declared resources with Pi's normal tool selectio
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
+    "--extension", SUBAGENT_EXTENSION_PATHS[0],
+    "--extension", SUBAGENT_EXTENSION_PATHS[1],
     "--model", "openai/gpt-5.4",
     "--thinking", "medium",
     "--system-prompt", "You are a reviewer.\n",
     "--extension", "/personas/extensions/review.ts",
     "--skill", "/personas/skills/review/SKILL.md",
+    "--skill", "/parent/skills/create-pr/SKILL.md",
     "--fork", "/sessions/parent.jsonl",
   ]);
   assert.equal(args.includes("--tools"), false);
   assert.equal(args.includes("--no-extensions"), true);
   assert.equal(args.includes("--no-skills"), true);
-  assert.deepEqual(args.filter((value) => value === "--extension"), ["--extension"]);
-  assert.deepEqual(args.filter((value) => value === "--skill"), ["--skill"]);
+  assert.equal(args.filter((value) => value === "--extension").length, 3);
+  assert.deepEqual(args.filter((value) => value === "--skill"), ["--skill", "--skill"]);
+  assert.equal(args.includes(join(BUNDLED_PERSONA_DIRECTORY, "..", "index.ts")), false);
 });
 
 test("restored subagent args use its session model history", () => {
@@ -1507,7 +1847,7 @@ test("restored subagent args use its session model history", () => {
     thinking: "max",
     filePath: "/personas/codebase-explorer.md",
   };
-  const args = buildChildProcessArgs({
+  const args = buildSubagentProcessArgs({
     mode: "fresh",
     sessionFile: "/sessions/subagent.jsonl",
     sessionDir: "/sessions",
@@ -1527,15 +1867,15 @@ test("restored subagent args use its session model history", () => {
 });
 
 test("fork args require a persisted parent session", () => {
-  assert.throws(() => buildChildProcessArgs({ mode: "fork" }), /persisted parent session/i);
+  assert.throws(() => buildSubagentProcessArgs({ mode: "fork" }), /persisted parent session/i);
   assert.throws(
-    () => buildChildProcessArgs({ mode: "fork", parentSessionFile: "/parent.jsonl", sessionFile: "/child.jsonl" }),
+    () => buildSubagentProcessArgs({ mode: "fork", parentSessionFile: "/parent.jsonl", sessionFile: "/subagent.jsonl" }),
     /cannot restore/i,
   );
 });
 
 test("bundled personas provide focused defaults and user personas override by name", async (t) => {
-  const bundled = loadChildPersonas(BUNDLED_PERSONA_DIRECTORY);
+  const bundled = loadSubagentPersonas(BUNDLED_PERSONA_DIRECTORY);
   assert.deepEqual(bundled.diagnostics, []);
   assert.deepEqual(bundled.personas.map(({ name }) => name), [
     "codebase-explorer",
@@ -1558,9 +1898,9 @@ test("bundled personas provide focused defaults and user personas override by na
     })),
     [
       { name: "codebase-explorer", role: "You are a codebase explorer and architecture analyst. Build an evidence-based map of the requested subsystem so the caller can reason about it without rereading the entire codebase." },
-      { name: "doc-auditor", role: "You are a documentation auditor. Verify that documentation matches actual behavior and gives its intended audience enough information to use the documented functionality correctly." },
+      { name: "doc-auditor", role: "You are a repository documentation auditor. Verify that documentation about the repository or implemented code matches actual behavior and gives its intended audience enough information to use the documented functionality correctly." },
       { name: "reviewer", role: "You are a code reviewer, not an implementation agent." },
-      { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Determine whether the required behavior is adequately tested and identify likely regression modes." },
+      { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Assess testability, test coverage, and regression cases for a defined change. Do not define product requirements, determine feature scope, or make design decisions. For a design document, assess only whether its stated behavior is precise and observable enough to derive tests." },
     ],
   );
   const bundledPrompts = Object.fromEntries(
@@ -1568,8 +1908,10 @@ test("bundled personas provide focused defaults and user personas override by na
   );
   assert.match(bundledPrompts["codebase-explorer"], /Trace entry points, control flow, data flow, dependencies, and tests/);
   assert.match(bundledPrompts["codebase-explorer"], /Do not edit or write project files.*use Bash to inspect.*explore dependencies/s);
+  assert.match(bundledPrompts["doc-auditor"], /Do not audit plans, design documents, proposals, requirements.*intended or future work/s);
+  assert.match(bundledPrompts["doc-auditor"], /Do not provide a generic document critique.*outside this scope.*stop/s);
   assert.match(bundledPrompts["doc-auditor"], /Report only actionable findings.*documentation and implementation evidence/s);
-  assert.match(bundledPrompts["doc-auditor"], /Do not edit files/);
+  assert.match(bundledPrompts["doc-auditor"], /Do not draft replacement prose.*or edit files/s);
   assert.match(
     bundledPrompts.reviewer,
     /stated review focus as a hard boundary.*specific guideline.*report only findings that directly answer it.*Do not expand.*general review/s,
@@ -1610,7 +1952,7 @@ description: Custom reviewer
 ---
 Review using local conventions.
 `);
-  const merged = loadChildPersonasFromDirectories([BUNDLED_PERSONA_DIRECTORY, root]);
+  const merged = loadSubagentPersonasFromDirectories([BUNDLED_PERSONA_DIRECTORY, root]);
   assert.deepEqual(merged.diagnostics, []);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").description, "Custom reviewer");
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredLifetime, undefined);
@@ -1623,7 +1965,7 @@ test("persona descriptions truncate at a Unicode code-point boundary", () => {
   assert.doesNotMatch(description, /�/u);
 });
 
-test("child personas load markdown prompts and resolve explicit resource paths", async (t) => {
+test("subagent personas load markdown prompts and resolve explicit resource paths", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-personas-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDir = join(root, "personas");
@@ -1699,7 +2041,7 @@ preferred-lifetime: temporary
 This persona should be rejected.
 `);
 
-  const discovery = loadChildPersonas(personaDir);
+  const discovery = loadSubagentPersonas(personaDir);
   assert.equal(discovery.personas.length, 1);
   assert.equal(
     formatPersonaForModel(discovery.personas[0]),
@@ -1721,7 +2063,7 @@ This persona should be rejected.
     filePath: join(personaDir, "a-product.md"),
   });
   assert.equal(discovery.diagnostics.length, 8);
-  assert.ok(discovery.diagnostics.some((diagnostic) => /duplicate child persona/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /duplicate subagent persona/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name.*at most 64/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /system prompt body is empty/i.test(diagnostic)));

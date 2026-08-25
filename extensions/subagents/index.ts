@@ -10,18 +10,21 @@ import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
     getAgentDir,
+    parseFrontmatter,
     truncateHead,
     type ExtensionAPI,
     type ExtensionCommandContext,
+    type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
+import type { ToolFailureDetails } from "../codex-tools/tool-result.ts";
 import {
     BUNDLED_PERSONA_DIRECTORY,
-    loadChildPersonas,
-    loadChildPersonasFromDirectories,
-    parseChildCommandArgs,
+    loadSubagentPersonas,
+    loadSubagentPersonasFromDirectories,
+    parseSubagentCommandArgs,
     SUBAGENT_LIFETIMES,
-    type ChildPersona,
+    type SubagentPersona,
     type SubagentLifetime,
 } from "./personas.ts";
 import {
@@ -29,24 +32,26 @@ import {
     normalizeSubagentPurpose,
     PersistentSubagentRegistry,
     registryErrorMessage,
+    SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
     type PersistentSubagentSummary,
 } from "./registry.ts";
 
 export {
     BUNDLED_PERSONA_DIRECTORY,
-    buildChildProcessArgs,
-    formatChildModelScope,
+    buildSubagentProcessArgs,
+    formatSubagentModelScope,
     formatSubagentContinuityPrompt,
-    loadChildPersonas,
-    loadChildPersonasFromDirectories,
-    parseChildCommandArgs,
-    type ChildContextMode,
-    type ChildPersona,
-    type ChildPersonaDiscovery,
-    type ChildProcessOptions,
-    type ChildScopedModel,
+    loadSubagentPersonas,
+    loadSubagentPersonasFromDirectories,
+    parseSubagentCommandArgs,
+    SUBAGENT_EXTENSION_PATHS,
+    type SubagentContextMode,
+    type SubagentPersona,
+    type SubagentPersonaDiscovery,
+    type SubagentProcessOptions,
+    type SubagentScopedModel,
     SUBAGENT_LIFETIMES,
-    type ChildThinkingLevel,
+    type SubagentThinkingLevel,
     type SubagentLifetime,
 } from "./personas.ts";
 export {
@@ -55,11 +60,19 @@ export {
     type ParsedSubagentBlocker,
 } from "./blockers.ts";
 export { getPiInvocation } from "./rpc.ts";
-export { getChildPanelWidths } from "./ui.ts";
+export { getSubagentPanelWidths } from "./ui.ts";
+export {
+    createActiveTurnForkSnapshot,
+    selectForkSnapshotEntries,
+    type FreshForkFallback,
+    type ModelForkContext,
+    type ParentForkSnapshot,
+} from "./fork.ts";
 export {
     formatSubagentSummary,
     MAX_PERSISTENT_SUBAGENTS,
     MAX_RETAINED_STOPPED_SUBAGENTS,
+    SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
     PersistentSubagentRegistry,
     type PersistentSubagentStatus,
     type PersistentSubagentSummary,
@@ -68,30 +81,40 @@ export {
 const MAX_PARENT_CONTEXT_CHARS = 8_000;
 export const MAX_SUBAGENT_RESPONSE_BYTES = 16 * 1_024;
 export const MAX_SUBAGENT_RESPONSE_LINES = 400;
+const MAX_SUBAGENT_ERROR_BYTES = 2_000;
 export const SUBAGENT_EXECUTION_PROFILES = {
     fast: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
     balanced: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
     deep: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
 } as const;
+type SubagentErrorCode = "INVALID_INPUT" | "CANCELLED" | "SUBAGENT_FAILED";
+
 const SubagentParameters = Type.Object({
     action: StringEnum(["create", "list", "prompt", "status", "stop"] as const),
     id: Type.Optional(Type.String({ maxLength: 64, description: "Subagent name or ID for prompt, status, or stop" })),
     name: Type.Optional(Type.String({ maxLength: 64, description: "New subagent name" })),
-    purpose: Type.Optional(Type.String({ maxLength: 240, description: "Stable context domain for create" })),
+    purpose: Type.Optional(Type.String({ maxLength: 240, description: "Task domain" })),
     persona: Type.Optional(Type.String({
         maxLength: 64,
-        description: "Existing persona required for create; list personas",
+        description: "Optional persona; otherwise require purpose, lifetime, and skills",
     })),
     profile: Type.Optional(StringEnum(["fast", "balanced", "deep"] as const, {
-        description: "Create profile: fast=Luna, balanced=Terra, deep=Sol",
+        description: "fast=Luna; balanced=Terra default; deep=Sol escalation",
     })),
     lifetime: Type.Optional(StringEnum(SUBAGENT_LIFETIMES, {
         description: "Create lifetime; one-shot needs prompt; overrides persona default",
     })),
+    mode: Type.Optional(StringEnum(["fresh", "fork"] as const, {
+        description: "Fresh default; fork parent history",
+    })),
+    skills: Type.Optional(Type.Array(Type.String({ maxLength: 64 }), {
+        maxItems: 20,
+        description: "Exact parent skill names",
+    })),
     prompt: Type.Optional(Type.String({ description: "Initial or follow-up prompt" })),
     context: Type.Optional(Type.String({
         maxLength: MAX_PARENT_CONTEXT_CHARS,
-        description: "Concise persona-required background; do not paste source or diffs",
+        description: "Concise background",
     })),
     kind: Type.Optional(StringEnum(["subagents", "personas"] as const, {
         description: "List target; default: subagents",
@@ -100,7 +123,68 @@ const SubagentParameters = Type.Object({
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Persona-list count; default: 20" })),
 });
 
-function personaByName(personas: readonly ChildPersona[], name: string | undefined): ChildPersona {
+type SubagentToolInput = Static<typeof SubagentParameters>;
+
+function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
+    if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+        return { action: "list", context: "invalid input" };
+    }
+    const prepared = { ...rawInput } as Record<string, unknown>;
+    const stringFields = ["id", "name", "purpose", "persona", "prompt", "context"] as const;
+    const invalidString = stringFields.some((field) => prepared[field] !== undefined && typeof prepared[field] !== "string");
+    const maximumLengths = { id: 64, name: 64, purpose: 240, persona: 64, context: MAX_PARENT_CONTEXT_CHARS } as const;
+    const invalidLength = Object.entries(maximumLengths).some(([field, maximum]) => (
+        typeof prepared[field] === "string" && prepared[field].length > maximum
+    ));
+    const invalidAction = !["create", "list", "prompt", "status", "stop"].includes(prepared.action as string);
+    const invalidProfile = prepared.profile !== undefined && !["fast", "balanced", "deep"].includes(prepared.profile as string);
+    const invalidLifetime = prepared.lifetime !== undefined && !SUBAGENT_LIFETIMES.includes(prepared.lifetime as SubagentLifetime);
+    const invalidMode = prepared.mode !== undefined && !["fresh", "fork"].includes(prepared.mode as string);
+    const invalidSkills = prepared.skills !== undefined && (!Array.isArray(prepared.skills)
+        || prepared.skills.length > 20
+        || prepared.skills.some((skill) => typeof skill !== "string" || skill.length > 64));
+    const invalidKind = prepared.kind !== undefined && !["subagents", "personas"].includes(prepared.kind as string);
+    const invalidOffset = prepared.offset !== undefined && (!Number.isInteger(prepared.offset) || (prepared.offset as number) < 0 || (prepared.offset as number) > 10_000);
+    const invalidLimit = prepared.limit !== undefined && (!Number.isInteger(prepared.limit) || (prepared.limit as number) < 1 || (prepared.limit as number) > 50);
+    if (invalidString || invalidLength || invalidAction || invalidProfile || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
+        return { action: "list", context: "invalid input" };
+    }
+    return prepared as SubagentToolInput;
+}
+
+function subagentFailure(error: unknown, signal: AbortSignal | undefined): {
+    content: [{ type: "text"; text: string }];
+    details: ToolFailureDetails<"subagent", SubagentErrorCode>;
+} {
+    const message = error instanceof Error ? error.message : String(error);
+    const code: SubagentErrorCode = signal?.aborted
+        ? "CANCELLED"
+        : /(^context |^profile |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
+            ? "INVALID_INPUT"
+            : "SUBAGENT_FAILED";
+    const bounded = Buffer.byteLength(message) <= MAX_SUBAGENT_ERROR_BYTES
+        ? message
+        : `${utf8Prefix(message, MAX_SUBAGENT_ERROR_BYTES - 3)}...`;
+    const display = bounded.replace(/[\u0000-\u001f\u007f-\u009f\[\]]/g, (character) => {
+        if (character === "\n") return "\\n";
+        if (character === "\r") return "\\r";
+        if (character === "\t") return "\\t";
+        if (character === "[") return "\\[";
+        if (character === "]") return "\\]";
+        return `\\u${(character.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`;
+    });
+    const prefix = `[subagent error: ${code}; `;
+    const displayBytes = MAX_SUBAGENT_ERROR_BYTES - Buffer.byteLength(prefix, "utf8") - 1;
+    const safeDisplay = Buffer.byteLength(display, "utf8") <= displayBytes
+        ? display
+        : `${utf8Prefix(display, displayBytes - 3)}...`;
+    return {
+        content: [{ type: "text", text: `${prefix}${safeDisplay}]` }],
+        details: { ok: false, tool: "subagent", error: { code, message: bounded } },
+    };
+}
+
+function personaByName(personas: readonly SubagentPersona[], name: string | undefined): SubagentPersona {
     if (personas.length === 0) {
         throw new Error("No subagent personas are configured; create requires an existing persona");
     }
@@ -111,6 +195,88 @@ function personaByName(personas: readonly ChildPersona[], name: string | undefin
     const persona = personas.find((candidate) => candidate.name === requested);
     if (persona) return persona;
     throw new Error(`Unknown subagent persona "${requested}"; list personas with action "list" and kind "personas"`);
+}
+
+export interface ParentDiscoveredSkill {
+    name: string;
+    filePath: string;
+}
+
+interface SkillFrontmatter extends Record<string, unknown> {
+    name?: unknown;
+}
+
+function declaredSkillName(filePath: string): string | undefined {
+    try {
+        const { frontmatter } = parseFrontmatter<SkillFrontmatter>(fs.readFileSync(filePath, "utf8"));
+        return typeof frontmatter.name === "string" && frontmatter.name.trim()
+            ? frontmatter.name.trim()
+            : undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function canonicalPath(filePath: string): string {
+    try {
+        return fs.realpathSync.native(filePath);
+    } catch {
+        return path.resolve(filePath);
+    }
+}
+
+export function validateSelectedPersonaSkills(
+    persona: SubagentPersona | undefined,
+    requestedNames: readonly string[] | undefined,
+    discoveredSkills: readonly ParentDiscoveredSkill[],
+): void {
+    if (!persona || !requestedNames?.length) return;
+
+    const selectedByName = new Map(
+        discoveredSkills
+            .filter((skill) => requestedNames.includes(skill.name))
+            .map((skill) => [skill.name, canonicalPath(skill.filePath)]),
+    );
+    for (const personaSkillPath of persona.skills) {
+        const name = declaredSkillName(personaSkillPath);
+        const selectedPath = name ? selectedByName.get(name) : undefined;
+        if (!name || !selectedPath || selectedPath === canonicalPath(personaSkillPath)) continue;
+        throw new Error(
+            `Selected skill "${name}" conflicts with persona "${persona.name}", which declares the same skill name from a different path; omit the selected skill or use a different persona`,
+        );
+    }
+}
+
+export function resolveSelectedSubagentSkills(
+    requestedNames: readonly string[] | undefined,
+    discoveredSkills: readonly ParentDiscoveredSkill[],
+): string[] {
+    const resolved: string[] = [];
+    const names = new Set<string>();
+    for (const name of requestedNames ?? []) {
+        if (names.has(name)) continue;
+        names.add(name);
+        const matches = discoveredSkills.filter((skill) => skill.name === name);
+        if (matches.length === 0) {
+            throw new Error(`Unknown subagent skill "${name}"; use an exact parent skill name`);
+        }
+        if (matches.length > 1) {
+            throw new Error(`Ambiguous subagent skill "${name}"; use a unique exact parent skill name`);
+        }
+        const filePath = matches[0]!.filePath;
+        if (!resolved.includes(filePath)) resolved.push(filePath);
+    }
+    return resolved;
+}
+
+function requirePersonaLessCreateFields(params: SubagentToolInput): void {
+    const missing: string[] = [];
+    if (!params.purpose?.trim()) missing.push("purpose");
+    if (!params.lifetime) missing.push("lifetime");
+    if (!params.skills || params.skills.length === 0) missing.push("at least one skill");
+    if (missing.length > 0) {
+        throw new Error(`Persona-less create requires explicit ${missing.join(", ")}; retry with purpose, lifetime, and skills`);
+    }
 }
 
 function utf8Prefix(text: string, maxBytes: number): string {
@@ -176,7 +342,7 @@ export function formatSubagentRequest(prompt: string, context?: string): string 
     return `## Parent-provided context\n\n${background}\n\n## Request\n\n${request}`;
 }
 
-function requiredContextError(persona: ChildPersona): Error {
+function requiredContextError(persona: SubagentPersona): Error {
     return new Error(
         `${persona.name} requires context before its first parent prompt: ${persona.contextRequirements}. Retry with context.`,
     );
@@ -189,7 +355,7 @@ function formatSubagentForModel(summary: PersistentSubagentSummary): string {
     return `${summary.name} [${summary.status}, ${summary.lifetime}]: ${summary.purpose}${blocker}`;
 }
 
-export function formatPersonaForModel(persona: ChildPersona): string {
+export function formatPersonaForModel(persona: SubagentPersona): string {
     const preference = persona.preferredLifetime ? ` [prefers ${persona.preferredLifetime}]` : "";
     const requirement = persona.contextRequirements
         ? ` [context required: ${persona.contextRequirements}]`
@@ -203,7 +369,7 @@ export type SubagentsCommandArgs =
     | { action: "open"; target: ""; error: string };
 
 const SUBAGENT_ACTION_FIELDS: Record<string, ReadonlySet<string>> = {
-    create: new Set(["action", "name", "purpose", "persona", "profile", "lifetime", "prompt", "context"]),
+    create: new Set(["action", "name", "purpose", "persona", "profile", "lifetime", "mode", "skills", "prompt", "context"]),
     list: new Set(["action", "kind", "offset", "limit"]),
     prompt: new Set(["action", "id", "prompt", "context"]),
     status: new Set(["action", "id"]),
@@ -220,6 +386,10 @@ function validateSubagentActionFields(params: Record<string, unknown>): void {
     if (invalid.length > 0) {
         throw new Error(`${invalid.join(", ")} ${invalid.length === 1 ? "is" : "are"} not valid for subagent action "${action}"`);
     }
+}
+
+function deferredRegistryDetails(mutation: unknown): Record<string, unknown> {
+    return mutation === undefined ? {} : { [SUBAGENT_REGISTRY_TOOL_DETAILS_KEY]: mutation };
 }
 
 function incompleteResponseReason(result: {
@@ -260,12 +430,13 @@ export default function (
     options: { personaDirectory?: string } = {},
 ) {
     const discovery = options.personaDirectory
-        ? loadChildPersonas(options.personaDirectory)
-        : loadChildPersonasFromDirectories([
+        ? loadSubagentPersonas(options.personaDirectory)
+        : loadSubagentPersonasFromDirectories([
             BUNDLED_PERSONA_DIRECTORY,
             path.join(getAgentDir(), "personas"),
         ]);
     const registry = new PersistentSubagentRegistry(pi);
+    let parentDiscoveredSkills: ParentDiscoveredSkill[] = [];
     let diagnosticsShown = false;
 
     const finalizeModelPrompt = async (
@@ -285,7 +456,7 @@ export default function (
                             responseTruncationNotice(retained.name),
                         ),
                     }],
-                    details: { action, subagent: retained },
+                    details: { ok: true, tool: "subagent", action, subagent: retained },
                     usage: result.usage,
                 };
             }
@@ -299,7 +470,7 @@ export default function (
                             responseTruncationNotice(retained.name),
                         ),
                     }],
-                    details: { action, subagent: retained },
+                    details: { ok: true, tool: "subagent", action, subagent: retained },
                     usage: result.usage,
                 };
             }
@@ -314,14 +485,14 @@ export default function (
                             responseTruncationNotice(retained.name),
                         ),
                     }],
-                    details: { action, subagent: retained },
+                    details: { ok: true, tool: "subagent", action, subagent: retained },
                     usage: result.usage,
                 };
             }
             const stopped = await registry.stop(result.summary.id);
             return {
                 content: [{ type: "text" as const, text: completed }],
-                details: { action, subagent: stopped },
+                details: { ok: true, tool: "subagent", action, subagent: stopped },
                 usage: result.usage,
             };
         }
@@ -333,7 +504,7 @@ export default function (
             : boundedSubagentResponse(response, result.summary.name);
         return {
             content: [{ type: "text" as const, text }],
-            details: { action, subagent: result.summary },
+            details: { ok: true, tool: "subagent", action, subagent: result.summary },
             usage: result.usage,
         };
     };
@@ -343,7 +514,7 @@ export default function (
         await registry.stop(summary.id).catch(() => undefined);
     };
 
-    const showDiagnostics = (ctx: ExtensionCommandContext): void => {
+    const showDiagnostics = (ctx: ExtensionContext): void => {
         if (diagnosticsShown || discovery.diagnostics.length === 0) return;
         diagnosticsShown = true;
         for (const diagnostic of discovery.diagnostics) ctx.ui.notify(diagnostic, "warning");
@@ -352,16 +523,16 @@ export default function (
     const createAndOpen = async (
         args: string,
         ctx: ExtensionCommandContext,
-        persona?: ChildPersona,
+        persona?: SubagentPersona,
     ): Promise<void> => {
         if (ctx.mode !== "tui") {
-            if (ctx.hasUI) ctx.ui.notify("/child requires TUI mode", "error");
+            if (ctx.hasUI) ctx.ui.notify("/subagent requires TUI mode", "error");
             return;
         }
         showDiagnostics(ctx);
-        const parsed = parseChildCommandArgs(args);
+        const parsed = parseSubagentCommandArgs(args);
         if (parsed.error) {
-            ctx.ui.notify(`${parsed.error}. Usage: /child${persona ? `:${persona.name}` : ""} [--fork] [prompt]`, "error");
+            ctx.ui.notify(`${parsed.error}. Usage: /subagent${persona ? `:${persona.name}` : ""} [--fork] [prompt]`, "error");
             return;
         }
         if (parsed.mode === "fork") {
@@ -371,7 +542,7 @@ export default function (
             }
             const parentSessionFile = ctx.sessionManager.getSessionFile();
             if (!parentSessionFile || !fs.existsSync(parentSessionFile)) {
-                ctx.ui.notify("Cannot fork a parent session that has not been persisted yet. Use /child without --fork.", "error");
+                ctx.ui.notify("Cannot fork a parent session that has not been persisted yet. Use /subagent without --fork.", "error");
                 return;
             }
         }
@@ -393,7 +564,7 @@ export default function (
         }
     };
 
-    const manageExisting = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    const manageExisting = async (args: string, ctx: ExtensionContext): Promise<void> => {
         if (ctx.mode !== "tui") {
             if (ctx.hasUI) ctx.ui.notify("/subagents requires TUI mode", "error");
             return;
@@ -423,7 +594,7 @@ export default function (
             if (!target) {
                 const available = registry.list().filter((subagent) => subagent.status !== "stopped");
                 if (available.length === 0) {
-                    ctx.ui.notify("No subagents yet. Use /child to create one.", "info");
+                    ctx.ui.notify("No subagents yet. Use /subagent to create one.", "info");
                     return;
                 }
                 const choices = available.map(formatSubagentSummary);
@@ -465,13 +636,13 @@ export default function (
         }
     };
 
-    pi.registerCommand("child", {
+    pi.registerCommand("subagent", {
         description: "Create and open a persistent subagent; add --fork for parent context",
         handler: async (args, ctx) => createAndOpen(args, ctx),
     });
 
     for (const persona of discovery.personas) {
-        pi.registerCommand(`child:${persona.name}`, {
+        pi.registerCommand(`subagent:${persona.name}`, {
             description: `${persona.description} (persistent subagent)`,
             handler: async (args, ctx) => createAndOpen(args, ctx, persona),
         });
@@ -481,24 +652,30 @@ export default function (
         description: "Manage named subagents or toggle model access with --enable/--disable",
         handler: manageExisting,
     });
-    pi.registerCommand("children", {
-        description: "Alias for /subagents",
-        handler: manageExisting,
+    pi.registerShortcut("ctrl+shift+a", {
+        description: "Show subagents",
+        handler: async (ctx) => manageExisting("", ctx),
     });
-
     pi.registerTool({
         name: "subagent",
         label: "Subagent",
-        description: "Create, reuse, prompt, inspect, or stop up to 4 isolated subagents.",
-        promptSnippet: "Delegate isolated work; list and reuse by purpose",
+        description: "Up to 4 subagents isolate conversation context but share the parent worktree and host authority.",
+        promptSnippet: "Delegate isolated work; reuse by purpose",
         promptGuidelines: [
-            "Before subagent create, list personas or reusable subagents when options are unknown and provide required context; choose the cheapest sufficient profile, and reserve deep for high-risk work, ambiguous work that needs cross-system analysis, or when a cheaper profile was insufficient.",
-            "Use subagent one-shot for one-response work, task through validation, and persistent across objectives; satisfy a blocked subagent's NEEDS before reprompting, and stop completed ones.",
-            "Give each subagent the exact objective, scope, and requested output; do not add adjacent work.",
+            "Before subagent create, list when options are unknown and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, and deep only after cheaper failure or unsafe ambiguity.",
+            "Use subagent one-shot for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+            "Give each subagent exact objective, scope, and output; avoid adjacent work.",
+            "Create a subagent only when isolation from large intermediate context or retained continuity materially helps; do not delegate simple work.",
+            "Prefer fresh context. Fork only when parent history is material and a concise handoff is insufficient. Use one task subagent for the complete objective and reuse it.",
         ],
         parameters: SubagentParameters,
+        prepareArguments: prepareSubagentArguments,
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
-            const context = parentContext(params.context);
+            let deferredMutation: unknown;
+            let fallbackDetails: Record<string, unknown> = {};
+            let fallbackText = "";
+            try {
+                const context = parentContext(params.context);
             if (context && params.action !== "create" && params.action !== "prompt") {
                 throw new Error("context is only valid with create or prompt");
             }
@@ -511,16 +688,20 @@ export default function (
             validateSubagentActionFields(params as Record<string, unknown>);
             switch (params.action) {
                 case "create": {
-                    const persona = personaByName(discovery.personas, params.persona);
+                    const hasPersona = Boolean(params.persona?.trim());
+                    if (!hasPersona) requirePersonaLessCreateFields(params);
+                    const persona = hasPersona ? personaByName(discovery.personas, params.persona) : undefined;
+                    const selectedSkillPaths = resolveSelectedSubagentSkills(params.skills, parentDiscoveredSkills);
+                    validateSelectedPersonaSkills(persona, params.skills, parentDiscoveredSkills);
                     const initialPrompt = params.prompt?.trim();
-                    const lifetime: SubagentLifetime = params.lifetime ?? persona.preferredLifetime ?? "persistent";
+                    const lifetime: SubagentLifetime = params.lifetime ?? persona?.preferredLifetime ?? "persistent";
                     if (context && !initialPrompt) throw new Error("context requires an accompanying prompt");
                     if (lifetime === "one-shot" && !initialPrompt) {
                         throw new Error("one-shot subagents require an initial prompt");
                     }
-                    const purpose = params.purpose?.trim()
-                        || initialPrompt
-                        || persona.description;
+                    const purpose = persona
+                        ? params.purpose?.trim() || initialPrompt || persona.description
+                        : requireText(params.purpose, "purpose");
                     const normalizedPurpose = normalizeSubagentPurpose(purpose);
                     const reusable = registry.list().find((candidate) =>
                         candidate.status !== "stopped"
@@ -530,24 +711,70 @@ export default function (
                             `${reusable.name} already retains context for this purpose; reuse it with action "prompt"`,
                         );
                     }
-                    if (initialPrompt && persona.contextRequirements && !context) {
-                        throw requiredContextError(persona);
-                    }
-                    const profile = params.profile ? SUBAGENT_EXECUTION_PROFILES[params.profile] : undefined;
-                    const selectedPersona: ChildPersona = profile
+                    const profileName = params.profile ?? (persona ? undefined : "balanced");
+                    const profile = profileName ? SUBAGENT_EXECUTION_PROFILES[profileName] : undefined;
+                    const selectedPersona = persona && profile
                         ? { ...persona, model: profile.model, thinking: profile.thinking }
                         : persona;
-                    const summary = registry.create(ctx, {
-                        mode: "fresh",
+                    const requestedMode = params.mode ?? "fresh";
+                    const createOptions = {
+                        mode: "fresh" as const,
                         purpose: normalizedPurpose,
                         ...(params.name?.trim() ? { name: params.name.trim() } : {}),
-                        persona: selectedPersona,
+                        ...(selectedPersona ? { persona: selectedPersona } : {}),
+                        skills: selectedSkillPaths,
                         lifetime,
-                    });
+                        ...(profile ? { model: profile.model, thinking: profile.thinking } : {}),
+                    };
+                    // Validate before a fork snapshot copies parent history.
+                    registry.validateCreate(ctx, createOptions);
+                    const forkContext = requestedMode === "fork"
+                        ? registry.createActiveTurnForkSnapshot(ctx)
+                        : { mode: "fresh" as const };
+                    if (initialPrompt && persona?.contextRequirements && !context && forkContext.mode !== "fork") {
+                        throw requiredContextError(persona);
+                    }
+                    const finishDeferredPersistence = requestedMode === "fork"
+                        ? registry.deferPersistence()
+                        : undefined;
+                    const finishForkPersistence = () => {
+                        const mutation = finishDeferredPersistence?.();
+                        if (mutation !== undefined) deferredMutation = mutation;
+                        return deferredRegistryDetails(mutation);
+                    };
+                    const fallback = forkContext.mode === "fresh" && "fallback" in forkContext
+                        ? forkContext.fallback
+                        : undefined;
+                    let summary: PersistentSubagentSummary;
+                    try {
+                        summary = registry.create(ctx, {
+                            ...createOptions,
+                            mode: forkContext.mode,
+                            ...(forkContext.mode === "fork" ? { parentSessionFile: forkContext.parentSessionFile } : {}),
+                        });
+                    } catch (error) {
+                        finishForkPersistence();
+                        if (forkContext.mode === "fork") fs.rmSync(forkContext.parentSessionFile, { force: true });
+                        throw error;
+                    }
+                    fallbackDetails = fallback
+                        ? { fork: { requested: "fork", mode: "fresh", fallback } }
+                        : {};
+                    fallbackText = fallback
+                        ? "Parent session was not persisted; created with fresh context.\n\n"
+                        : "";
                     if (!initialPrompt) {
+                        const persistenceDetails = finishForkPersistence();
                         return {
-                            content: [{ type: "text", text: `Created ${summary.name}.` }],
-                            details: { action: "create", subagent: summary },
+                            content: [{ type: "text", text: `${fallbackText}Created ${summary.name}.` }],
+                            details: {
+                                ok: true,
+                                tool: "subagent",
+                                action: "create",
+                                subagent: summary,
+                                ...fallbackDetails,
+                                ...persistenceDetails,
+                            },
                         };
                     }
                     let lastProgress = "";
@@ -565,14 +792,33 @@ export default function (
                                     lastProgress = progress;
                                     onUpdate?.({
                                         content: [{ type: "text", text: progress }],
-                                        details: { action: "prompt", subagent: current },
+                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current },
                                     });
                                 },
                             },
                         );
-                        return await finalizeModelPrompt(result, "create");
+                        const finalized = await finalizeModelPrompt(result, "create");
+                        const persistenceDetails = finishForkPersistence();
+                        if (!fallback) {
+                            return {
+                                ...finalized,
+                                details: { ...finalized.details, ...persistenceDetails },
+                            };
+                        }
+                        return {
+                            ...finalized,
+                            content: [{
+                                type: "text" as const,
+                                text: boundedText(
+                                    `${fallbackText}${finalized.content[0]?.text ?? "(no visible response)"}`,
+                                    responseTruncationNotice(summary.name),
+                                ),
+                            }],
+                            details: { ...finalized.details, ...fallbackDetails, ...persistenceDetails },
+                        };
                     } catch (error) {
                         await stopFailedOneShot(summary);
+                        finishForkPersistence();
                         throw error;
                     }
                 }
@@ -580,7 +826,7 @@ export default function (
                     if (params.kind === "personas") {
                         const offset = params.offset ?? 0;
                         const limit = params.limit ?? 20;
-                        const page: ChildPersona[] = [];
+                        const page: SubagentPersona[] = [];
                         let nextOffset = offset;
                         while (nextOffset < discovery.personas.length && page.length < limit) {
                             const persona = discovery.personas[nextOffset]!;
@@ -620,7 +866,7 @@ export default function (
                         }));
                         return {
                             content: [{ type: "text", text: boundedText(text, "Persona page truncated") }],
-                            details: { action: "list", kind: "personas", personas, omitted: remaining },
+                            details: { ok: true, tool: "subagent", action: "list", kind: "personas", personas, omitted: remaining },
                         };
                     }
                     if (params.offset !== undefined || params.limit !== undefined) {
@@ -633,7 +879,7 @@ export default function (
                         : "No reusable subagents.";
                     return {
                         content: [{ type: "text", text: boundedText(text, "Subagent list truncated") }],
-                        details: { action: "list", kind: "subagents", subagents: subagents.slice(0, 100), omitted: Math.max(0, subagents.length - 100) },
+                        details: { ok: true, tool: "subagent", action: "list", kind: "subagents", subagents: subagents.slice(0, 100), omitted: Math.max(0, subagents.length - 100) },
                     };
                 }
                 case "prompt": {
@@ -655,7 +901,7 @@ export default function (
                                     lastProgress = progress;
                                     onUpdate?.({
                                         content: [{ type: "text", text: progress }],
-                                        details: { action: "prompt", subagent: current },
+                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current },
                                     });
                                 },
                             },
@@ -670,18 +916,38 @@ export default function (
                     const summary = registry.summaryFor(requireText(params.id, "id"));
                     return {
                         content: [{ type: "text", text: formatSubagentForModel(summary) }],
-                        details: { action: "status", subagent: summary },
+                        details: { ok: true, tool: "subagent", action: "status", subagent: summary },
                     };
                 }
                 case "stop": {
                     const summary = await registry.stop(requireText(params.id, "id"));
                     return {
                         content: [{ type: "text", text: `Stopped ${summary.name}.` }],
-                        details: { action: "stop", subagent: summary },
+                        details: { ok: true, tool: "subagent", action: "stop", subagent: summary },
                     };
                 }
             }
+            } catch (error) {
+                const failure = subagentFailure(error, signal);
+                return {
+                    ...failure,
+                    content: fallbackText
+                        ? [{ type: "text" as const, text: `${fallbackText}${failure.content[0].text}` }]
+                        : failure.content,
+                    details: {
+                        ...failure.details,
+                        ...fallbackDetails,
+                        ...deferredRegistryDetails(deferredMutation),
+                    },
+                };
+            }
         },
+    });
+
+    pi.on("before_agent_start", (event) => {
+        parentDiscoveredSkills = (event.systemPromptOptions.skills ?? [])
+            .filter((skill) => !skill.disableModelInvocation)
+            .map(({ name, filePath }) => ({ name, filePath }));
     });
 
     pi.on("session_start", (_event, ctx) => {
