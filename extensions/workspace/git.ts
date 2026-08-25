@@ -1,5 +1,6 @@
-import { access, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { NodeProcessRunner, type ProcessRunner, WorkspaceError, conciseProcessError } from "./process.ts";
 import type { Worktree } from "./types.ts";
@@ -117,6 +118,12 @@ export class GitRepository {
         return this.localRefNames(["refs/heads", "refs/tags"]);
     }
 
+    async localBranchForRef(ref: string, cwd = this.cwd): Promise<string | undefined> {
+        const result = await this.tryRun(["rev-parse", "--symbolic-full-name", ref], cwd);
+        const resolved = result.ok ? result.stdout.trim() : "";
+        return resolved.startsWith("refs/heads/") ? resolved.slice("refs/heads/".length) : undefined;
+    }
+
     async remoteForBranch(branch: string): Promise<string | undefined> {
         const configured = await this.tryRun(["config", "--local", "--get", `branch.${branch}.remote`]);
         if (configured.ok && configured.stdout.trim()) return configured.stdout.trim() === "." ? undefined : configured.stdout.trim();
@@ -147,6 +154,74 @@ export class GitRepository {
 
     async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
         return (await this.tryRun(["merge-base", "--is-ancestor", ancestor, descendant])).ok;
+    }
+
+    async mergeBase(left: string, right: string): Promise<string | undefined> {
+        const result = await this.tryRun(["merge-base", left, right]);
+        const oid = result.stdout.trim();
+        return result.ok && /^[0-9a-f]+$/i.test(oid) ? oid : undefined;
+    }
+
+    private async patchId(patch: string): Promise<string | undefined> {
+        if (!patch.trim()) return undefined;
+        const result = await this.runner.run("git", ["patch-id", "--stable"], { cwd: this.cwd, stdin: patch });
+        if (result.code !== 0) throw conciseProcessError("git", ["patch-id"], result);
+        const oid = result.stdout.trim().split(/\s+/, 1)[0] ?? "";
+        return /^[0-9a-f]+$/i.test(oid) ? oid : undefined;
+    }
+
+    private async rangePatch(base: string, tip: string): Promise<string> {
+        const result = await this.runner.run("git", ["diff", "--binary", base, tip], { cwd: this.cwd });
+        if (result.code !== 0) throw conciseProcessError("git", ["diff"], result);
+        return result.stdout;
+    }
+
+    async rangePatchId(base: string, tip: string): Promise<string | undefined> {
+        return this.patchId(await this.rangePatch(base, tip));
+    }
+
+    private async patchIsPresentInTree(patch: string, tree: string): Promise<boolean> {
+        const directory = await mkdtemp(join(tmpdir(), "pi-workspace-index-"));
+        const index = join(directory, "index");
+        const env = { GIT_INDEX_FILE: index };
+        try {
+            const readTree = await this.runner.run("git", ["read-tree", tree], { cwd: this.cwd, env });
+            if (readTree.code !== 0) throw conciseProcessError("git", ["read-tree"], readTree);
+            const apply = await this.runner.run("git", ["apply", "--cached", "--reverse", "--check"], {
+                cwd: this.cwd,
+                env,
+                stdin: patch,
+            });
+            return apply.code === 0;
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    }
+
+    async commitPatchId(commit: string): Promise<string | undefined> {
+        const result = await this.runner.run("git", ["show", "--format=", "--binary", commit], { cwd: this.cwd });
+        if (result.code !== 0) throw conciseProcessError("git", ["show"], result);
+        return this.patchId(result.stdout);
+    }
+
+    async commitsBetween(base: string, tip: string): Promise<string[]> {
+        const output = await this.run(["rev-list", "--first-parent", `${base}..${tip}`]);
+        return output.split("\n").map((oid) => oid.trim()).filter(Boolean);
+    }
+
+    async integrationIntoBase(source: string, base: string): Promise<"ancestor" | "squash" | undefined> {
+        if (await this.isAncestor(source, base)) return "ancestor";
+        const fork = await this.mergeBase(source, base);
+        if (!fork) return undefined;
+        const patch = await this.rangePatch(fork, source);
+        const sourcePatch = await this.patchId(patch);
+        if (!sourcePatch) return undefined;
+        for (const commit of await this.commitsBetween(fork, base)) {
+            if (await this.commitPatchId(commit) === sourcePatch) {
+                return await this.patchIsPresentInTree(patch, base) ? "squash" : undefined;
+            }
+        }
+        return undefined;
     }
 
     async fastForward(cwd: string, oid: string): Promise<void> {
@@ -272,6 +347,10 @@ export class GitRepository {
         await this.run(["checkout", branch], cwd);
     }
 
+    async detach(cwd: string, oid: string): Promise<void> {
+        await this.run(["checkout", "--detach", oid], cwd);
+    }
+
     async createBranch(branch: string, from: string, cwd: string): Promise<void> {
         await this.assertNewBranch(branch);
         await this.assertClean(cwd);
@@ -298,6 +377,17 @@ export class GitRepository {
 
     async removeWorktree(path: string): Promise<void> {
         await this.run(["worktree", "remove", path]);
+    }
+
+    async removeWorktreeForce(path: string): Promise<void> {
+        await this.run(["worktree", "remove", "--force", path]);
+    }
+
+    async removeBranchConfig(branch: string): Promise<void> {
+        const result = await this.tryRun(["config", "--local", "--remove-section", `branch.${branch}`]);
+        if (!result.ok && result.stderr.trim() && !/no such section/i.test(result.stderr)) {
+            throw conciseProcessError("git", ["config"], { stdout: result.stdout, stderr: result.stderr, code: 1 });
+        }
     }
 
     async deleteBranch(branch: string): Promise<void> {
