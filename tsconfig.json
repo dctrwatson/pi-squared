@@ -33,6 +33,7 @@
     "skills/**/*.ts"
   ],
   "exclude": [
+    "extensions/observational-memory/**",
     "node_modules"
   ]
 }
