@@ -96,7 +96,7 @@ const SubagentParameters = Type.Object({
     purpose: Type.Optional(Type.String({ maxLength: 240, description: "Task domain" })),
     persona: Type.Optional(Type.String({
         maxLength: 64,
-        description: "Optional persona; otherwise require purpose, lifetime, and skills",
+        description: "Optional persona; otherwise require purpose and lifetime",
     })),
     profile: Type.Optional(StringEnum(["fast", "balanced", "deep"] as const, {
         description: "fast=Luna; balanced=Terra default; deep=Sol escalation",
@@ -273,9 +273,8 @@ function requirePersonaLessCreateFields(params: SubagentToolInput): void {
     const missing: string[] = [];
     if (!params.purpose?.trim()) missing.push("purpose");
     if (!params.lifetime) missing.push("lifetime");
-    if (!params.skills || params.skills.length === 0) missing.push("at least one skill");
     if (missing.length > 0) {
-        throw new Error(`Persona-less create requires explicit ${missing.join(", ")}; retry with purpose, lifetime, and skills`);
+        throw new Error(`Persona-less create requires explicit ${missing.join(", ")}; retry with purpose and lifetime`);
     }
 }
 

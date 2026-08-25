@@ -173,7 +173,7 @@ test("extension exposes one concise subagent tool and persistent-session command
   ]);
   assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
-  assert.match(tools[0].parameters.properties.persona.description, /optional persona.*require purpose, lifetime, and skills/i);
+  assert.match(tools[0].parameters.properties.persona.description, /optional persona.*require purpose and lifetime/i);
   assert.deepEqual(tools[0].parameters.properties.profile.enum, ["fast", "balanced", "deep"]);
   assert.match(tools[0].parameters.properties.profile.description, /fast=Luna.*balanced=Terra default.*deep=Sol escalation/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
@@ -1111,7 +1111,7 @@ test("lifetime promotion restarts a live controller before follow-up", async (t)
   assert.equal(promoted.status, "dormant");
 });
 
-test("model creation supports controlled persona-less skills and active-turn forks", async (t) => {
+test("model creation supports optional persona-less skills and active-turn forks", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-controlled-create-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDirectory = join(root, "personas");
@@ -1208,7 +1208,6 @@ Implement the requested change.
   for (const [id, input, expected] of [
     ["missing-purpose", { action: "create", lifetime: "task", skills: ["create-pr"] }, /explicit purpose/],
     ["missing-lifetime", { action: "create", purpose: "Create a pull request", skills: ["create-pr"] }, /explicit lifetime/],
-    ["missing-skills", { action: "create", purpose: "Create a pull request", lifetime: "task" }, /at least one skill/],
     ["command-only-skill", { action: "create", purpose: "Create a pull request", lifetime: "task", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
   ]) {
     const result = await tool.execute(id, input, signal, undefined, context);
@@ -1216,6 +1215,22 @@ Implement the requested change.
     assert.equal(result.details.error.code, "INVALID_INPUT", id);
     assert.match(result.details.error.message, expected, id);
   }
+
+  const withoutSkills = await tool.execute("persona-less-without-skills", {
+    action: "create",
+    mode: "fresh",
+    name: "workflow-without-skills",
+    purpose: "Inspect the requested pull request",
+    lifetime: "task",
+  }, signal, undefined, context);
+  assert.equal(withoutSkills.content[0].text, "Created workflow-without-skills.");
+  assert.equal(withoutSkills.details.subagent.persona, undefined);
+  assert.equal(withoutSkills.details.subagent.model, "openai-codex/gpt-5.6-terra");
+  assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", withoutSkills.details.subagent.id).selectedSkillPaths, []);
+  await tool.execute("stop-persona-less-without-skills", {
+    action: "stop",
+    id: "workflow-without-skills",
+  }, signal, undefined, context);
 
   const fresh = await tool.execute("persona-less-fresh", {
     action: "create",
@@ -1682,7 +1697,7 @@ Inspect the project without changing it.
   assert.ok(notifications.some(({ message }) => message === "Model subagent tool enabled."));
 
   const invalidCalls = [
-    ["create-without-persona", { action: "create", name: "persona-less", purpose: "Attempt persona-less delegation" }, /Persona-less create requires explicit lifetime, at least one skill/i],
+    ["create-without-persona", { action: "create", name: "persona-less", purpose: "Attempt persona-less delegation" }, /Persona-less create requires explicit lifetime/i],
     ["create-unknown-persona", { action: "create", persona: "unknown", purpose: "Attempt unknown delegation" }, /Unknown subagent persona "unknown".*list personas/i],
     ["context-without-prompt", { action: "create", name: "context-only", purpose: "Context without an accompanying request", persona: "test-scout", context: "Goal: inspect the project" }, /context requires an accompanying prompt/i],
     ["context-on-list", { action: "list", context: "Not valid for list" }, /context is only valid with create or prompt/i],
