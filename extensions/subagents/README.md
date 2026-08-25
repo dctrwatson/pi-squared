@@ -2,7 +2,7 @@
 
 Run named Pi subagents with one-shot, task-scoped, or persistent lifetimes without adding their full conversations to the parent model context. Subagents use Pi's normal configured tools and the bundled `codex-tools` and `prevent-idle` extensions.
 
-A persona is reusable configuration for a stable role. Multiple subagents can use the same persona while retaining separate processes, sessions, and conversation histories. Every instance has a stable purpose that defines its work or retained context. A model can also create a subagent without a persona when it supplies a purpose, lifetime, and selected skills. Subagents do not load this delegation extension by default.
+A persona is reusable configuration for a stable role. Multiple subagents can use the same persona while retaining separate processes, sessions, and conversation histories. Every instance has a stable purpose that defines its work or retained context. A model can also create a subagent without a persona when it supplies a purpose and lifetime. It can select skills when they help. Subagents do not load this delegation extension by default.
 
 ## Commands
 
@@ -55,7 +55,7 @@ subagent({ action: "stop", id: "auth-explorer" })
 
 Use `subagent({ action: "list", kind: "personas" })` to discover up to 20 persona templates and their context requirements without putting all persona definitions in the parent system prompt. If more personas exist, the result gives the next `offset`; `limit` can select 1–50 entries. A persona name must match exactly.
 
-Model-facing `create` can omit `persona` only with an explicit `purpose`, explicit `lifetime`, and one or more `skills`. A persona-based create keeps its current defaults. Selected skills are additive to persona skills. A selected skill that has the same name as a different persona skill is rejected. Skill names must match skills that Pi already discovered in the parent session. Unknown or ambiguous names fail with retry guidance. Paths are not accepted from the model.
+Model-facing `create` can omit `persona` only with an explicit `purpose` and explicit `lifetime`. It can select skills. A persona-based create keeps its current defaults. Selected skills are additive to persona skills. A selected skill that has the same name as a different persona skill is rejected. Skill names must match skills that Pi already discovered in the parent session. Unknown or ambiguous names fail with retry guidance. Paths are not accepted from the model.
 
 `mode` is `fresh` by default. A fresh subagent can receive concise `context`. A model can use `mode: "fork"` during an active parent turn. The extension writes a retained fork source through the current user request, then excludes the in-progress assistant message and tool call. It does not move the parent leaf. The child uses normal fork attribution and can resume from its own session. If the parent session is ephemeral, fork falls back to fresh context. The tool result reports this fallback.
 
