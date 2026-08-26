@@ -1,3 +1,5 @@
+import { lstat } from "node:fs/promises";
+
 import {
   test,
   assert,
@@ -23,6 +25,7 @@ import {
   parseLauncherArguments,
   formatWorkspaceList,
   workspaceExtension,
+  CREATE_WORKSPACE_TOOL,
   WORKSPACE_MERGE_FINALIZE_TOOL,
   handleWorkspace,
   WORKSPACE_HELP_TEXT,
@@ -241,6 +244,77 @@ test("workspace aliases share local completion discovery and side-effect-free he
   assert.equal(await values(failedCommand, ""), null);
   assert.equal(await values(failedCommand, "new "), null);
   assert.equal(failureDiscoveries, 1);
+});
+
+test("create_workspace creates an inactive worktree and links an external PM worktree", async () => {
+  const root = await repository();
+  const pm = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const tools = new Map();
+    workspaceExtension({
+      on() {},
+      registerCommand() {},
+      registerTool(tool) { tools.set(tool.name, tool); },
+    }, {
+      createService: () => service,
+    });
+    const tool = tools.get(CREATE_WORKSPACE_TOOL);
+    assert.ok(tool);
+
+    const result = await tool.execute("call", {
+      branch: "feature/tool",
+      from: "main",
+      pm,
+    }, undefined, undefined, { cwd: root });
+
+    const pmPath = join(dirname(result.details.cwd), "pm");
+    assert.equal((await lstat(pmPath)).isSymbolicLink(), true);
+    const pmRoot = await realpath(pm);
+    assert.equal(await realpath(pmPath), pmRoot);
+    assert.equal(git(root, "-C", result.details.cwd, "branch", "--show-current"), "feature/tool");
+    assert.equal((await (await service.state()).readLease(result.details.session)), undefined);
+    assert.match(result.content[0].text, /Use launch_pi/);
+
+    await writeFile(join(result.details.cwd, "feature.txt"), "feature\n");
+    git(result.details.cwd, "add", "feature.txt");
+    git(result.details.cwd, "commit", "-m", "feature");
+    git(root, "merge", "--ff-only", "feature/tool");
+    assert.deepEqual((await service.prune()).pruned, ["feature/tool"]);
+    assert.equal(await realpath(pm), pmRoot);
+  } finally {
+    await removeRepository(root);
+    await removeRepository(pm);
+  }
+});
+
+test("create_workspace uses an explicit repository cwd", async () => {
+  const context = await repository();
+  const target = await repository();
+  try {
+    const sessions = new FakeSessions(target);
+    const tools = new Map();
+    workspaceExtension({
+      on() {},
+      registerCommand() {},
+      registerTool(tool) { tools.set(tool.name, tool); },
+    }, {
+      createService: (cwd) => new WorkspaceService(cwd, { sessions }),
+    });
+
+    const result = await tools.get(CREATE_WORKSPACE_TOOL).execute("call", {
+      branch: "feature/target",
+      cwd: target,
+    }, undefined, undefined, { cwd: context });
+
+    assert.equal(git(context, "branch", "--show-current"), "main");
+    assert.equal(git(target, "-C", result.details.cwd, "branch", "--show-current"), "feature/target");
+    assert.equal(result.details.cwd.startsWith(join(await realpath(target), ".ws")), true);
+  } finally {
+    await removeRepository(context);
+    await removeRepository(target);
+  }
 });
 
 test("/ws merge starts an agent commit workflow and enables its guarded finalizer", async () => {

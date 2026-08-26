@@ -126,5 +126,6 @@ export type PullRequestDivergenceChoice = "keep-local" | "fast-forward" | "reset
 export interface NewWorkspaceOptions {
     branch: string;
     from?: string;
+    pm?: string;
     parallel: boolean;
 }

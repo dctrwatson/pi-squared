@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -370,9 +370,18 @@ export class GitRepository {
         await this.run(["worktree", "add", "--detach", path, from]);
     }
 
-    async initializeWorkspacePm(path: string): Promise<void> {
+    async initializeWorkspacePm(path: string, externalPm?: string): Promise<void> {
         if (await existingPath(path)) throw new WorkspaceError("Managed workspace PM path already exists and is not reusable");
-        await this.run(["init", "--quiet", path]);
+        if (!externalPm) {
+            await this.run(["init", "--quiet", path]);
+            return;
+        }
+        const requested = await canonicalPath(externalPm);
+        const topLevel = await this.tryRun(["rev-parse", "--show-toplevel"], requested);
+        if (!topLevel.ok || !topLevel.stdout.trim()) throw new WorkspaceError(`PM path is not a Git worktree: ${requested}`);
+        const target = await canonicalPath(topLevel.stdout.trim());
+        if (target !== requested) throw new WorkspaceError(`PM path must be a Git worktree root: ${requested}`);
+        await symlink(target, path, "dir");
     }
 
     async removeWorktree(path: string): Promise<void> {
