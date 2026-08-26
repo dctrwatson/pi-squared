@@ -115,6 +115,9 @@ function makeControllerHarness({
     startFollowUp() {
       callbacks.onOutput({ type: "agent_start" });
     },
+    startCompaction() {
+      callbacks.onOutput({ type: "compaction_start", reason: "automatic" });
+    },
     exit(stderr) {
       streaming = false;
       callbacks.onExit({ code: 1, signal: null, stderr, intentional: false });
@@ -781,6 +784,24 @@ test("queued subagent prompts remain serialized when an intermediate request is 
   await waitFor(() => harness.calls.prompt.length === 2);
   harness.settle("Third result");
   assert.equal((await third).text, "Third result");
+  await harness.controller.stop();
+});
+
+test("parent prompts return before automatic compaction and can queue a follow-up", async () => {
+  const harness = makeControllerHarness();
+  const pending = harness.controller.promptAndWait("Inspect authentication");
+  await waitFor(() => harness.calls.prompt.length === 1);
+  harness.message("Authentication summary");
+  harness.startCompaction();
+
+  const result = await pending;
+  assert.equal(result.text, "Authentication summary");
+  assert.equal(harness.controller.state.busy, true);
+
+  const followUp = harness.controller.promptAndWait("Check the session refresh flow");
+  await waitFor(() => harness.calls.followUp.length === 1);
+  harness.settle("Session refresh summary");
+  assert.equal((await followUp).text, "Session refresh summary");
   await harness.controller.stop();
 });
 
