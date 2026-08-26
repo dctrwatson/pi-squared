@@ -60,7 +60,7 @@ If the remote advanced safely, the helper rebases only the new local commits and
 
 ## 6. Draft and post replies
 
-Before writing GitHub replies or summaries, load and follow the `writing-style` skill when it is available. Use explicit Markdown links for PRs, issues, and commits; use the prepared and published links when available.
+Before writing GitHub replies or summaries, load and follow the `writing-style` skill when it is available. For each GitHub PR, issue, comment, review, or commit reference, use a Markdown link with a full `https://github.com/owner/repo/...` URL. Do not use bare shorthand such as `#123`, `owner/repo#123`, a relative link, or an unlinked commit SHA. Use the prepared and published links when available.
 
 Write one body file per handled item and one reply manifest. Preview or post the batch:
 
@@ -75,4 +75,4 @@ For dry-run work, keep commits local and use only `--dry-run`. Do not call the c
 
 ## 7. Report
 
-Return the linked PR, the plan, linked commits, validation, replies posted or drafted, and remaining questions. Keep the result concise. If a mutation was intentionally omitted, say so explicitly.
+Return the linked PR, the plan, linked commits, validation, replies posted or drafted, and remaining questions. Use full GitHub URL targets for all links. Keep the result concise. If a mutation was intentionally omitted, say so explicitly.

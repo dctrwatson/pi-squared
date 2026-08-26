@@ -23,7 +23,11 @@ An existing open PR supplies its actual base. Its GitHub head must match `origin
 
 Before drafting a title, body, or other GitHub text, load and follow the `writing-style` skill when it is available.
 
-Use the selected template without removing its required headings or checkboxes. Do not claim tests or work that did not occur. Without a template, use:
+For a typical PR body, use 40 to 120 words of original prose and at least two substantive sentences. Do not count required template boilerplate. Use short paragraphs. Use more text only when reviewers need extra scope, risk, migration, or rollout context. Do not add filler.
+
+Use prepared issue or PR references, the user's request, and the session context to explain the motivation. Treat a reference as broader task context when its scope exceeds the current PR. Explain the part that this PR addresses, and do not imply full completion when follow-up PRs are necessary. Mention follow-up work only when it clarifies the current scope. Do not make the body only a summary of the diff.
+
+Use the selected template without removing its required headings or checkboxes. Do not claim tests or work that did not occur. Keep required validation text to one short accurate line. Do not use bullets or prose to list commands, test tiers, or validation mechanics. Without a template, use:
 
 ```markdown
 ## Summary
@@ -36,7 +40,7 @@ Use the selected template without removing its required headings or checkboxes. 
 <Tests, migration, risks, or "None">
 ```
 
-Use explicit GitHub Markdown links from preparation artifacts. Use a closing keyword only when the user explicitly asks to close an issue.
+For each GitHub PR, issue, comment, review, or commit reference, use a Markdown link with a full `https://github.com/owner/repo/...` URL from the preparation artifacts. Do not rely on bare `#123`, `owner/repo#123`, relative links, or unlinked commit SHAs. Use a closing keyword only when the user explicitly asks to close an issue.
 
 ## Logical commit plan
 
