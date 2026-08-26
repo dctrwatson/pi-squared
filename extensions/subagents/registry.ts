@@ -634,10 +634,7 @@ export class PersistentSubagentRegistry {
         response: string,
     ): void {
         const revision = controller.settlementRevision;
-        if (typeof revision === "number") {
-            if (record.observedSettlementRevision === revision) return;
-            record.observedSettlementRevision = revision;
-        }
+        if (typeof revision === "number") record.observedSettlementRevision = revision;
         this.updateBlocker(record, response);
     }
 

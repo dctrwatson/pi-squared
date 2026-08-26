@@ -118,6 +118,12 @@ export interface SubagentPromptCompletion {
     stopReason?: string;
 }
 
+type SettledWaiter = {
+    after: number;
+    resolve: (settlement: Omit<SubagentPromptCompletion, "usage">) => void;
+    reject: (error: Error) => void;
+};
+
 export function getSubagentPanelWidths(width: number): { dialogWidth: number; innerWidth: number } | undefined {
     if (width < 3) return undefined;
     return { dialogWidth: width, innerWidth: width - 2 };
@@ -386,12 +392,9 @@ export class SubagentSessionController {
     private latestRunHadAssistant = false;
     private latestRunHandledWithoutAgent = false;
     private latestRunFailure: Error | undefined;
+    private compactionStarted = false;
     private lastSubmissionError: Error | undefined;
-    private readonly settledWaiters = new Set<{
-        after: number;
-        resolve: (settlement: Omit<SubagentPromptCompletion, "usage">) => void;
-        reject: (error: Error) => void;
-    }>();
+    private readonly settledWaiters = new Set<SettledWaiter>();
     private promptTail: Promise<void> = Promise.resolve();
     private activeAssistant: AssistantItem | undefined;
     private readonly toolsById = new Map<string, ToolItem>();
@@ -791,11 +794,7 @@ export class SubagentSessionController {
         signal?: AbortSignal,
     ): Promise<Omit<SubagentPromptCompletion, "usage">> {
         return new Promise<Omit<SubagentPromptCompletion, "usage">>((resolve, reject) => {
-            let waiter: {
-                after: number;
-                resolve: (settlement: Omit<SubagentPromptCompletion, "usage">) => void;
-                reject: (error: Error) => void;
-            };
+            let waiter: SettledWaiter;
             const abort = () => {
                 this.settledWaiters.delete(waiter);
                 void this.interrupt();
@@ -824,18 +823,27 @@ export class SubagentSessionController {
     private resolveSettledWaiters(): void {
         for (const waiter of [...this.settledWaiters]) {
             if (waiter.after >= this.settledRevision) continue;
-            this.settledWaiters.delete(waiter);
-            if (this.latestRunFailure) {
-                waiter.reject(this.latestRunFailure);
-                continue;
-            }
-            waiter.resolve({
-                text: this.latestRunAssistantText,
-                responseProduced: this.latestRunHadAssistant,
-                handledWithoutAgent: this.latestRunHandledWithoutAgent,
-                ...(this.latestRunStopReason ? { stopReason: this.latestRunStopReason } : {}),
-            });
+            this.resolveWaiter(waiter);
         }
+    }
+
+    private resolveResponseWaiters(): void {
+        if (!this.latestRunHadAssistant) return;
+        for (const waiter of [...this.settledWaiters]) this.resolveWaiter(waiter);
+    }
+
+    private resolveWaiter(waiter: SettledWaiter): void {
+        this.settledWaiters.delete(waiter);
+        if (this.latestRunFailure) {
+            waiter.reject(this.latestRunFailure);
+            return;
+        }
+        waiter.resolve({
+            text: this.latestRunAssistantText,
+            responseProduced: this.latestRunHadAssistant,
+            handledWithoutAgent: this.latestRunHandledWithoutAgent,
+            ...(this.latestRunStopReason ? { stopReason: this.latestRunStopReason } : {}),
+        });
     }
 
     private rejectWaitersAfter(after: number, error: Error): void {
@@ -964,6 +972,7 @@ export class SubagentSessionController {
         const type = typeof output.type === "string" ? output.type : "";
         switch (type) {
             case "agent_start":
+                this.compactionStarted = false;
                 this.latestRunAssistantText = "";
                 this.latestRunStopReason = undefined;
                 this.latestRunHadAssistant = false;
@@ -978,6 +987,7 @@ export class SubagentSessionController {
                 this.touch();
                 return;
             case "agent_settled":
+                this.compactionStarted = false;
                 this.state.busy = false;
                 this.state.phase = "Ready for another prompt";
                 this.settledRevision++;
@@ -1015,9 +1025,11 @@ export class SubagentSessionController {
                 return;
             }
             case "compaction_start":
+                this.compactionStarted = true;
                 this.state.busy = true;
                 this.state.phase = `Compacting (${typeof output.reason === "string" ? output.reason : "automatic"})…`;
                 this.addStatus(this.state.phase, "warning");
+                this.resolveResponseWaiters();
                 return;
             case "compaction_end":
                 this.handleCompactionEnd(output);
@@ -1122,6 +1134,7 @@ export class SubagentSessionController {
             this.latestRunFailure = new Error("Subagent response aborted");
             this.state.phase = "Response aborted";
         } else this.state.phase = "Finalizing turn…";
+        if (this.compactionStarted) this.resolveResponseWaiters();
         this.touch();
     }
 
