@@ -946,6 +946,7 @@ export class WorkspaceService {
     }
 
     async create(options: NewWorkspaceOptions, activation: ActivationOptions): Promise<Activation> {
+        if (options.pm && !options.parallel) throw new WorkspaceError("A PM worktree requires a managed workspace");
         const state = await this.state();
         return state.withMutationLock(async () => {
             const paths = await this.git.paths();
@@ -971,7 +972,7 @@ export class WorkspaceService {
             let cwd: string;
             try {
                 if (options.parallel) {
-                    cwd = await this.createManagedWorktree(state, options.branch, rollback, from);
+                    cwd = await this.createManagedWorktree(state, options.branch, rollback, from, false, options.pm);
                 } else {
                     await this.git.createBranch(options.branch, from, primary);
                     cwd = primary;
@@ -1231,6 +1232,7 @@ export class WorkspaceService {
         rollback: Rollback,
         from?: string,
         detached = false,
+        externalPm?: string,
     ): Promise<string> {
         const workspace = state.workspacePath(branch);
         if (await pathExists(workspace)) throw new WorkspaceError("Managed workspace path already exists and is not reusable");
@@ -1245,7 +1247,7 @@ export class WorkspaceService {
         const cwd = await canonicalPath(path);
         rollback.createdWorktree = cwd;
         rollback.createdWorkspace = workspace;
-        await this.git.initializeWorkspacePm(state.workspacePmPath(branch));
+        await this.git.initializeWorkspacePm(state.workspacePmPath(branch), externalPm);
         return cwd;
     }
 

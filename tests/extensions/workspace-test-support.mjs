@@ -17,7 +17,7 @@ import { NodeProcessRunner } from "../../extensions/workspace/process.ts";
 import { stableHash } from "../../extensions/workspace/state.ts";
 import { PiSessionStore, workspaceMetadata } from "../../extensions/workspace/sessions.ts";
 import { formatWorkspaceList, parseLauncherArguments, resolveLaunch, validateForwardedPiArguments } from "../../extensions/workspace/launcher.ts";
-import workspaceExtension, { WORKSPACE_MERGE_FINALIZE_TOOL, WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
+import workspaceExtension, { CREATE_WORKSPACE_TOOL, WORKSPACE_MERGE_FINALIZE_TOOL, WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
 
 const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
        /workspace or /ws new
@@ -193,6 +193,7 @@ export {
   parseLauncherArguments,
   formatWorkspaceList,
   workspaceExtension,
+  CREATE_WORKSPACE_TOOL,
   WORKSPACE_MERGE_FINALIZE_TOOL,
   handleWorkspace,
   WORKSPACE_HELP_TEXT,

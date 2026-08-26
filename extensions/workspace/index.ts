@@ -111,6 +111,7 @@ const WORKSPACE_WORKTREE_COMPLETION: readonly AutocompleteItem[] = [
 const WORKSPACE_MERGE_OPTION_COMPLETIONS: readonly AutocompleteItem[] = [
     { value: "--squash", label: "--squash", description: "Create one commit on the base" },
 ];
+export const CREATE_WORKSPACE_TOOL = "create_workspace";
 export const WORKSPACE_MERGE_FINALIZE_TOOL = "workspace_merge_finalize";
 
 function workspaceMergePrompt(plan: WorkspaceMergePlan): string {
@@ -119,7 +120,7 @@ function workspaceMergePrompt(plan: WorkspaceMergePlan): string {
         : `Do not modify ${plan.base}. The finalizer will create the squash commit.`;
     return `Prepare workspace ${plan.source} for a ${plan.mode === "ff" ? "fast-forward" : "squash"} merge into ${plan.base}.
 
-Review all source changes and commits relative to ${plan.base}. Group the work into logical commits. You can rewrite commits on ${plan.source}. Run the relevant checks. Make both the source repository and ../pm clean. The finalizer deletes the PM repository. ${mergePreparation}
+Review all source changes and commits relative to ${plan.base}. Group the work into logical commits. You can rewrite commits on ${plan.source}. Run the relevant checks. Make both the source repository and ../pm clean. The finalizer removes the PM directory or link. ${mergePreparation}
 
 Do not update ${plan.base}, remove the worktree, or delete branches yourself. When the workspace is ready, call ${WORKSPACE_MERGE_FINALIZE_TOOL} as the only tool call. The finalizer asks for confirmation, merges the branch, removes the workspace and source branch, preserves this Pi session file, and shuts down Pi.`;
 }
@@ -444,7 +445,7 @@ export async function handleWorkspace(
             if (cleanup) {
                 const confirmed = await ctx.ui.confirm(
                     "Resume workspace cleanup",
-                    `Delete ${cleanup.source}, its worktree, and its PM repository? The merge into ${cleanup.base} is complete.`,
+                    `Delete ${cleanup.source}, its worktree, and its PM directory or link? The merge into ${cleanup.base} is complete.`,
                 );
                 if (!confirmed) return;
                 await actions.resumeCleanup(cleanup);
@@ -516,6 +517,53 @@ export default function workspaceExtension(
     };
     if (typeof pi.registerTool === "function") {
         pi.registerTool({
+            name: CREATE_WORKSPACE_TOOL,
+            label: "Create workspace",
+            description: "Create an inactive managed workspace for a new local branch",
+            parameters: Type.Object({
+                branch: Type.String({ minLength: 1, description: "New local Git branch name" }),
+                cwd: Type.Optional(Type.String({ minLength: 1, description: "Repository directory; default is the current directory" })),
+                from: Type.Optional(Type.String({ minLength: 1, description: "Base ref; default is local main" })),
+                pm: Type.Optional(Type.String({ minLength: 1, description: "Existing PM Git worktree to link as ../pm" })),
+            }),
+            executionMode: "sequential",
+            async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+                const branch = params.branch.trim();
+                const cwd = params.cwd?.trim();
+                const from = params.from?.trim();
+                const pm = params.pm?.trim();
+                if (!branch) throw new WorkspaceError("A branch name is required");
+                if (params.cwd && !cwd) throw new WorkspaceError("A repository path is required");
+                if (params.from && !from) throw new WorkspaceError("A base ref is required");
+                if (params.pm && !pm) throw new WorkspaceError("A PM path is required");
+                const repositoryCwd = cwd ? resolve(ctx.cwd, cwd) : ctx.cwd;
+                const service = createService(repositoryCwd);
+                const activation = await service.create({
+                    branch,
+                    ...(from ? { from } : {}),
+                    ...(pm ? { pm: resolve(repositoryCwd, pm) } : {}),
+                    parallel: true,
+                }, {
+                    parallel: true,
+                    switchSession: async () => ({ cancelled: false }),
+                });
+                await (await service.state()).releaseLease(activation.record);
+                const workspacePm = join(dirname(activation.record.cwd), "pm");
+                return {
+                    content: [{
+                        type: "text",
+                        text: `Created workspace ${branch} at ${activation.record.cwd}. Use launch_pi with this directory to start its Pi session.`,
+                    }],
+                    details: {
+                        branch,
+                        cwd: activation.record.cwd,
+                        pm: workspacePm,
+                        session: activation.record.session,
+                    },
+                };
+            },
+        });
+        pi.registerTool({
             name: WORKSPACE_MERGE_FINALIZE_TOOL,
             label: "Merge workspace",
             description: "Finalize the pending workspace merge after the source commits and checks are ready",
@@ -528,7 +576,7 @@ export default function workspaceExtension(
                 if (!session || resolve(session) !== resolve(plan.session)) throw new WorkspaceError("The pending merge belongs to another Pi session");
                 const confirmed = await ctx.ui.confirm(
                     "Merge and remove workspace",
-                    `Merge ${plan.source} into ${plan.base}, delete the source branch, worktree, and PM repository, then exit Pi? The Pi session file is preserved.`,
+                    `Merge ${plan.source} into ${plan.base}, delete the source branch, worktree, and PM directory or link, then exit Pi? The Pi session file is preserved.`,
                 );
                 const service = createService(plan.sourceCwd);
                 if (!confirmed) {
