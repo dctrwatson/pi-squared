@@ -21,6 +21,7 @@ import {
   NodeProcessRunner,
   stableHash,
   parseLauncherArguments,
+  formatWorkspaceList,
   workspaceExtension,
   WORKSPACE_MERGE_FINALIZE_TOOL,
   handleWorkspace,
@@ -85,11 +86,22 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     prune: true,
     piArgs: [],
   });
+  assert.deepEqual(parseLauncherArguments(["--list"]), {
+    parallel: false,
+    list: true,
+    piArgs: [],
+  });
   assert.throws(() => parseLauncherArguments(["prune", "feature/test"]), /piw prune accepts no arguments/);
+  assert.throws(() => parseLauncherArguments(["--list", "feature/test"]), /piw --list accepts no arguments/);
+  assert.throws(() => parseLauncherArguments(["--list", "--worktree"]), /piw --list accepts no arguments/);
   assert.throws(() => parseLauncherArguments(["new"]), /piw new requires a branch name/);
   assert.throws(() => parseNewWorkspace(["feature/test", "--parallel"]), /Unknown workspace option/);
   assert.throws(() => parseLauncherArguments(["--parallel"]), /Unknown piw option/);
   assert.throws(() => parseLauncherArguments(["--here"]), /Unknown piw option/);
+});
+
+test("workspace list formatting handles an empty list", () => {
+  assert.equal(formatWorkspaceList([]), "No workspaces.\n");
 });
 
 test("workspace aliases share local completion discovery and side-effect-free help", async (t) => {

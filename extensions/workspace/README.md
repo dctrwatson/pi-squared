@@ -19,6 +19,7 @@ Install this package as a global Pi package. Put `bin/piw` on your `PATH`. The l
 - `/ws merge <base-branch>` asks Pi to group the work into logical commits, run checks, fast-forward the base branch, and remove the managed workspace.
 - `/ws merge <base-branch> --squash` creates one commit on the base branch before it removes the managed workspace.
 - `/ws prune` removes inactive managed workspaces when their remote branch no longer exists or their work is integrated into the recorded local base branch.
+- `piw --list` shows locally known workspaces and their status without starting Pi.
 - `launch_pi` starts interactive Pi for a workspace in a new Ghostty tab. It runs `piw` in the selected directory with the supplied initial prompt.
 
 Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `merge`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` and `merge` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
@@ -39,6 +40,7 @@ piw --worktree feature/example
 piw new feature/example --worktree
 piw new feature/example --from current --worktree
 piw prune                   # Remove workspaces for deleted remote branches
+piw --list                  # Show local workspace status
 piw -- --model anthropic/claude-sonnet-4-5
 ```
 
