@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import interactiveShell from "../../extensions/interactive-shell.ts";
+import interactiveShell, { QUICK_COMMAND_DURATION_MS } from "../../extensions/interactive-shell.ts";
 
 function setup(options = {}) {
   let handler;
@@ -51,7 +51,7 @@ test("plain ! commands keep Pi's normal captured-output handling", async () => {
   assert.equal(spawned, false);
 });
 
-test("!! commands suspend and restore the TUI around inherited shell execution", async () => {
+test("!! commands that stay open return to Pi when they exit", async () => {
   const events = [];
   let invocation;
   const handler = setup({
@@ -63,6 +63,10 @@ test("!! commands suspend and restore the TUI around inherited shell execution",
     writeTerminal(text) {
       events.push(`write:${JSON.stringify(text)}`);
     },
+    now: (() => {
+      let calls = 0;
+      return () => calls++ === 0 ? 0 : QUICK_COMMAND_DURATION_MS;
+    })(),
   });
 
   const result = await handler({
@@ -91,6 +95,42 @@ test("!! commands suspend and restore the TUI around inherited shell execution",
       truncated: false,
     },
   });
+});
+
+test("quick !! commands wait for a key before Pi resumes", async () => {
+  const events = [];
+  const handler = setup({
+    spawn() {
+      events.push("spawn");
+      return { status: 0, signal: null };
+    },
+    writeTerminal(text) {
+      events.push(`write:${JSON.stringify(text)}`);
+    },
+    now: (() => {
+      let calls = 0;
+      return () => calls++ === 0 ? 0 : 1;
+    })(),
+    waitForKey() {
+      events.push("wait");
+    },
+  });
+
+  await handler({
+    command: "git diff",
+    excludeFromContext: true,
+    cwd: "/worktree",
+  }, tuiContext(events));
+
+  assert.deepEqual(events, [
+    "stop",
+    'write:"\\u001b[2J\\u001b[H"',
+    "spawn",
+    'write:"\\r\\nPress any key to return to Pi."',
+    "wait",
+    "start",
+    "render:true",
+  ]);
 });
 
 test("suspended command failures still restore the TUI", async () => {
