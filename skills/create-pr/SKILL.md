@@ -33,7 +33,9 @@ Use an existing PR's prepared base. If preparation finds an existing PR and the 
 
 Before writing external GitHub text, load and follow the `writing-style` skill when it is available.
 
-Write a concise reviewer-focused title and body. Explain why the change is needed, its outcome, logical changes, validation, and material risks. Preserve required template sections. Use explicit Markdown links from the preparation artifacts for referenced PRs and issues.
+Write a concise reviewer-focused title and body. For a typical PR body, use 40 to 120 words of original prose and at least two substantive sentences. Do not count required template boilerplate. Use short paragraphs. Go beyond this range only when reviewers need more scope, risk, migration, or rollout context. Do not add filler to meet the target. Give reviewers enough context to understand why the change is needed, then explain its outcome, logical changes, and material risks. Derive the motivation from the user's request, session context, and relevant referenced issues or PRs. A reference can describe a broader task than this PR. State which part this PR addresses and do not imply that it completes the full task unless it does. Mention planned follow-up work only when it helps reviewers understand the scope. Preserve required template sections. For each GitHub PR, issue, comment, review, or commit reference, use a Markdown link with a full `https://github.com/owner/repo/...` URL from the preparation artifacts. Do not use bare shorthand such as `#123`, `owner/repo#123`, a relative link, or an unlinked commit SHA.
+
+Keep validation text minimal. If a template requires it, use one short accurate line with the main result. Do not use bullets or prose to list commands, test tiers, or validation mechanics.
 
 For a draft-only request, return the title and body now. Do not continue to commit cleanup or publication.
 
@@ -63,4 +65,4 @@ bash <skill_dir>/scripts/publish-pr.sh --state <publish-state.json> --title-file
 
 The helper refuses stale or unsafe state, verifies that no outgoing subject starts with `pi:`, pushes with the required lease protection, and creates or updates the PR. Do not bypass a refusal. If state changed, prepare again.
 
-Return the PR and commit Markdown links, validation performed, and any remaining risk. Keep the response concise.
+Return the PR and commit Markdown links with full GitHub URL targets. Mention validation only when it failed, was not run, or creates a material risk. Do not list routine validation. Keep the response concise.

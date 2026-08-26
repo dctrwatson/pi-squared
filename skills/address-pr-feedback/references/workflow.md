@@ -87,7 +87,7 @@ The helper checks the PR head before a preview and before each real post. A real
 
 ## Result links
 
-Use explicit GitHub Markdown links:
+For each GitHub PR, issue, comment, review, or commit reference, use a Markdown link with a full `https://github.com/owner/repo/...` URL. The label can be concise, but the link target must identify the repository. Do not rely on bare `#123`, `owner/repo#123`, relative links, or unlinked commit SHAs.
 
 ```markdown
 [#42](https://github.com/owner/repo/pull/42)
