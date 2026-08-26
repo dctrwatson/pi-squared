@@ -19,6 +19,7 @@ Install this package as a global Pi package. Put `bin/piw` on your `PATH`. The l
 - `/ws merge <base-branch>` asks Pi to group the work into logical commits, run checks, fast-forward the base branch, and remove the managed workspace.
 - `/ws merge <base-branch> --squash` creates one commit on the base branch before it removes the managed workspace.
 - `/ws prune` removes inactive managed workspaces when their remote branch no longer exists or their work is integrated into the recorded local base branch.
+- `launch_pi` starts interactive Pi for a workspace in a new Ghostty tab. It runs `piw` in the selected directory with the supplied initial prompt.
 
 Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `merge`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` and `merge` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
 
@@ -77,4 +78,4 @@ The extension refuses branch changes when the target checkout has staged, unstag
 
 ## Limits
 
-The extension supports macOS and Linux. `/ws` requires Pi TUI mode. It requires Git. It requires GitHub CLI only for explicit pull request targets. It cannot recover a lease when it cannot prove that the recorded local process has ended. Remove such state only after you verify that no Pi session owns the workspace.
+The extension supports macOS and Linux. `launch_pi` requires macOS and Ghostty. `/ws` requires Pi TUI mode. It requires Git. It requires GitHub CLI only for explicit pull request targets. It cannot recover a lease when it cannot prove that the recorded local process has ended. Remove such state only after you verify that no Pi session owns the workspace.

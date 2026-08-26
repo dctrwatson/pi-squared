@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
+import { registerLaunchPi } from "./launch-pi.ts";
 import { WorkspaceError } from "./process.ts";
 import { WorkspaceService, parseCommandWords, parseNewWorkspace, parseWorkspaceMerge, parseWorkspaceTarget } from "./core.ts";
 import { sessionHasAutomaticWorkspaceName, WORKSPACE_SESSION_NAME_TYPE, WORKSPACE_SESSION_TYPE } from "./sessions.ts";
@@ -500,6 +501,7 @@ export default function workspaceExtension(
     pi: ExtensionAPI,
     options: WorkspaceExtensionOptions = {},
 ): void {
+    registerLaunchPi(pi);
     const createService = options.createService ?? ((cwd: string) => new WorkspaceService(cwd));
     let workspaceCwd: string | undefined;
     let completionCandidates: Promise<WorkspaceCompletionCandidates> | undefined;
