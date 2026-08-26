@@ -24,6 +24,10 @@ for (const entry of plan.skipped) console.log(`Skipped ${entry.branch}: ${entry.
 '
   exit 0
 fi
+if [[ "$action" == "list" ]]; then
+  PIW_PLAN="$plan" node --input-type=module -e 'process.stdout.write(JSON.parse(process.env.PIW_PLAN).output)'
+  exit 0
+fi
 if [[ "$action" != "launch" ]]; then
   echo "piw: launcher returned an invalid action" >&2
   exit 1

@@ -56,6 +56,36 @@ test("bare piw uses the current branch without gh", async () => {
   }
 });
 
+test("piw --list reports local workspace status without starting Pi", async () => {
+  const root = await repository();
+  try {
+    git(root, "checkout", "-b", "feature/list");
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const mapped = await mapWorkspace(service, sessions, "feature/list", root, {
+      number: 42,
+      url: "https://github.com/a/b/pull/42",
+      baseRepository: "a/b",
+      headRepository: "a/b",
+      headRef: "feature/list",
+    });
+    await mapped.state.acquireLease(mapped.record);
+
+    const plan = await resolveLaunch(["--list"], root);
+    assert.equal(plan.action, "list");
+    assert.match(plan.output, /^BRANCH\s+PR\s+PLACEMENT\s+STATE\s+RECENT\s+PATH/m);
+    assert.match(plan.output, /feature\/list\s+#42\s+primary\s+active \(PID \d+\)\s+now/);
+    assert.ok(plan.output.includes(root));
+
+    const output = execFileSync(resolve(process.cwd(), "bin/piw"), ["--list"], { cwd: root, encoding: "utf8" });
+    assert.match(output, /feature\/list\s+#42\s+primary\s+active \(PID \d+\)\s+now/);
+    assert.ok(output.includes(root));
+    assert.equal(git(root, "branch", "--show-current"), "feature/list");
+  } finally {
+    await removeRepository(root);
+  }
+});
+
 test("default piw reports an active current workspace with its PID and cwd", async () => {
   const root = await repository();
   try {
