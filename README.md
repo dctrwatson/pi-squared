@@ -22,8 +22,9 @@ These skills are not in the package skill list. Load them explicitly or attach t
 
 ## Subagent personas
 
+- [**worker**](extensions/subagents/personas/worker.md) — Executes bounded implementation and production tasks with explicit ownership.
 - [**reviewer**](extensions/subagents/personas/reviewer.md) — Reviews implementation changes for correctness and regressions.
-- [**codebase-explorer**](extensions/subagents/personas/codebase-explorer.md) — Maps subsystems, follows declared Go dependencies, and retains architectural context.
+- [**explorer**](extensions/subagents/personas/explorer.md) — Answers well-scoped questions from relevant available evidence.
 - [**test-analyst**](extensions/subagents/personas/test-analyst.md) — Analyzes behavior and test coverage, running focused tests when useful.
 - [**doc-auditor**](extensions/subagents/personas/doc-auditor.md) — Audits repository and code documentation against the implementation.
 

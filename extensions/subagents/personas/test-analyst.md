@@ -1,7 +1,6 @@
 ---
 name: test-analyst
 description: Assess testability, test coverage, and regression cases for a defined change
-preferred-lifetime: one-shot
 preferred-profile: balanced
 context-requirements: >
   Provide the behavior to test, expected observable results, risk areas, relevant change scope, and Git comparison base if applicable.

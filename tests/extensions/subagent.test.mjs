@@ -244,11 +244,12 @@ test("extension exposes one concise subagent tool and persistent-session command
   ]);
   assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
-  assert.match(tools[0].parameters.properties.persona.description, /optional persona.*require purpose and lifetime/i);
+  assert.match(tools[0].parameters.properties.persona.description, /required for Pi.*optional for Cursor Cloud/i);
   assert.deepEqual(tools[0].parameters.properties.profile.enum, ["fast", "balanced", "deep"]);
   assert.match(tools[0].parameters.properties.profile.description, /fast=Luna.*balanced=Terra default.*deep=Sol escalation/i);
+  assert.match(tools[0].parameters.properties.runtime.description, /Pi default.*persona-less requires explicit Cursor Cloud/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
-  assert.match(tools[0].parameters.properties.lifetime.description, /one-shot needs prompt.*overrides persona default/i);
+  assert.match(tools[0].parameters.properties.lifetime.description, /task default.*one-shot needs prompt/i);
   assert.deepEqual(tools[0].parameters.properties.mode.enum, ["fresh", "fork"]);
   assert.match(tools[0].parameters.properties.mode.description, /fresh default.*fork parent history/i);
   assert.equal(tools[0].parameters.properties.skills.items.maxLength, 64);
@@ -256,11 +257,11 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
   assert.equal(tools[0].parameters.properties.context.description, "Concise background");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-    "Use subagent one-shot for one response, task for validation, persistent for related work. Run at most 4 at once; idle subagents do not count. Satisfy NEEDS; stop complete subagents.",
+    "Before subagent create, list unknown options and provide context. Use worker for general Pi execution; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
+    "Default to task subagents. Use one-shot only when continuity cannot help; use persistent for open-ended work. Run at most 4; idle subagents do not count. Satisfy NEEDS; stop complete subagents.",
     "Give subagent objective, scope, and output; avoid adjacent work.",
-    "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
-    "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",
+    "Delegate substantive isolated work to subagents; keep only coordination and necessary integration in the parent context.",
+    "Prefer fresh context. Fork only when parent history is material. Inspect only enough to partition work by shared context and specialty, then delegate. Avoid duplicate investigation. Reuse subagents for related work. Parallelize only separate contexts or specialties.",
   ]);
   assert.equal(tools[0].description, "Retain up to 20; run up to 4 subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.");
   assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
@@ -272,7 +273,7 @@ test("extension exposes one concise subagent tool and persistent-session command
     parameters: tools[0].parameters,
   });
   const modelFacingBytes = Buffer.byteLength(modelFacingDefinition, "utf8");
-  assert.ok(modelFacingBytes <= 2_400, `model-facing subagent definition is ${modelFacingBytes} bytes`);
+  assert.ok(modelFacingBytes <= 3_200, `model-facing subagent definition is ${modelFacingBytes} bytes`);
   const personaPage = await tools[0].execute(
     "list-personas",
     { action: "list", kind: "personas", offset: 0, limit: 1 },
@@ -397,6 +398,52 @@ Inspect only the requested area.
     assert.equal(await values(command, "review this area"), null);
     assert.equal(await values(command, "--fork review this area"), null);
   }
+});
+
+test("human subagent commands remain persistent", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-human-subagent-lifetime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const personaDirectory = join(root, "personas");
+  await mkdir(personaDirectory);
+  await writeFile(join(personaDirectory, "human-scout.md"), `---
+name: human-scout
+description: Inspect one human-selected scope
+---
+Inspect the requested scope.
+`);
+  const commands = new Map();
+  subagentsModule.default({
+    appendEntry() {},
+    getThinkingLevel() { return "off"; },
+    on() {},
+    registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
+    registerTool() {},
+  }, { personaDirectory });
+  const observed = [];
+  const originalOpen = PersistentSubagentRegistry.prototype.open;
+  PersistentSubagentRegistry.prototype.open = async function (_ctx, target) {
+    observed.push(this.summaryFor(target));
+    return { action: "cancel" };
+  };
+  t.after(() => { PersistentSubagentRegistry.prototype.open = originalOpen; });
+  const context = {
+    cwd: root,
+    mode: "tui",
+    hasUI: true,
+    model: undefined,
+    scopedModels: [],
+    isIdle: () => true,
+    sessionManager: {
+      getSessionId: () => "human-lifetime-parent",
+      getSessionFile: () => join(root, "parent.jsonl"),
+    },
+    ui: { notify() {} },
+  };
+
+  await commands.get("subagent").handler("Inspect authentication", context);
+  await commands.get("subagent:human-scout").handler("Inspect billing", context);
+  assert.deepEqual(observed.map(({ lifetime }) => lifetime), ["persistent", "persistent"]);
 });
 
 test("subagents help is side-effect free and completion uses active targets", async (t) => {
@@ -1993,7 +2040,6 @@ test("persistent subagent registry stores branch-local mutations and restores do
       description: "Explore product decisions",
       systemPrompt: "Analyze product requirements.",
       contextRequirements: "Provide the goal, constraints, Git base, and relevant scope.",
-      preferredLifetime: "task",
       preferredProfile: "fast",
       extensions: ["/personas/extensions/unsafe.ts"],
       skills: ["/personas/skills/product/SKILL.md"],
@@ -2009,7 +2055,6 @@ test("persistent subagent registry stores branch-local mutations and restores do
   assert.deepEqual(storedPersona.skills, ["/personas/skills/product/SKILL.md"]);
   assert.deepEqual(storedPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(storedPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
-  assert.equal(storedPersona.preferredLifetime, "task");
   assert.equal(storedPersona.preferredProfile, "fast");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, undefined);
@@ -2110,7 +2155,6 @@ NEEDS: A release decision from the parent`;
   assert.deepEqual(restoredPersona.skills, ["/personas/skills/product/SKILL.md"]);
   assert.deepEqual(restoredPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(restoredPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
-  assert.equal(restoredPersona.preferredLifetime, "task");
   assert.equal(restoredPersona.preferredProfile, "fast");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, true);
@@ -2214,7 +2258,7 @@ test("lifetime promotion restarts a live controller before follow-up", async (t)
   assert.equal(promoted.status, "dormant");
 });
 
-test("model creation supports optional persona-less skills and active-turn forks", async (t) => {
+test("model creation requires Pi personas and supports worker skills and active-turn forks", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-controlled-create-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDirectory = join(root, "personas");
@@ -2235,6 +2279,13 @@ skills:
   - ../persona-skills/create-pr/SKILL.md
 ---
 Implement the requested change.
+`);
+  await writeFile(join(personaDirectory, "worker.md"), `---
+name: worker
+description: Execute a bounded production task
+preferred-profile: balanced
+---
+Execute the assigned work.
 `);
   const parentSession = join(root, "parent.jsonl");
   const header = {
@@ -2309,9 +2360,9 @@ Implement the requested change.
   const signal = new AbortController().signal;
 
   for (const [id, input, expected] of [
-    ["missing-purpose", { action: "create", lifetime: "task", skills: ["create-pr"] }, /explicit purpose/],
-    ["missing-lifetime", { action: "create", purpose: "Create a pull request", skills: ["create-pr"] }, /explicit lifetime/],
-    ["command-only-skill", { action: "create", purpose: "Create a pull request", lifetime: "task", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
+    ["persona-less-default-pi", { action: "create", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*worker/i],
+    ["persona-less-explicit-pi", { action: "create", runtime: "pi", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*worker/i],
+    ["command-only-skill", { action: "create", persona: "worker", purpose: "Create a pull request", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
   ]) {
     const result = await tool.execute(id, input, signal, undefined, context);
     assert.equal(result.details.ok, false, id);
@@ -2319,32 +2370,34 @@ Implement the requested change.
     assert.match(result.details.error.message, expected, id);
   }
 
-  const withoutSkills = await tool.execute("persona-less-without-skills", {
+  const withoutSkills = await tool.execute("worker-without-skills", {
     action: "create",
     mode: "fresh",
     name: "workflow-without-skills",
+    persona: "worker",
     purpose: "Inspect the requested pull request",
-    lifetime: "task",
   }, signal, undefined, context);
   assert.equal(withoutSkills.content[0].text, "Created workflow-without-skills.");
-  assert.equal(withoutSkills.details.subagent.persona, undefined);
+  assert.equal(withoutSkills.details.subagent.persona, "worker");
+  assert.equal(withoutSkills.details.subagent.lifetime, "task");
   assert.equal(withoutSkills.details.subagent.model, "openai-codex/gpt-5.6-terra");
   assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", withoutSkills.details.subagent.id).selectedSkillPaths, []);
-  await tool.execute("stop-persona-less-without-skills", {
+  await tool.execute("stop-worker-without-skills", {
     action: "stop",
     id: "workflow-without-skills",
   }, signal, undefined, context);
 
-  const fresh = await tool.execute("persona-less-fresh", {
+  const fresh = await tool.execute("worker-fresh", {
     action: "create",
     mode: "fresh",
     name: "workflow-fresh",
+    persona: "worker",
     purpose: "Create the requested pull request",
     lifetime: "task",
     skills: ["create-pr", "writing-style", "create-pr"],
   }, signal, undefined, context);
   assert.equal(fresh.content[0].text, "Created workflow-fresh.");
-  assert.equal(fresh.details.subagent.persona, undefined);
+  assert.equal(fresh.details.subagent.persona, "worker");
   assert.equal(fresh.details.subagent.model, "openai-codex/gpt-5.6-terra");
   assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", fresh.details.subagent.id).selectedSkillPaths, [
     "/parent/skills/create-pr/SKILL.md",
@@ -2378,10 +2431,11 @@ Implement the requested change.
 
   parentLeaf = "assistant-tool-call";
   const persistedEntriesBeforeFork = entries.length;
-  const fork = await tool.execute("persona-less-fork", {
+  const fork = await tool.execute("worker-fork", {
     action: "create",
     mode: "fork",
     name: "workflow-fork",
+    persona: "worker",
     purpose: "Create the requested pull request from parent context",
     lifetime: "task",
     skills: ["create-pr"],
@@ -2424,6 +2478,7 @@ Implement the requested change.
     action: "create",
     mode: "fork",
     name: "workflow-fallback",
+    persona: "worker",
     purpose: "Create the requested pull request with a fresh fallback",
     lifetime: "task",
     skills: ["create-pr"],
@@ -2502,7 +2557,7 @@ test("persona-based model creation remains unavailable when no personas are conf
   assert.match(result.details.error.message, /No subagent personas are configured; create requires an existing persona/i);
 });
 
-test("model-created subagents honor persona lifetime and profile preferences", async (t) => {
+test("model-created subagents default to task and honor explicit lifetimes", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-lifetimes-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDirectory = join(root, "personas");
@@ -2510,7 +2565,6 @@ test("model-created subagents honor persona lifetime and profile preferences", a
   await writeFile(join(personaDirectory, "bounded-analyst.md"), `---
 name: bounded-analyst
 description: Complete bounded analysis
-preferred-lifetime: one-shot
 preferred-profile: fast
 ---
 Return a complete analysis.
@@ -2595,14 +2649,15 @@ NEEDS: The expected behavior from the parent`;
     action: "list",
     kind: "personas",
   }, signal, undefined, context);
-  assert.match(personas.content[0].text, /bounded-analyst \[pi\]: Complete bounded analysis \[prefers one-shot\] \[prefers fast profile\]/);
-  assert.equal(personas.details.personas[0].preferredLifetime, "one-shot");
+  assert.match(personas.content[0].text, /bounded-analyst \[pi\]: Complete bounded analysis \[prefers fast profile\]/);
   assert.equal(personas.details.personas[0].preferredProfile, "fast");
-  const invalidOneShot = await tool.execute("preferred-one-shot-without-prompt", {
+  assert.equal(Object.hasOwn(personas.details.personas[0], "preferredLifetime"), false);
+  const invalidOneShot = await tool.execute("explicit-one-shot-without-prompt", {
     action: "create",
-    name: "invalid-preferred-one-shot",
+    name: "invalid-explicit-one-shot",
     persona: "bounded-analyst",
-    purpose: "Invalid dormant preferred one-shot",
+    purpose: "Invalid dormant explicit one-shot",
+    lifetime: "one-shot",
   }, signal, undefined, context);
   assert.equal(invalidOneShot.details.ok, false);
   assert.equal(invalidOneShot.details.error.code, "INVALID_INPUT");
@@ -2613,6 +2668,7 @@ NEEDS: The expected behavior from the parent`;
     name: "one-shot-default",
     persona: "bounded-analyst",
     purpose: "Return one bounded result",
+    lifetime: "one-shot",
     prompt: "Complete this bounded request",
   }, signal, undefined, context);
   assert.equal(oneShot.details.subagent.lifetime, "one-shot");
@@ -2626,6 +2682,7 @@ NEEDS: The expected behavior from the parent`;
     name: "blocked-one-shot",
     persona: "bounded-analyst",
     purpose: "Request bounded work without enough context",
+    lifetime: "one-shot",
     prompt: "BLOCKED-RESULT",
   }, signal, undefined, context);
   assert.equal(blockedOneShot.details.subagent.lifetime, "task");
@@ -2638,17 +2695,16 @@ NEEDS: The expected behavior from the parent`;
   }, signal, undefined, context);
   assert.equal(stoppedBlocked.details.subagent.blocker, undefined);
 
-  const task = await tool.execute("task-override", {
+  const task = await tool.execute("task-default", {
     action: "create",
-    name: "task-override",
+    name: "task-default",
     persona: "bounded-analyst",
     purpose: "Retain a bounded analyst through validation",
-    lifetime: "task",
     prompt: "Begin an iterative task",
   }, signal, undefined, context);
   assert.equal(task.details.subagent.lifetime, "task");
   assert.notEqual(task.details.subagent.status, "stopped");
-  assert.match(task.content[0].text, /^Saved as task-override\./);
+  assert.match(task.content[0].text, /^Saved as task-default\./);
 
   const persistent = await tool.execute("persistent-override", {
     action: "create",
@@ -2665,6 +2721,7 @@ NEEDS: The expected behavior from the parent`;
     name: "truncated-one-shot",
     persona: "bounded-analyst",
     purpose: "Produce a result requiring continuation",
+    lifetime: "one-shot",
     prompt: "LONG",
   }, signal, undefined, context);
   assert.equal(retained.details.subagent.lifetime, "task");
@@ -2677,6 +2734,7 @@ NEEDS: The expected behavior from the parent`;
     name: "incomplete-one-shot",
     persona: "bounded-analyst",
     purpose: "Retain an answer that hit the model output limit",
+    lifetime: "one-shot",
     prompt: "LENGTH",
   }, signal, undefined, context);
   assert.equal(incomplete.details.subagent.lifetime, "task");
@@ -2693,6 +2751,7 @@ NEEDS: The expected behavior from the parent`;
     name: "empty-one-shot",
     persona: "bounded-analyst",
     purpose: "Retain a request with no visible response",
+    lifetime: "one-shot",
     prompt: "EMPTY",
   }, signal, undefined, context);
   assert.equal(empty.details.subagent.lifetime, "task");
@@ -2707,6 +2766,7 @@ NEEDS: The expected behavior from the parent`;
     name: "failed-one-shot",
     persona: "bounded-analyst",
     purpose: "Fail one bounded request",
+    lifetime: "one-shot",
     prompt: "FAIL",
   }, signal, undefined, context);
   assert.equal(failedOneShot.details.ok, false);
@@ -2725,6 +2785,7 @@ NEEDS: The expected behavior from the parent`;
     name: "canceled-one-shot",
     persona: "bounded-analyst",
     purpose: "Cancel one bounded request",
+    lifetime: "one-shot",
     prompt: "CANCEL",
   }, cancellation.signal, undefined, context);
   cancellation.abort(new Error("Parent canceled one-shot"));
@@ -2804,7 +2865,6 @@ Inspect the project without changing it.
   assert.ok(notifications.some(({ message }) => message === "Model subagent tool enabled."));
 
   const invalidCalls = [
-    ["create-without-persona", { action: "create", name: "persona-less", purpose: "Attempt persona-less delegation" }, /Persona-less create requires explicit lifetime/i],
     ["create-unknown-persona", { action: "create", persona: "unknown", purpose: "Attempt unknown delegation" }, /Unknown subagent persona "unknown".*list personas/i],
     ["context-without-prompt", { action: "create", name: "context-only", purpose: "Context without an accompanying request", persona: "test-scout", context: "Goal: inspect the project" }, /context requires an accompanying prompt/i],
     ["context-on-list", { action: "list", context: "Not valid for list" }, /context is only valid with create or prompt/i],
@@ -2886,7 +2946,7 @@ Inspect the project without changing it.
     id: "agent-1",
   }, signal, undefined, context);
   assert.equal(stopped.details.subagent.status, "stopped");
-  assert.equal(stopped.content[0].text, "agent-1 [stopped, persistent]: Retain context for project area 1");
+  assert.equal(stopped.content[0].text, "agent-1 [stopped, task]: Retain context for project area 1");
   assert.doesNotMatch(stopped.content[0].text, /sa_[a-f0-9]+/);
 
   const replacement = await subagentTool.execute("create-replacement", {
@@ -2902,7 +2962,7 @@ Inspect the project without changing it.
   const listed = await subagentTool.execute("list-with-purposes", {
     action: "list",
   }, signal, undefined, context);
-  assert.match(listed.content[0].text, /agent-replacement \[pi, dormant, persistent\]: Retain context for the replacement project area/);
+  assert.match(listed.content[0].text, /agent-replacement \[pi, dormant, task\]: Retain context for the replacement project area/);
   assert.doesNotMatch(listed.content[0].text, /(?:^|\n)agent-1 \[|sa_[a-f0-9]+|thinking|\/gpt|\/claude/);
   await events.get("session_shutdown")({}, context);
 });
@@ -2968,12 +3028,12 @@ test("forked persona args load bundled and declared resources with Pi's normal t
 
 test("restored subagent args use its session model history", () => {
   const persona = {
-    name: "codebase-explorer",
-    description: "Codebase explorer",
+    name: "explorer",
+    description: "Explorer",
     systemPrompt: "Read the project.",
     extensions: [],
     skills: [],
-    filePath: "/personas/codebase-explorer.md",
+    filePath: "/personas/explorer.md",
   };
   const args = buildSubagentProcessArgs({
     mode: "fresh",
@@ -3006,10 +3066,11 @@ test("bundled personas provide focused defaults and user personas override by na
   const bundled = loadSubagentPersonas(BUNDLED_PERSONA_DIRECTORY);
   assert.deepEqual(bundled.diagnostics, []);
   assert.deepEqual(bundled.personas.map(({ name }) => name), [
-    "codebase-explorer",
     "doc-auditor",
+    "explorer",
     "reviewer",
     "test-analyst",
+    "worker",
   ]);
   assert.deepEqual(
     bundled.personas.find(({ name }) => name === "reviewer").skills,
@@ -3025,17 +3086,19 @@ test("bundled personas provide focused defaults and user personas override by na
       role: systemPrompt.split("\n", 1)[0],
     })),
     [
-      { name: "codebase-explorer", role: "You are a codebase explorer and architecture analyst. Build an evidence-based map of the requested subsystem so the caller can reason about it without rereading the entire codebase." },
       { name: "doc-auditor", role: "You are a repository documentation auditor. Verify that documentation about the repository or implemented code matches actual behavior and gives its intended audience enough information to use the documented functionality correctly." },
+      { name: "explorer", role: "You are an explorer for the primary agent. Investigate the requested scope and return concise, evidence-based summaries and direct answers to its questions." },
       { name: "reviewer", role: "You are a code reviewer, not an implementation agent." },
       { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Assess testability, test coverage, and regression cases for a defined change. Do not define product requirements, determine feature scope, or make design decisions. For a design document, assess only whether its stated behavior is precise and observable enough to derive tests." },
+      { name: "worker", role: "You are a worker for the primary agent. Execute the assigned implementation or production task within its explicit ownership boundary." },
     ],
   );
   const bundledPrompts = Object.fromEntries(
     bundled.personas.map(({ name, systemPrompt }) => [name, systemPrompt]),
   );
-  assert.match(bundledPrompts["codebase-explorer"], /Trace entry points, control flow, data flow, dependencies, and tests/);
-  assert.match(bundledPrompts["codebase-explorer"], /Do not edit or write project files.*use Bash to inspect.*explore dependencies/s);
+  assert.match(bundledPrompts.explorer, /available evidence.*source code, documentation, configuration, tests, history, project records, artifacts, and declared third-party dependencies/);
+  assert.match(bundledPrompts.explorer, /Lead with direct answers and a concise summary/);
+  assert.match(bundledPrompts.explorer, /Do not edit or write project files.*use Bash to inspect.*dependencies/s);
   assert.match(bundledPrompts["doc-auditor"], /Do not audit plans, design documents, proposals, requirements.*intended or future work/s);
   assert.match(bundledPrompts["doc-auditor"], /Do not provide a generic document critique.*outside this scope.*stop/s);
   assert.match(bundledPrompts["doc-auditor"], /Report only actionable findings.*documentation and implementation evidence/s);
@@ -3049,17 +3112,25 @@ test("bundled personas provide focused defaults and user personas override by na
   assert.match(bundledPrompts.reviewer, /Do not edit files or run tests.*Base the review on the changes and repository evidence/s);
   assert.match(bundledPrompts["test-analyst"], /recommend focused tests.*setup, action, and assertions/s);
   assert.match(bundledPrompts["test-analyst"], /Do not edit files.*Run focused tests when useful.*commands and outcomes you actually observed/s);
+  assert.match(bundledPrompts.worker, /You are not alone in the worktree.*Do not revert, overwrite, or reformat unrelated work/s);
+  assert.match(bundledPrompts.worker, /ownership overlaps.*stop and return `BLOCKED` and `NEEDS`.*minimum boundary change/s);
+  assert.match(bundledPrompts.worker, /Run focused validation.*Do not commit, change branches, rewrite Git state, or remove files/s);
   assert.equal(
-    bundled.personas.find(({ name }) => name === "codebase-explorer").contextRequirements,
-    "Provide the objective, subsystem or scope, key questions, and relevant constraints.",
+    bundled.personas.find(({ name }) => name === "explorer").contextRequirements,
+    "Provide the objective, questions, relevant scope, and constraints.",
+  );
+  assert.equal(
+    bundled.personas.find(({ name }) => name === "worker").contextRequirements,
+    "Provide the objective, acceptance criteria, owned files or responsibilities, constraints, concurrent work, and required validation.",
   );
   assert.deepEqual(
-    bundled.personas.map(({ name, preferredLifetime, preferredProfile }) => ({ name, preferredLifetime, preferredProfile })),
+    bundled.personas.map(({ name, preferredProfile }) => ({ name, preferredProfile })),
     [
-      { name: "codebase-explorer", preferredLifetime: "persistent", preferredProfile: "fast" },
-      { name: "doc-auditor", preferredLifetime: "one-shot", preferredProfile: "fast" },
-      { name: "reviewer", preferredLifetime: "task", preferredProfile: "balanced" },
-      { name: "test-analyst", preferredLifetime: "one-shot", preferredProfile: "balanced" },
+      { name: "doc-auditor", preferredProfile: "fast" },
+      { name: "explorer", preferredProfile: "fast" },
+      { name: "reviewer", preferredProfile: "balanced" },
+      { name: "test-analyst", preferredProfile: "balanced" },
+      { name: "worker", preferredProfile: "balanced" },
     ],
   );
   assert.match(
@@ -3078,7 +3149,6 @@ Review using local conventions.
   const merged = loadSubagentPersonasFromDirectories([BUNDLED_PERSONA_DIRECTORY, root]);
   assert.deepEqual(merged.diagnostics, []);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").description, "Custom reviewer");
-  assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredLifetime, undefined);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredProfile, undefined);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").filePath, join(root, "reviewer.md"));
 });
@@ -3106,7 +3176,6 @@ description: Explore product decisions
 context-requirements: >
   Provide the goal, expected behavior, constraints, Git base revision,
   and relevant scope. Do not include patch text.
-preferred-lifetime: task
 preferred-profile: deep
 extensions:
   - ../extensions/context.ts
@@ -3158,8 +3227,8 @@ This persona should be rejected.
 `);
   await writeFile(join(personaDir, "invalid-lifetime.md"), `---
 name: invalid-lifetime
-description: Invalid lifetime preference
-preferred-lifetime: temporary
+description: Unsupported persona lifetime preference
+preferred-lifetime: task
 ---
 This persona should be rejected.
 `);
@@ -3182,7 +3251,7 @@ This persona should be rejected.
   assert.equal(discovery.personas.length, 1);
   assert.equal(
     formatPersonaForModel(discovery.personas[0]),
-    "product-manager [pi]: Explore product decisions [prefers task] [prefers deep profile] [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
+    "product-manager [pi]: Explore product decisions [prefers deep profile] [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
   );
   assert.deepEqual(discovery.personas[0], {
     name: "product-manager",
@@ -3190,7 +3259,6 @@ This persona should be rejected.
     systemPrompt: "You are a product manager, not a coding agent.",
     runtime: "pi",
     contextRequirements: "Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.",
-    preferredLifetime: "task",
     preferredProfile: "deep",
     extensions: [join(root, "extensions", "context.ts")],
     skills: [
@@ -3207,7 +3275,7 @@ This persona should be rejected.
   assert.ok(discovery.diagnostics.some((diagnostic) => /extension path does not exist/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /skill path does not exist/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /context-requirements exceeds 240 characters/i.test(diagnostic)));
-  assert.ok(discovery.diagnostics.some((diagnostic) => /invalid preferred-lifetime.*temporary/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /preferred-lifetime is not valid in a persona.*select lifetime/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /model is not valid in a persona.*creation profile/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /thinking is not valid in a persona.*creation profile/i.test(diagnostic)));
 });
@@ -3413,6 +3481,14 @@ test("public Pi tool retains complete zero usage when no usage event arrives", a
   t.after(() => rm(root, { recursive: true, force: true }));
   const tools = new Map();
   const events = new Map();
+  const personaDirectory = join(root, "personas");
+  await mkdir(personaDirectory);
+  await writeFile(join(personaDirectory, "worker.md"), `---
+name: worker
+description: Execute a bounded task
+---
+Execute the assigned work.
+`);
   const backendFactory = (options) => {
     const run = { id: "run-pi-zero-usage", runtime: "pi" };
     return {
@@ -3438,10 +3514,10 @@ test("public Pi tool retains complete zero usage when no usage event arrives", a
     cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
     sessionManager: { getSessionId: () => "public-pi-zero-usage", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] }, ui: {},
   };
-  subagentsModule.default(pi, { personaDirectory: join(root, "missing-personas"), backendFactory });
+  subagentsModule.default(pi, { personaDirectory, backendFactory });
   events.get("session_start")({}, context);
   const result = await tools.get("subagent").execute("pi-zero-usage", {
-    action: "create", name: "pi-zero-usage", purpose: "Verify Pi zero usage", lifetime: "task", mode: "fresh", prompt: "Respond without usage",
+    action: "create", name: "pi-zero-usage", persona: "worker", purpose: "Verify Pi zero usage", lifetime: "task", mode: "fresh", prompt: "Respond without usage",
   }, undefined, undefined, context);
   assert.deepEqual(result.usage, {
     input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,

@@ -43,7 +43,6 @@ export interface SubagentPersona {
     systemPrompt: string;
     runtime: SubagentRuntime;
     contextRequirements?: string;
-    preferredLifetime?: SubagentLifetime;
     preferredProfile?: SubagentProfile;
     extensions: string[];
     skills: string[];
@@ -102,7 +101,6 @@ interface PersonaFrontmatter extends Record<string, unknown> {
     name?: unknown;
     description?: unknown;
     "context-requirements"?: unknown;
-    "preferred-lifetime"?: unknown;
     "preferred-profile"?: unknown;
     extension?: unknown;
     extensions?: unknown;
@@ -117,7 +115,6 @@ const CURSOR_PERSONA_TOP_LEVEL_FIELDS = new Set<string>([
     "name",
     "description",
     "context-requirements",
-    "preferred-lifetime",
     "preferred-profile",
     "extension",
     "extensions",
@@ -131,7 +128,6 @@ const CURSOR_PERSONA_SHARED_STRING_FIELDS = [
     "name",
     "description",
     "context-requirements",
-    "preferred-lifetime",
     "preferred-profile",
 ] as const;
 
@@ -324,6 +320,9 @@ function loadPersona(filePath: string): SubagentPersona {
     if (hasFrontmatterField(frontmatter, "thinking")) {
         throw new Error("thinking is not valid in a persona; use a creation profile");
     }
+    if (hasFrontmatterField(frontmatter, "preferred-lifetime")) {
+        throw new Error("preferred-lifetime is not valid in a persona; select lifetime when you create the subagent");
+    }
     if (runtime === "cursor-cloud") validateCursorSharedFrontmatter(frontmatter);
     const cursorMcps = parseCursorMcpNames(frontmatter["cursor-mcps"]);
     const cursorRepos = parseCursorRepositories(frontmatter["cursor-repos"]);
@@ -338,10 +337,6 @@ function loadPersona(filePath: string): SubagentPersona {
     const contextRequirements = contextRequirementsValue
         ? normalizePersonaContextRequirements(contextRequirementsValue)
         : undefined;
-    const preferredLifetimeValue = stringValue(frontmatter["preferred-lifetime"]);
-    if (preferredLifetimeValue && !SUBAGENT_LIFETIMES.includes(preferredLifetimeValue as SubagentLifetime)) {
-        throw new Error(`invalid preferred-lifetime "${preferredLifetimeValue}"; use one-shot, task, or persistent`);
-    }
     const preferredProfileValue = frontmatter["preferred-profile"] === undefined
         ? undefined
         : requiredFrontmatterString(frontmatter["preferred-profile"], "preferred-profile");
@@ -378,7 +373,6 @@ function loadPersona(filePath: string): SubagentPersona {
         systemPrompt: body.trim(),
         runtime,
         ...(contextRequirements ? { contextRequirements } : {}),
-        ...(preferredLifetimeValue ? { preferredLifetime: preferredLifetimeValue as SubagentLifetime } : {}),
         ...(preferredProfileValue ? { preferredProfile: preferredProfileValue as SubagentProfile } : {}),
         extensions,
         skills,

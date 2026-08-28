@@ -216,16 +216,16 @@ const SubagentParameters = Type.Object({
     purpose: Type.Optional(Type.String({ maxLength: 240, description: "Task domain" })),
     persona: Type.Optional(Type.String({
         maxLength: 64,
-        description: "Optional persona; otherwise require purpose and lifetime",
+        description: "Required for Pi; optional for Cursor Cloud",
     })),
     profile: Type.Optional(StringEnum(SUBAGENT_PROFILES, {
         description: "fast=Luna; balanced=Terra default; deep=Sol escalation",
     })),
     runtime: Type.Optional(StringEnum(["pi", "cursor-cloud"] as const, {
-        description: "Pi default; match persona",
+        description: "Pi default; persona-less requires explicit Cursor Cloud",
     })),
     lifetime: Type.Optional(StringEnum(SUBAGENT_LIFETIMES, {
-        description: "Create lifetime; one-shot needs prompt; overrides persona default",
+        description: "Create lifetime; task default; one-shot needs prompt",
     })),
     mode: Type.Optional(StringEnum(["fresh", "fork"] as const, {
         description: "Fresh default; fork parent history",
@@ -393,12 +393,12 @@ export function resolveSelectedSubagentSkills(
     return resolved;
 }
 
-function requirePersonaLessCreateFields(params: SubagentToolInput): void {
-    const missing: string[] = [];
-    if (!params.purpose?.trim()) missing.push("purpose");
-    if (!params.lifetime) missing.push("lifetime");
-    if (missing.length > 0) {
-        throw new Error(`Persona-less create requires explicit ${missing.join(", ")}; retry with purpose and lifetime`);
+function validatePersonaLessModelCreate(params: SubagentToolInput): void {
+    if (params.runtime !== "cursor-cloud") {
+        throw new Error('Persona-less Pi create is not valid; use persona "worker" for general execution work');
+    }
+    if (!params.purpose?.trim()) {
+        throw new Error("Persona-less Cursor Cloud create requires an explicit purpose");
     }
 }
 
@@ -495,12 +495,11 @@ function formatSubagentForModel(summary: PersistentSubagentSummary, includeRunti
 }
 
 export function formatPersonaForModel(persona: SubagentPersona): string {
-    const lifetimePreference = persona.preferredLifetime ? ` [prefers ${persona.preferredLifetime}]` : "";
     const profilePreference = persona.preferredProfile ? ` [prefers ${persona.preferredProfile} profile]` : "";
     const requirement = persona.contextRequirements
         ? ` [context required: ${persona.contextRequirements}]`
         : "";
-    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${lifetimePreference}${profilePreference}${requirement}`;
+    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${profilePreference}${requirement}`;
 }
 
 export type SubagentsCommandArgs =
@@ -1037,11 +1036,11 @@ export default function (
         description: `Retain up to ${MAX_RETAINED_SUBAGENTS}; run up to ${MAX_CONCURRENT_SUBAGENTS} subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.`,
         promptSnippet: "Delegate isolated work",
         promptGuidelines: [
-            "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-            `Use subagent one-shot for one response, task for validation, persistent for related work. Run at most ${MAX_CONCURRENT_SUBAGENTS} at once; idle subagents do not count. Satisfy NEEDS; stop complete subagents.`,
+            "Before subagent create, list unknown options and provide context. Use worker for general Pi execution; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
+            `Default to task subagents. Use one-shot only when continuity cannot help; use persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle subagents do not count. Satisfy NEEDS; stop complete subagents.`,
             "Give subagent objective, scope, and output; avoid adjacent work.",
-            "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
-            "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",
+            "Delegate substantive isolated work to subagents; keep only coordination and necessary integration in the parent context.",
+            "Prefer fresh context. Fork only when parent history is material. Inspect only enough to partition work by shared context and specialty, then delegate. Avoid duplicate investigation. Reuse subagents for related work. Parallelize only separate contexts or specialties.",
         ],
         parameters: SubagentParameters,
         prepareArguments: prepareSubagentArguments,
@@ -1064,7 +1063,7 @@ export default function (
             switch (params.action) {
                 case "create": {
                     const hasPersona = Boolean(params.persona?.trim());
-                    if (!hasPersona) requirePersonaLessCreateFields(params);
+                    if (!hasPersona) validatePersonaLessModelCreate(params);
                     const persona = hasPersona ? personaByName(discovery.personas, params.persona) : undefined;
                     const runtime = params.runtime ?? persona?.runtime ?? "pi";
                     if (params.runtime && persona && params.runtime !== persona.runtime) {
@@ -1076,7 +1075,7 @@ export default function (
                     const selectedSkillPaths = resolveSelectedSubagentSkills(params.skills, parentDiscoveredSkills);
                     validateSelectedPersonaSkills(persona, params.skills, parentDiscoveredSkills);
                     const initialPrompt = params.prompt?.trim();
-                    const lifetime: SubagentLifetime = params.lifetime ?? persona?.preferredLifetime ?? "persistent";
+                    const lifetime: SubagentLifetime = params.lifetime ?? "task";
                     if (context && !initialPrompt) throw new Error("context requires an accompanying prompt");
                     if (lifetime === "one-shot" && !initialPrompt) {
                         throw new Error("one-shot subagents require an initial prompt");
@@ -1253,13 +1252,11 @@ export default function (
                             description,
                             runtime,
                             contextRequirements,
-                            preferredLifetime,
                             preferredProfile,
                         }) => ({
                             name,
                             description,
                             runtime,
-                            ...(preferredLifetime ? { preferredLifetime } : {}),
                             ...(preferredProfile ? { preferredProfile } : {}),
                             ...(contextRequirements ? { contextRequirements } : {}),
                         }));

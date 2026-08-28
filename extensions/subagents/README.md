@@ -9,7 +9,7 @@ The extension supports macOS and Linux. It has two runtimes:
 | `pi` | Runs an isolated Pi RPC process. The process shares the local worktree, host authority, and Pi tool configuration. |
 | `cursor-cloud` | Runs a remote Cursor Cloud agent through `@cursor/sdk`. The agent inspects a pushed repository commit and configured Cloud MCPs. It does not use local Cursor ACP. |
 
-Pi is the default runtime for persona-less model-tool creation. A persona selects its runtime. An explicit model-tool `runtime` must match the persona runtime.
+Pi is the default runtime. Model-tool Pi creation requires an explicit persona. Use `worker` for general execution work. Persona-less model-tool creation requires an explicit `cursor-cloud` runtime. A persona selects its runtime. An explicit model-tool `runtime` must match the persona runtime.
 
 ## Commands
 
@@ -50,18 +50,17 @@ The parent model receives one `subagent` tool with five actions:
 subagent({
   action: "create",
   mode: "fresh",
+  persona: "worker",
   profile: "balanced",
-  lifetime: "task",
   name: "create-pr",
   purpose: "Create the requested pull request",
   skills: ["create-pr", "writing-style"],
-  context: "Goal: create a pull request for the current branch",
+  context: "Own the PR workflow. Preserve concurrent changes. Validate the created pull request.",
   prompt: "Execute the requested PR workflow.",
 })
 subagent({
   action: "create",
   runtime: "cursor-cloud",
-  lifetime: "task",
   name: "incident-investigator",
   purpose: "Investigate the reported production incident",
   prompt: "Inspect the evidence and recommend a local fix.",
@@ -74,7 +73,7 @@ subagent({ action: "stop", id: "incident-investigator" })
 
 Use `subagent({ action: "list", kind: "personas" })` to find up to 20 persona templates. The result includes each persona runtime. If more personas exist, use the returned `offset`. `limit` selects 1 through 50 entries. A persona name must match exactly.
 
-A model-tool `create` without `persona` needs an explicit `purpose` and `lifetime`. Persona-based creation uses persona defaults. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
+A model-tool `create` defaults to a `task` lifetime. Pi creation requires a persona. Use `worker` for general implementation or production work when no specialist fits. Persona-less creation is available only with an explicit `cursor-cloud` runtime and purpose. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
 
 Selected Pi skills add to persona skills. The extension rejects a selected skill with the same name as a different persona skill. Each skill name must match a skill that Pi discovered in the parent session. The model tool accepts skill names, not paths.
 
@@ -87,15 +86,17 @@ Selected Pi skills add to persona skills. The extension rejects a selected skill
 
 A Pi model-tool fork can fall back to fresh context when the parent session is ephemeral. The tool reports that fallback. A Cursor fork summary failure returns an error. It does not change the request to fresh mode.
 
-Give each subagent an exact objective, scope, and requested output. Use `list` and `status` before you create a new instance. Model-facing creation rejects an exact active purpose match in the same runtime. It directs the parent to the retained instance. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
+Give each subagent an exact objective, scope, and requested output. For a worker, also give acceptance criteria, explicit file or responsibility ownership, concurrent-work constraints, and required validation. Use `list` and `status` before you create a new instance. Model-facing creation rejects an exact active purpose match in the same runtime. It directs the parent to the retained instance. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
 
 A parent `create` with an initial prompt and a parent `prompt` wait for the subagent result. A human can steer or continue Pi work from the subagent panel. A human can continue Cursor work after settlement.
 
 Subagent conversation stays private from the parent model context. `app.message.copy` places a response in the parent editor. A parent-tool result returns a response to the parent. Cursor runtime prompts are sent to Cursor Cloud.
 
-- Create a subagent only when isolation or retained continuity helps.
+- Delegate substantive isolated work. Keep only coordination and necessary integration in the parent context.
+- Inspect only enough to partition work by shared context and specialty.
+- Reuse subagents for related work. Avoid duplicate investigation.
+- Parallelize only separate contexts or specialties. Give concurrent workers non-overlapping ownership.
 - Prefer fresh context when a concise handoff is sufficient.
-- Reuse one task subagent for one complete objective.
 
 ## Context requirements and forks
 
@@ -107,9 +108,9 @@ The model-tool `context` field is limited to 8,000 characters. The Cursor runtim
 
 ## Lifetimes
 
-An explicit `lifetime` overrides `preferred-lifetime`. A persona with no lifetime preference defaults to `persistent`. A persona-less model-tool create requires an explicit lifetime. Human `/subagent` sessions are always persistent and ignore persona lifetime preferences.
+A model-tool create defaults to `task`. An explicit `lifetime` overrides this default. Human `/subagent` sessions are always `persistent`.
 
-- `one-shot` is for bounded independent work. A model-tool one-shot requires an initial prompt. A Pi one-shot stops after success, cancellation, or failure. A Cursor one-shot archives only after result delivery.
+- `one-shot` is for bounded independent work when continuity cannot help. A model-tool one-shot requires an explicit lifetime and an initial prompt. A Pi one-shot stops after success, cancellation, or failure. A Cursor one-shot archives only after result delivery.
 - `task` retains context for follow-up and validation.
 - `persistent` retains context for related work until you stop it.
 
@@ -117,14 +118,15 @@ A blocked, truncated, incomplete, or response-less one-shot becomes a task. A Cu
 
 One parent session can retain up to 20 non-stopped subagents. At most four subagents can work concurrently. Dormant and idle subagents do not use concurrent work slots. A new prompt fails when four other subagents are working. Stopping an instance frees retained capacity. The registry also keeps metadata for the 20 most recently stopped instances.
 
-The bundled personas use these defaults:
+The bundled personas use these profile defaults:
 
-| Persona | Lifetime | Profile |
-| --- | --- | --- |
-| `codebase-explorer` | `persistent` | `fast` |
-| `reviewer` | `task` | `balanced` |
-| `test-analyst` | `one-shot` | `balanced` |
-| `doc-auditor` | `one-shot` | `fast` |
+| Persona | Profile |
+| --- | --- |
+| `explorer` | `fast` |
+| `reviewer` | `balanced` |
+| `test-analyst` | `balanced` |
+| `worker` | `balanced` |
+| `doc-auditor` | `fast` |
 
 ## Blocked subagents
 
@@ -165,7 +167,7 @@ Cursor thinking controls appear only when the selected model has at least two us
 
 ## Personas
 
-The extension bundles `reviewer`, `codebase-explorer`, `test-analyst`, and `doc-auditor` in `extensions/subagents/personas/`. Additional Markdown personas in `~/.pi/agent/personas/` load after bundled personas. A user persona with the same name overrides a bundled persona. Run `/reload` after you change a persona file.
+The extension bundles `worker`, `reviewer`, `explorer`, `test-analyst`, and `doc-auditor` in `extensions/subagents/personas/`. Additional Markdown personas in `~/.pi/agent/personas/` load after bundled personas. A user persona with the same name overrides a bundled persona. Run `/reload` after you change a persona file.
 
 ### Pi persona example
 
@@ -176,7 +178,6 @@ description: Explore product requirements and tradeoffs
 runtime: pi
 context-requirements: >
   Provide the desired outcome, users, constraints, and relevant product scope.
-preferred-lifetime: task
 preferred-profile: balanced
 extensions:
   - ../extensions/product-context.ts
@@ -195,7 +196,6 @@ name: incident-investigator
 description: Investigate production incidents
 runtime: cursor-cloud
 context-requirements: Provide the incident impact, time range, and affected service.
-preferred-lifetime: task
 cursor-mcps:
   - datadog
   - sentry
@@ -215,10 +215,9 @@ Both runtimes support these fields:
 - `description`: Persona list description. The extension normalizes it to one line and limits it to 240 characters.
 - `runtime`: `pi` is the default. Use `cursor-cloud` for a Cursor Cloud persona.
 - `context-requirements`: Optional first-parent-prompt contract. The extension normalizes it to one line and limits it to 240 characters.
-- `preferred-lifetime`: Optional `one-shot`, `task`, or `persistent` default.
 - `preferred-profile`: Optional `fast`, `balanced`, or `deep` default. An explicit model-tool profile overrides it.
 
-Persona frontmatter rejects `model` and `thinking`. Use the model-tool `profile` input for initial model selection.
+Persona frontmatter rejects `preferred-lifetime`, `model`, and `thinking`. Select lifetime when you create a model subagent. Use the model-tool `profile` input for initial model selection.
 
 Pi-only fields are:
 
@@ -348,7 +347,7 @@ The Pi runtime leaves `--tools` unset. A Pi subagent receives Pi's normal config
 
 Pi disables ambient extension, skill, prompt-template, and theme discovery. Pi adds the bundled extensions, persona resources, and selected skills explicitly. This prevents recursive subagent loading and unrelated startup code.
 
-> **Trust boundary:** Separate Pi processes and conversation context do not sandbox tools or the filesystem. Pi subagents share the parent worktree and host authority. Coordinate concurrent edits. Attach only trusted Pi persona extensions. Cursor Cloud uses remote repository and configured MCP permissions. Cursor does not receive Pi extensions or Pi skills. Repository access does not automatically expose uncommitted or local-only worktree state. Parent prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes. Credential redaction is a mitigation, not a complete data-loss boundary.
+> **Trust boundary:** Separate Pi processes and conversation context do not sandbox tools or the filesystem. Pi subagents share the parent worktree and host authority. Give concurrent workers non-overlapping file, module, or responsibility ownership. A worker must preserve unrelated changes and stop when ownership overlaps. Attach only trusted Pi persona extensions. Cursor Cloud uses remote repository and configured MCP permissions. Cursor does not receive Pi extensions or Pi skills. Repository access does not automatically expose uncommitted or local-only worktree state. Parent prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes. Credential redaction is a mitigation, not a complete data-loss boundary.
 
 ## Context, results, and limits
 

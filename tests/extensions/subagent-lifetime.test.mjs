@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -105,6 +105,14 @@ async function createTool(t, runtime, log, responseFor, stopOutcome = "stopped")
   const stopOutcomes = Array.isArray(stopOutcome) ? [...stopOutcome] : [stopOutcome];
   const finalStopOutcome = stopOutcomes.at(-1) ?? "stopped";
   t.after(() => rm(root, { recursive: true, force: true }));
+  const personaDirectory = join(root, "personas");
+  await mkdir(personaDirectory);
+  await writeFile(join(personaDirectory, "worker.md"), `---
+name: worker
+description: Execute a bounded task
+---
+Execute the assigned work.
+`);
   const tools = new Map();
   const events = new Map();
   const pi = {
@@ -116,7 +124,7 @@ async function createTool(t, runtime, log, responseFor, stopOutcome = "stopped")
     on(name, listener) { events.set(name, listener); },
   };
   subagentsModule.default(pi, {
-    personaDirectory: join(root, "missing-personas"),
+    personaDirectory,
     backendFactory: fakeLifetimeBackendFactory(log, responseFor),
     cursorLifecycle: {
       async reconcile(stored) { return { remoteLifecycle: stored.remoteLifecycle, currentRunId: stored.currentRunId }; },
@@ -163,6 +171,7 @@ async function endToolResult(events, result, context) {
 test("shared lifetime contract keeps Pi and Cursor results, promotions, and follow-ups aligned", async (t) => {
   for (const runtime of ["pi", "cursor-cloud"]) {
     const log = [];
+    const persona = runtime === "pi" ? { persona: "worker" } : {};
     const { tool, context, events } = await createTool(t, runtime, log, (prompt) =>
       prompt.includes("BLOCK")
         ? "BLOCKED: Missing test evidence\nNEEDS: Targeted test output"
@@ -174,6 +183,7 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const oneShot = await tool.execute(`${runtime}-one-shot`, {
       action: "create",
       runtime,
+      ...persona,
       name: `${runtime}-one-shot`,
       purpose: "Return one complete result",
       lifetime: "one-shot",
@@ -205,6 +215,7 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const task = await tool.execute(`${runtime}-task`, {
       action: "create",
       runtime,
+      ...persona,
       name: `${runtime}-task`,
       purpose: "Validate continuity",
       lifetime: "task",
@@ -224,6 +235,7 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const persistent = await tool.execute(`${runtime}-persistent`, {
       action: "create",
       runtime,
+      ...persona,
       name: `${runtime}-persistent`,
       purpose: "Keep related work",
       lifetime: "persistent",
@@ -242,6 +254,7 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const blocked = await tool.execute(`${runtime}-blocked`, {
       action: "create",
       runtime,
+      ...persona,
       name: `${runtime}-blocked`,
       purpose: "Request missing evidence",
       lifetime: "one-shot",
@@ -254,6 +267,7 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const truncated = await tool.execute(`${runtime}-truncated`, {
       action: "create",
       runtime,
+      ...persona,
       name: `${runtime}-truncated`,
       purpose: "Keep a truncated answer",
       lifetime: "one-shot",
@@ -379,7 +393,7 @@ test("Pi retries one-shot cleanup when finalization stop rejects", async (t) => 
   t.after(() => { PersistentSubagentRegistry.prototype.stop = originalStop; });
   const { tool, context } = await createTool(t, "pi", log, () => "Complete Pi result");
   const result = await tool.execute("pi-one-shot-stop-retry", {
-    action: "create", runtime: "pi", name: "pi-one-shot-stop-retry",
+    action: "create", runtime: "pi", persona: "worker", name: "pi-one-shot-stop-retry",
     purpose: "Retry one-shot cleanup after a local stop failure", lifetime: "one-shot", prompt: "return one result",
   }, undefined, undefined, context);
   assert.equal(result.details.ok, false);
