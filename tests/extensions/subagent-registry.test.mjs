@@ -2119,7 +2119,18 @@ test("Cursor direct panel open synchronizes an external observation before Retur
             resolve,
           );
           panelBusyStates.push(registry.resolve(stored.id).controller.state.busy);
-          setTimeout(() => { panel.handleInput("copy"); panel.handleInput("close"); }, 10);
+          void (async () => {
+            for (let attempt = 0; attempt < 100; attempt++) {
+              const state = registry.resolve(stored.id).controller.state;
+              if (state.connected && state.busy) {
+                panelBusyStates.push(state.busy);
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 1));
+            }
+            panel.handleInput("copy");
+            panel.handleInput("close");
+          })();
         });
       },
     },
@@ -2142,7 +2153,8 @@ test("Cursor direct panel open synchronizes an external observation before Retur
     { action: "cancel" },
     "direct open synchronizes the external run before Return can use the local result",
   );
-  assert.equal(panelBusyStates[0], true, "Return is unavailable while the reconciled external run is active");
+  assert.equal(panelBusyStates[0], false, "the panel opens before Cursor reconciliation completes");
+  assert.equal(panelBusyStates[1], true, "Return is unavailable while the reconciled external run is active");
   assert.equal(controller.state.lastCompletedAssistantText, undefined, "observation start clears the local panel return value");
   assert.equal(observerSubscriptions, 1, "direct open attaches one observer for the reconciled external run");
   await assert.rejects(registry.prompt(context, stored.id, "Do not send while external work runs"), /active run/i);
