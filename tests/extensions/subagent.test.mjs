@@ -829,22 +829,30 @@ test("expanded panel details render real Pi controller state without backend met
   const active = renderSubagentPanelDetails(controller.state, 80, theme).join("\n");
   assert.match(active, /Connection: pi\/pi-connection-/);
   assert.match(active, /Active run ID: pi-run-/);
-  assert.match(active, /Lifecycle: ready/);
+  assert.doesNotMatch(active, /(?:Lifecycle|Usage):/);
 
   emit({ type: "agent_settled" });
   await waitFor(() => !controller.state.busy);
   const settled = renderSubagentPanelDetails(controller.state, 80, theme).join("\n");
   assert.match(settled, /Last run ID: pi-run-/);
-  assert.match(settled, /Lifecycle: ready/);
+  assert.doesNotMatch(settled, /(?:Lifecycle|Usage):/);
   await controller.stop();
 });
 
-test("expanded panel details render complete Cursor delivery metadata together", async () => {
+test("empty Cursor panel details stay hidden", () => {
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  assert.deepEqual(renderSubagentPanelDetails({
+    connection: { runtime: "cursor-cloud", id: "cursor-local" },
+    details: {},
+    usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+  }, 80, theme), []);
+});
+
+test("expanded panel details omit Cursor status summaries and render delivery metadata", async () => {
   const harness = makeControllerHarness({
     panelDetails: {
       agent: { id: "agent-complete" },
       run: { id: "run-complete" },
-      lifecycle: "idle",
       repositories: [{ url: "https://github.com/example/complete", startingRef: "f".repeat(40) }],
       artifacts: [{
         id: "artifact-complete", name: "complete-report", path: "reports/complete.md",
@@ -862,12 +870,10 @@ test("expanded panel details render complete Cursor delivery metadata together",
   };
   const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
   const rendered = renderSubagentPanelDetails(harness.controller.state, 240, theme).join("\n");
-  assert.match(rendered, /Connection: pi\/fake-connection/);
+  assert.doesNotMatch(rendered, /(?:Connection|Lifecycle|Usage):/);
   assert.match(rendered, /Agent ID: agent-complete/);
   assert.match(rendered, /Run ID: run-complete/);
-  assert.match(rendered, /Lifecycle: idle/);
   assert.match(rendered, /Duration: 1\.2 s/);
-  assert.match(rendered, /Usage: 2 turns ↑1\.0k ↓500 \$0\.1234/);
   assert.match(rendered, /Repository: https:\/\/github\.com\/example\/complete @ f{40}/);
   assert.match(rendered, /Artifact: complete-report \(path reports\/complete\.md, URL https:\/\/cursor\.example\/artifacts\/complete, 42 bytes, updated 2025-01-02T03:04:05Z, ID artifact-complete\)/);
   assert.match(rendered, /Runtime warning: The worktree has local changes\./);
@@ -881,7 +887,6 @@ test("expanded panel details bound Cursor metadata", async () => {
     panelDetails: {
       agent: { id: "agent-bounded" },
       run: { id: "run-bounded" },
-      lifecycle: "idle",
       repositories: [
         { url: "https://github.com/example/project", startingRef: sha },
         ...Array.from({ length: 80 }, (_, index) => ({ url: `https://github.com/example/${index}-${"r".repeat(2_000)}`, startingRef: sha })),
