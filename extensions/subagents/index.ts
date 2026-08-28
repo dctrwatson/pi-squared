@@ -7,7 +7,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type Usage } from "@earendil-works/pi-ai";
 import {
     getAgentDir,
     parseFrontmatter,
@@ -20,6 +20,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
 import type { ToolFailureDetails } from "../codex-tools/tool-result.ts";
+import type { SubagentBackendFactory, SubagentUsage } from "./backend.ts";
 import {
     BUNDLED_PERSONA_DIRECTORY,
     getSubagentCommandArgumentCompletions,
@@ -28,8 +29,10 @@ import {
     parseSubagentCommandArgs,
     SUBAGENT_COMMAND_HELP_TEXT,
     SUBAGENT_LIFETIMES,
+    SUBAGENT_PROFILES,
     type SubagentPersona,
     type SubagentLifetime,
+    type SubagentProfile,
 } from "./personas.ts";
 import {
     formatSubagentSummary,
@@ -37,7 +40,12 @@ import {
     normalizeSubagentPurpose,
     PersistentSubagentRegistry,
     registryErrorMessage,
+    CURSOR_DELIVERY_RECEIPT_VERSION,
+    SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY,
     SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
+    SubagentCursorPromptFailure,
+    type CursorSubagentLifecyclePort,
+    type CursorDeliveryReceipt,
     type PersistentSubagentSummary,
 } from "./registry.ts";
 
@@ -52,6 +60,7 @@ export {
     parseSubagentCommandArgs,
     SUBAGENT_COMMAND_HELP_TEXT,
     SUBAGENT_EXTENSION_PATHS,
+    type CursorPersonaRepository,
     type SubagentContextMode,
     type SubagentPersona,
     type SubagentPersonaDiscovery,
@@ -67,7 +76,86 @@ export {
     type ParsedSubagentBlocker,
 } from "./blockers.ts";
 export { getPiInvocation } from "./rpc.ts";
+export {
+    SubagentBackendError,
+    type SubagentBackend,
+    type SubagentBackendCapabilities,
+    type SubagentBackendErrorCode,
+    type SubagentBackendEvent,
+    type SubagentBackendFactory,
+    type SubagentBackendState,
+    type SubagentModel,
+    type SubagentPromptRequestResult,
+    type SubagentRun,
+    type SubagentRunCompletion,
+    type SubagentRuntime,
+} from "./backend.ts";
 export { getSubagentPanelWidths } from "./ui.ts";
+export {
+    CursorCloudBackend,
+    createCursorSubagentLifecyclePort,
+    type CursorCloudBackendConfiguration,
+} from "./cursor-backend.ts";
+export { createSubagentBackend } from "./backend-factory.ts";
+export {
+    CursorSdkGateway,
+    loadCursorSdkPort,
+    mapCursorSdkError,
+    requireCursorApiKey,
+    type CursorSdkGatewayOptions,
+    type CursorSdkLoader,
+    type CursorSdkPort,
+    type CursorSdkAgent,
+    type CursorSdkRun,
+} from "./cursor-sdk.ts";
+export {
+    buildCursorRepositoryList,
+    CursorConnectedRepositoryLookup,
+    detectCursorPrimaryRepository,
+    normalizeCursorGitHubUrl,
+    normalizeCursorStartingRef,
+    systemGitCommandPort,
+    type CursorPrimaryRepository,
+    type CursorRepository,
+    type GitCommandPort,
+    type GitCommandResult,
+} from "./cursor-repositories.ts";
+export {
+    CURSOR_PROFILE_TARGETS,
+    CursorModelCatalog,
+    normalizeCursorModelCatalog,
+    persistableCursorModelSelection,
+    type CursorCatalogModel,
+    type CursorCatalogParameter,
+    type CursorCatalogVariant,
+    type CursorExecutionProfile,
+    type CursorModelCatalogClient,
+    type CursorModelParameterSelection,
+    type CursorPanelModel,
+    type CursorResolvedModel,
+    type PersistedCursorModelSelection,
+} from "./cursor-models.ts";
+export {
+    buildCursorCloudBootstrap,
+    buildCursorCloudFollowUp,
+    createCursorForkHandoff,
+    createCursorForkHandoffFromSession,
+    createCursorForkHandoffWithPiSummary,
+    createPiCursorForkSummaryGenerator,
+    omitCursorRepositorySource,
+    persistableCursorForkHandoff,
+    prepareCursorForkSummarySource,
+    redactCursorHandoffCredentials,
+    type CursorBootstrapOptions,
+    type CursorBranchSummaryPrimitive,
+    type CursorForkHandoff,
+    type CursorForkHandoffMetadata,
+    type CursorForkParentSession,
+    type CursorForkSummaryGenerator,
+    type CursorPiForkContext,
+    type CursorPiForkSummaryGeneratorOptions,
+    type PersistedCursorForkHandoff,
+} from "./cursor-context.ts";
 export {
     createActiveTurnForkSnapshot,
     selectForkSnapshotEntries,
@@ -79,10 +167,24 @@ export {
     formatSubagentSummary,
     MAX_PERSISTENT_SUBAGENTS,
     MAX_RETAINED_STOPPED_SUBAGENTS,
+    CURSOR_DELIVERY_RECEIPT_VERSION,
+    SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY,
     SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
+    SUBAGENT_REGISTRY_VERSION,
     PersistentSubagentRegistry,
+    SubagentCursorPromptFailure,
+    type CursorSubagentLifecyclePort,
+    type CursorSubagentReconciliation,
+    type CursorSubagentStopOutcome,
+    type CursorSubagentStopProgress,
+    type StoredCursorSubagent,
+    type StoredPiSubagent,
+    type StoredSubagent,
     type PersistentSubagentStatus,
     type PersistentSubagentSummary,
+    type SubagentRuntimeMetadata,
+    type CursorRemoteMetadata,
+    type CursorDeliveryReceipt,
 } from "./registry.ts";
 
 const MAX_PARENT_CONTEXT_CHARS = 8_000;
@@ -94,6 +196,14 @@ export const SUBAGENT_EXECUTION_PROFILES = {
     balanced: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
     deep: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
 } as const;
+
+export function resolveSubagentCreationProfile(
+    persona: SubagentPersona | undefined,
+    requestedProfile: SubagentProfile | undefined,
+): SubagentProfile {
+    return requestedProfile ?? persona?.preferredProfile ?? "balanced";
+}
+
 type SubagentErrorCode = "INVALID_INPUT" | "CANCELLED" | "SUBAGENT_FAILED";
 
 const SubagentParameters = Type.Object({
@@ -105,8 +215,11 @@ const SubagentParameters = Type.Object({
         maxLength: 64,
         description: "Optional persona; otherwise require purpose and lifetime",
     })),
-    profile: Type.Optional(StringEnum(["fast", "balanced", "deep"] as const, {
+    profile: Type.Optional(StringEnum(SUBAGENT_PROFILES, {
         description: "fast=Luna; balanced=Terra default; deep=Sol escalation",
+    })),
+    runtime: Type.Optional(StringEnum(["pi", "cursor-cloud"] as const, {
+        description: "Pi default; match persona",
     })),
     lifetime: Type.Optional(StringEnum(SUBAGENT_LIFETIMES, {
         description: "Create lifetime; one-shot needs prompt; overrides persona default",
@@ -145,6 +258,7 @@ function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
     ));
     const invalidAction = !["create", "list", "prompt", "status", "stop"].includes(prepared.action as string);
     const invalidProfile = prepared.profile !== undefined && !["fast", "balanced", "deep"].includes(prepared.profile as string);
+    const invalidRuntime = prepared.runtime !== undefined && !["pi", "cursor-cloud"].includes(prepared.runtime as string);
     const invalidLifetime = prepared.lifetime !== undefined && !SUBAGENT_LIFETIMES.includes(prepared.lifetime as SubagentLifetime);
     const invalidMode = prepared.mode !== undefined && !["fresh", "fork"].includes(prepared.mode as string);
     const invalidSkills = prepared.skills !== undefined && (!Array.isArray(prepared.skills)
@@ -153,7 +267,7 @@ function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
     const invalidKind = prepared.kind !== undefined && !["subagents", "personas"].includes(prepared.kind as string);
     const invalidOffset = prepared.offset !== undefined && (!Number.isInteger(prepared.offset) || (prepared.offset as number) < 0 || (prepared.offset as number) > 10_000);
     const invalidLimit = prepared.limit !== undefined && (!Number.isInteger(prepared.limit) || (prepared.limit as number) < 1 || (prepared.limit as number) > 50);
-    if (invalidString || invalidLength || invalidAction || invalidProfile || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
+    if (invalidString || invalidLength || invalidAction || invalidProfile || invalidRuntime || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
         return { action: "list", context: "invalid input" };
     }
     return prepared as SubagentToolInput;
@@ -166,7 +280,7 @@ function subagentFailure(error: unknown, signal: AbortSignal | undefined): {
     const message = error instanceof Error ? error.message : String(error);
     const code: SubagentErrorCode = signal?.aborted
         ? "CANCELLED"
-        : /(^context |^profile |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
+        : /(^context |^profile |^runtime |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
             ? "INVALID_INPUT"
             : "SUBAGENT_FAILED";
     const bounded = Buffer.byteLength(message) <= MAX_SUBAGENT_ERROR_BYTES
@@ -354,19 +468,36 @@ function requiredContextError(persona: SubagentPersona): Error {
     );
 }
 
-function formatSubagentForModel(summary: PersistentSubagentSummary): string {
+function formatSubagentStopResult(summary: PersistentSubagentSummary): string {
+    switch (summary.status) {
+        case "stopped":
+            return `Stopped ${summary.name}.`;
+        case "archive-pending":
+            return `Cancellation was confirmed for ${summary.name}, but archival is pending. Retry action "stop".`;
+        case "remote-state-unknown":
+            return `Stop for ${summary.name} is not confirmed because remote state is unknown. Use action "status", then retry action "stop".`;
+        case "stopping":
+            return `Stopping ${summary.name}. Use action "status" to confirm completion.`;
+        default:
+            return `Stop for ${summary.name} is not complete (${summary.status}). Use action "status", then retry action "stop".`;
+    }
+}
+
+function formatSubagentForModel(summary: PersistentSubagentSummary, includeRuntime = false): string {
     const blocker = summary.blocker
         ? `; blocked: ${summary.blocker.reason}; needs: ${summary.blocker.need}`
         : "";
-    return `${summary.name} [${summary.status}, ${summary.lifetime}]: ${summary.purpose}${blocker}`;
+    const runtime = includeRuntime ? `${summary.runtime}, ` : "";
+    return `${summary.name} [${runtime}${summary.status}, ${summary.lifetime}]: ${summary.purpose}${blocker}`;
 }
 
 export function formatPersonaForModel(persona: SubagentPersona): string {
-    const preference = persona.preferredLifetime ? ` [prefers ${persona.preferredLifetime}]` : "";
+    const lifetimePreference = persona.preferredLifetime ? ` [prefers ${persona.preferredLifetime}]` : "";
+    const profilePreference = persona.preferredProfile ? ` [prefers ${persona.preferredProfile} profile]` : "";
     const requirement = persona.contextRequirements
         ? ` [context required: ${persona.contextRequirements}]`
         : "";
-    return `${persona.name}: ${normalizeSubagentPurpose(persona.description)}${preference}${requirement}`;
+    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${lifetimePreference}${profilePreference}${requirement}`;
 }
 
 export type SubagentsCommandArgs =
@@ -375,7 +506,7 @@ export type SubagentsCommandArgs =
     | { action: "open"; target: ""; error: string };
 
 const SUBAGENT_ACTION_FIELDS: Record<string, ReadonlySet<string>> = {
-    create: new Set(["action", "name", "purpose", "persona", "profile", "lifetime", "mode", "skills", "prompt", "context"]),
+    create: new Set(["action", "name", "purpose", "persona", "profile", "runtime", "lifetime", "mode", "skills", "prompt", "context"]),
     list: new Set(["action", "kind", "offset", "limit"]),
     prompt: new Set(["action", "id", "prompt", "context"]),
     status: new Set(["action", "id"]),
@@ -398,15 +529,65 @@ function deferredRegistryDetails(mutation: unknown): Record<string, unknown> {
     return mutation === undefined ? {} : { [SUBAGENT_REGISTRY_TOOL_DETAILS_KEY]: mutation };
 }
 
+/** The Pi tool protocol has no representation for partial usage. Omit it rather
+ * than turn unreported Cloud fields into confirmed zero values. */
+function completeToolUsage(usage: SubagentUsage): Usage | undefined {
+    if (usage.input === undefined || usage.output === undefined || usage.cacheRead === undefined
+        || usage.cacheWrite === undefined || usage.totalTokens === undefined
+        || usage.cost?.input === undefined || usage.cost.output === undefined
+        || usage.cost.cacheRead === undefined || usage.cost.cacheWrite === undefined || usage.cost.total === undefined) return undefined;
+    return {
+        input: usage.input,
+        output: usage.output,
+        cacheRead: usage.cacheRead,
+        cacheWrite: usage.cacheWrite,
+        totalTokens: usage.totalTokens,
+        cost: {
+            input: usage.cost.input,
+            output: usage.cost.output,
+            cacheRead: usage.cost.cacheRead,
+            cacheWrite: usage.cost.cacheWrite,
+            total: usage.cost.total,
+        },
+    };
+}
+
+/** Keep reported partial Cloud fields in details without inventing accounting values. */
+function partialToolUsage(usage: SubagentUsage): SubagentUsage | undefined {
+    const cost = usage.cost;
+    const partialCost = cost && (cost.input !== undefined || cost.output !== undefined
+        || cost.cacheRead !== undefined || cost.cacheWrite !== undefined || cost.total !== undefined)
+        ? {
+            ...(cost.input !== undefined ? { input: cost.input } : {}),
+            ...(cost.output !== undefined ? { output: cost.output } : {}),
+            ...(cost.cacheRead !== undefined ? { cacheRead: cost.cacheRead } : {}),
+            ...(cost.cacheWrite !== undefined ? { cacheWrite: cost.cacheWrite } : {}),
+            ...(cost.total !== undefined ? { total: cost.total } : {}),
+        }
+        : undefined;
+    const partial = {
+        ...(usage.input !== undefined ? { input: usage.input } : {}),
+        ...(usage.output !== undefined ? { output: usage.output } : {}),
+        ...(usage.cacheRead !== undefined ? { cacheRead: usage.cacheRead } : {}),
+        ...(usage.cacheWrite !== undefined ? { cacheWrite: usage.cacheWrite } : {}),
+        ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+        ...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
+        ...(partialCost ? { cost: partialCost } : {}),
+    };
+    return Object.keys(partial).length > 0 ? partial : undefined;
+}
+
 function incompleteResponseReason(result: {
     text: string;
     responseProduced?: boolean;
     handledWithoutAgent?: boolean;
     stopReason?: string;
+    truncated?: true;
 }): string | undefined {
     if (result.handledWithoutAgent) return "the prompt was handled without an agent response";
     const responseProduced = result.responseProduced ?? Boolean(result.text.trim());
     if (!responseProduced || !result.text.trim()) return "the subagent produced no visible response";
+    if (result.truncated) return "the retained completion reached its size limit";
     if (result.stopReason === "length") return "the model reached its output limit";
     if (result.stopReason && result.stopReason !== "stop") {
         return `the model stopped with reason ${result.stopReason}`;
@@ -500,9 +681,16 @@ function getSubagentsArgumentCompletions(
     return completions.length > 0 ? completions : null;
 }
 
+export interface SubagentExtensionTestSeam {
+    /** Replace backend construction for isolated extension integration tests. */
+    readonly backendFactory?: SubagentBackendFactory;
+    /** Replace Cursor lifecycle transport for isolated extension integration tests. */
+    readonly cursorLifecycle?: CursorSubagentLifecyclePort;
+}
+
 export default function (
     pi: ExtensionAPI,
-    options: { personaDirectory?: string } = {},
+    options: { personaDirectory?: string } & SubagentExtensionTestSeam = {},
 ) {
     const discovery = options.personaDirectory
         ? loadSubagentPersonas(options.personaDirectory)
@@ -510,77 +698,127 @@ export default function (
             BUNDLED_PERSONA_DIRECTORY,
             path.join(getAgentDir(), "personas"),
         ]);
-    const registry = new PersistentSubagentRegistry(pi);
+    const registry = new PersistentSubagentRegistry(pi, options.backendFactory, options.cursorLifecycle);
     let parentDiscoveredSkills: ParentDiscoveredSkill[] = [];
     let diagnosticsShown = false;
+    const runtimeDetailsFor = (summary: PersistentSubagentSummary) => {
+        try {
+            return registry.runtimeMetadataFor(summary.id);
+        } catch {
+            // Test seams and older registry implementations can provide only a summary.
+            return { kind: summary.runtime };
+        }
+    };
 
     const finalizeModelPrompt = async (
         result: Awaited<ReturnType<PersistentSubagentRegistry["prompt"]>>,
         action: "create" | "prompt",
     ) => {
-        const visible = result.text.trim() || "(no visible response)";
+        const policyWarnings = [...new Set(result.policyWarnings ?? [])]
+            .map((warning) => warning.trim())
+            .filter(Boolean)
+            .slice(0, 4);
+        const runtimeWarnings = [...new Set(result.runtimeWarnings ?? [])]
+            .map((warning) => warning.trim())
+            .filter(Boolean)
+            .slice(0, 4);
+        const warningPrefix = [
+            ...(policyWarnings.length ? [`Policy warning: ${policyWarnings.join(" ")}`] : []),
+            ...(runtimeWarnings.length ? [`Runtime warning: ${runtimeWarnings.join(" ")}`] : []),
+        ].join("\n");
+        const visibleResponse = result.text.trim() || "(no visible response)";
+        const visible = warningPrefix ? `${warningPrefix}\n\n${visibleResponse}` : visibleResponse;
+        const partialUsage = result.summary.runtime === "cursor-cloud"
+            ? partialToolUsage(result.usage)
+            : undefined;
+        const usage = completeToolUsage(result.usage);
         const incomplete = incompleteResponseReason(result);
-        if (result.summary.lifetime === "one-shot") {
-            if (result.summary.blocker) {
-                const retained = await registry.setLifetime(result.summary.id, "task");
-                return {
-                    content: [{
-                        type: "text" as const,
-                        text: boundedText(
-                            `Retained ${retained.name} as a task because it is blocked.\n\n${visible}`,
-                            responseTruncationNotice(retained.name),
-                        ),
-                    }],
-                    details: { ok: true, tool: "subagent", action, subagent: retained },
-                    usage: result.usage,
-                };
+        const oneShot = result.summary.lifetime === "one-shot" || result.delivery?.archiveAfterDelivery === true;
+        const receiptFor = (
+            summary: PersistentSubagentSummary,
+            archiveAfterDelivery: boolean,
+        ): CursorDeliveryReceipt | undefined => result.delivery
+            ? {
+                version: CURSOR_DELIVERY_RECEIPT_VERSION,
+                subagentId: summary.id,
+                runId: result.delivery.runId,
+                ...(archiveAfterDelivery ? { archiveAfterDelivery: true } : {}),
             }
-            if (incomplete) {
-                const retained = await registry.setLifetime(result.summary.id, "task");
-                return {
-                    content: [{
-                        type: "text" as const,
-                        text: boundedText(
-                            `Retained ${retained.name} as a task because ${incomplete}.\n\n${visible}`,
-                            responseTruncationNotice(retained.name),
-                        ),
-                    }],
-                    details: { ok: true, tool: "subagent", action, subagent: retained },
-                    usage: result.usage,
-                };
-            }
-            const completed = `Completed one-shot ${result.summary.name}.\n\n${visible}`;
-            if (responseWouldTruncate(completed)) {
-                const retained = await registry.setLifetime(result.summary.id, "task");
-                return {
-                    content: [{
-                        type: "text" as const,
-                        text: boundedText(
-                            `Retained ${retained.name} as a task because its response was truncated.\n\n${visible}`,
-                            responseTruncationNotice(retained.name),
-                        ),
-                    }],
-                    details: { ok: true, tool: "subagent", action, subagent: retained },
-                    usage: result.usage,
-                };
-            }
-            const stopped = await registry.stop(result.summary.id);
+            : undefined;
+        const detailsFor = (summary: PersistentSubagentSummary, receipt?: CursorDeliveryReceipt) => ({
+            // Keep runtime and remote identifiers in structured details. Concise
+            // parent text contains only the requested result and warnings.
+            runtime: runtimeDetailsFor(summary),
+            ...(result.artifacts?.length ? { artifacts: result.artifacts } : {}),
+            ...(policyWarnings.length ? { policyWarnings } : {}),
+            ...(runtimeWarnings.length ? { runtimeWarnings } : {}),
+            ...(partialUsage ? { usage: partialUsage } : {}),
+            ...(receipt ? { [SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY]: receipt } : {}),
+        });
+        const retainedResult = async (reason: string) => {
+            // Persist this lifetime decision before the ToolResult receipt. If this
+            // fails, the durable result remains available for a later delivery attempt.
+            const retained = await registry.setLifetime(result.summary.id, "task");
+            const text = boundedText(
+                `Retained ${retained.name} as a task because ${reason}.\n\n${visible}`,
+                responseTruncationNotice(retained.name),
+            );
+            const receipt = receiptFor(retained, false);
             return {
-                content: [{ type: "text" as const, text: completed }],
-                details: { ok: true, tool: "subagent", action, subagent: stopped },
-                usage: result.usage,
+                content: [{ type: "text" as const, text }],
+                details: { ok: true, tool: "subagent", action, subagent: retained, ...detailsFor(retained, receipt) },
+                ...(usage ? { usage } : {}),
+            };
+        };
+
+        if (oneShot && result.summary.blocker) return retainedResult("it is blocked");
+        if (oneShot && incomplete) return retainedResult(incomplete);
+        const completed = `Completed one-shot ${result.summary.name}.\n\n${visible}`;
+        const cursorCompleted = `Completed one-shot ${result.summary.name}. Cursor cleanup starts after this result is recorded.\n\n${visible}`;
+        const potentialPiCleanup = `\n\n${formatSubagentStopResult({ ...result.summary, status: "remote-state-unknown" })}`;
+        // Decide before delivery or cleanup. Reserve each runtime's complete parent-visible
+        // text so a one-shot stays reusable instead of truncating its final result.
+        const oneShotVisible = result.summary.runtime === "cursor-cloud"
+            ? cursorCompleted
+            : `${completed}${potentialPiCleanup}`;
+        if (oneShot && responseWouldTruncate(oneShotVisible)) return retainedResult("its response was truncated");
+
+        if (oneShot) {
+            if (result.summary.runtime === "cursor-cloud") {
+                const receipt = receiptFor(result.summary, true);
+                return {
+                    content: [{
+                        type: "text" as const,
+                        text: cursorCompleted,
+                    }],
+                    details: { ok: true, tool: "subagent", action, subagent: result.summary, ...detailsFor(result.summary, receipt) },
+                    ...(usage ? { usage } : {}),
+                };
+            }
+            // Pi has no durable Cursor result. Its existing one-shot cleanup remains
+            // local to this completed execution.
+            const stopped = await registry.stop(result.summary.id);
+            const cleanupNotice = stopped.status === "stopped"
+                ? ""
+                : `\n\n${formatSubagentStopResult(stopped)}`;
+            return {
+                content: [{ type: "text" as const, text: `${completed}${cleanupNotice}` }],
+                details: { ok: stopped.status === "stopped", tool: "subagent", action, subagent: stopped, ...detailsFor(stopped) },
+                ...(usage ? { usage } : {}),
             };
         }
+
         const response = incomplete
             ? `Incomplete subagent response: ${incomplete}. Reprompt ${result.summary.name} for continuation.\n\n${visible}`
             : visible;
         const text = action === "create"
             ? boundedText(`Saved as ${result.summary.name}.\n\n${response}`, responseTruncationNotice(result.summary.name))
             : boundedSubagentResponse(response, result.summary.name);
+        const receipt = receiptFor(result.summary, false);
         return {
             content: [{ type: "text" as const, text }],
-            details: { ok: true, tool: "subagent", action, subagent: result.summary },
-            usage: result.usage,
+            details: { ok: true, tool: "subagent", action, subagent: result.summary, ...detailsFor(result.summary, receipt) },
+            ...(usage ? { usage } : {}),
         };
     };
 
@@ -588,11 +826,58 @@ export default function (
         if (summary.lifetime !== "one-shot") return;
         await registry.stop(summary.id).catch(() => undefined);
     };
+    const receiptForCursorFailure = (error: unknown): { readonly failure: SubagentCursorPromptFailure; readonly receipt?: CursorDeliveryReceipt } | undefined => {
+        if (!(error instanceof SubagentCursorPromptFailure)) return undefined;
+        const { delivery } = error;
+        return {
+            failure: error,
+            ...(delivery ? {
+                receipt: {
+                    version: CURSOR_DELIVERY_RECEIPT_VERSION,
+                    subagentId: error.summary.id,
+                    runId: delivery.runId,
+                    ...(delivery.archiveAfterDelivery ? { archiveAfterDelivery: true } : {}),
+                },
+            } : {}),
+        };
+    };
 
     const showDiagnostics = (ctx: ExtensionContext): void => {
         if (diagnosticsShown || discovery.diagnostics.length === 0) return;
         diagnosticsShown = true;
         for (const diagnostic of discovery.diagnostics) ctx.ui.notify(diagnostic, "warning");
+    };
+
+    const handoffPanelReturn = async (
+        ctx: ExtensionContext,
+        result: { action: "return"; text: string; summary: PersistentSubagentSummary; delivery?: {
+            archiveAfterDelivery: boolean;
+            completion?: { text: string; responseProduced?: boolean; handledWithoutAgent?: boolean; stopReason?: string; truncated?: true };
+            acknowledge(): Promise<{ acknowledged: boolean; archiveAfterDelivery: boolean }>;
+        } },
+    ): Promise<void> => {
+        // Place text in the editor before acknowledgement. A thrown editor handoff
+        // leaves the Cursor result durable for a later return attempt.
+        ctx.ui.setEditorText(result.text);
+        const delivery = result.delivery;
+        if (delivery) {
+            const completion = delivery.completion
+                ? { ...delivery.completion, text: result.text }
+                : { text: result.text };
+            const incomplete = incompleteResponseReason(completion);
+            const retain = delivery.archiveAfterDelivery && (Boolean(result.summary.blocker) || Boolean(incomplete));
+            if (retain) await registry.setLifetime(result.summary.id, "task");
+            const acknowledgement = await delivery.acknowledge();
+            if (acknowledgement.acknowledged && acknowledgement.archiveAfterDelivery && !retain) {
+                try {
+                    const stopped = await registry.stop(result.summary.id);
+                    if (stopped.status !== "stopped") ctx.ui.notify(formatSubagentStopResult(stopped), "warning");
+                } catch {
+                    ctx.ui.notify(formatSubagentStopResult(registry.summaryFor(result.summary.id)), "warning");
+                }
+            }
+        }
+        ctx.ui.notify("Subagent response placed in the parent editor. Review and submit when ready.", "info");
     };
 
     const createAndOpen = async (
@@ -628,12 +913,17 @@ export default function (
                 || (parsed.mode === "fork"
                     ? "Analysis using inherited parent-session context"
                     : "General project research");
-            const summary = registry.create(ctx, { mode: parsed.mode, purpose, persona });
+            const profileName = persona ? resolveSubagentCreationProfile(persona, undefined) : undefined;
+            const profile = profileName ? SUBAGENT_EXECUTION_PROFILES[profileName] : undefined;
+            const summary = await registry.create(ctx, {
+                mode: parsed.mode,
+                purpose,
+                persona,
+                ...(persona?.runtime === "pi" && profile ? { model: profile.model, thinking: profile.thinking } : {}),
+                ...(persona?.runtime === "cursor-cloud" && profileName ? { cursorProfile: profileName } : {}),
+            });
             const result = await registry.open(ctx, summary.id, parsed.prompt);
-            if (result?.action === "return") {
-                ctx.ui.setEditorText(result.text);
-                ctx.ui.notify("Subagent response placed in the parent editor. Review and submit when ready.", "info");
-            }
+            if (result?.action === "return") await handoffPanelReturn(ctx, result);
         } catch (error) {
             ctx.ui.notify(`Could not create subagent: ${registryErrorMessage(error)}`, "error");
         }
@@ -693,14 +983,14 @@ export default function (
                 );
                 if (!confirmed) return;
                 const stopped = await registry.stop(summary.id);
-                ctx.ui.notify(`Stopped ${stopped.name} (${stopped.id}).`, "info");
+                ctx.ui.notify(
+                    `${formatSubagentStopResult(stopped)} (${stopped.id})`,
+                    stopped.status === "stopped" ? "info" : "warning",
+                );
                 return;
             }
             const result = await registry.open(ctx, target);
-            if (result?.action === "return") {
-                ctx.ui.setEditorText(result.text);
-                ctx.ui.notify("Subagent response placed in the parent editor. Review and submit when ready.", "info");
-            }
+            if (result?.action === "return") await handoffPanelReturn(ctx, result);
         } catch (error) {
             const operation = parsed.action === "stop"
                 ? "stop subagent"
@@ -741,14 +1031,14 @@ export default function (
     pi.registerTool({
         name: "subagent",
         label: "Subagent",
-        description: "Up to 4 subagents isolate conversation context but share the parent worktree and host authority.",
-        promptSnippet: "Delegate isolated work; reuse by purpose",
+        description: "Up to 4 subagents isolate context. Pi subagents share the local worktree and host authority; Cursor Cloud subagents inspect pushed repositories with configured Cloud MCPs.",
+        promptSnippet: "Delegate isolated work",
         promptGuidelines: [
-            "Before subagent create, list when options are unknown and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, and deep only after cheaper failure or unsafe ambiguity.",
-            "Use subagent one-shot for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
-            "Give each subagent exact objective, scope, and output; avoid adjacent work.",
-            "Create a subagent only when isolation from large intermediate context or retained continuity materially helps; do not delegate simple work.",
-            "Prefer fresh context. Fork only when parent history is material and a concise handoff is insufficient. Use one task subagent for the complete objective and reuse it.",
+            "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
+            "Use a one-shot subagent for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+            "Give subagent objective, scope, and output; avoid adjacent work.",
+            "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
+            "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",
         ],
         parameters: SubagentParameters,
         prepareArguments: prepareSubagentArguments,
@@ -773,6 +1063,13 @@ export default function (
                     const hasPersona = Boolean(params.persona?.trim());
                     if (!hasPersona) requirePersonaLessCreateFields(params);
                     const persona = hasPersona ? personaByName(discovery.personas, params.persona) : undefined;
+                    const runtime = params.runtime ?? persona?.runtime ?? "pi";
+                    if (params.runtime && persona && params.runtime !== persona.runtime) {
+                        throw new Error(`runtime "${params.runtime}" does not match persona "${persona.name}" runtime "${persona.runtime}"`);
+                    }
+                    if (runtime === "cursor-cloud" && params.skills?.length) {
+                        throw new Error("skills are not valid for runtime cursor-cloud");
+                    }
                     const selectedSkillPaths = resolveSelectedSubagentSkills(params.skills, parentDiscoveredSkills);
                     validateSelectedPersonaSkills(persona, params.skills, parentDiscoveredSkills);
                     const initialPrompt = params.prompt?.trim();
@@ -786,33 +1083,33 @@ export default function (
                         : requireText(params.purpose, "purpose");
                     const normalizedPurpose = normalizeSubagentPurpose(purpose);
                     const reusable = registry.list().find((candidate) =>
-                        candidate.status !== "stopped"
+                        candidate.runtime === runtime
+                        && candidate.status !== "stopped"
                         && candidate.purpose.toLowerCase() === normalizedPurpose.toLowerCase());
                     if (reusable) {
                         throw new Error(
                             `${reusable.name} already retains context for this purpose; reuse it with action "prompt"`,
                         );
                     }
-                    const profileName = params.profile ?? (persona ? undefined : "balanced");
-                    const profile = profileName ? SUBAGENT_EXECUTION_PROFILES[profileName] : undefined;
-                    const selectedPersona = persona && profile
-                        ? { ...persona, model: profile.model, thinking: profile.thinking }
-                        : persona;
+                    const profileName = resolveSubagentCreationProfile(persona, params.profile);
+                    const profile = SUBAGENT_EXECUTION_PROFILES[profileName];
                     const requestedMode = params.mode ?? "fresh";
                     const createOptions = {
+                        runtime,
                         mode: "fresh" as const,
                         purpose: normalizedPurpose,
                         ...(params.name?.trim() ? { name: params.name.trim() } : {}),
-                        ...(selectedPersona ? { persona: selectedPersona } : {}),
+                        ...(persona ? { persona } : {}),
                         skills: selectedSkillPaths,
                         lifetime,
-                        ...(profile ? { model: profile.model, thinking: profile.thinking } : {}),
+                        ...(runtime === "pi" ? { model: profile.model, thinking: profile.thinking } : {}),
+                        ...(runtime === "cursor-cloud" ? { cursorProfile: profileName } : {}),
                     };
                     // Validate before a fork snapshot copies parent history.
                     registry.validateCreate(ctx, createOptions);
-                    const forkContext = requestedMode === "fork"
+                    const forkContext = requestedMode === "fork" && runtime === "pi"
                         ? registry.createActiveTurnForkSnapshot(ctx)
-                        : { mode: "fresh" as const };
+                        : { mode: requestedMode };
                     if (initialPrompt && persona?.contextRequirements && !context && forkContext.mode !== "fork") {
                         throw requiredContextError(persona);
                     }
@@ -829,14 +1126,19 @@ export default function (
                         : undefined;
                     let summary: PersistentSubagentSummary;
                     try {
-                        summary = registry.create(ctx, {
+                        summary = await registry.create(ctx, {
                             ...createOptions,
                             mode: forkContext.mode,
-                            ...(forkContext.mode === "fork" ? { parentSessionFile: forkContext.parentSessionFile } : {}),
+                            ...(forkContext.mode === "fork" && "parentSessionFile" in forkContext
+                                ? { parentSessionFile: forkContext.parentSessionFile }
+                                : {}),
                         });
                     } catch (error) {
                         finishForkPersistence();
-                        if (forkContext.mode === "fork") fs.rmSync(forkContext.parentSessionFile, { force: true });
+                        if (forkContext.mode === "fork" && "parentSessionFile" in forkContext
+                            && typeof forkContext.parentSessionFile === "string") {
+                            fs.rmSync(forkContext.parentSessionFile, { force: true });
+                        }
                         throw error;
                     }
                     fallbackDetails = fallback
@@ -854,12 +1156,14 @@ export default function (
                                 tool: "subagent",
                                 action: "create",
                                 subagent: summary,
+                                runtime: runtimeDetailsFor(summary),
                                 ...fallbackDetails,
                                 ...persistenceDetails,
                             },
                         };
                     }
                     let lastProgress = "";
+                    let promptReturned = false;
                     try {
                         const result = await registry.prompt(
                             ctx,
@@ -879,6 +1183,7 @@ export default function (
                                 },
                             },
                         );
+                        promptReturned = true;
                         const finalized = await finalizeModelPrompt(result, "create");
                         const persistenceDetails = finishForkPersistence();
                         if (!fallback) {
@@ -899,7 +1204,12 @@ export default function (
                             details: { ...finalized.details, ...fallbackDetails, ...persistenceDetails },
                         };
                     } catch (error) {
-                        await stopFailedOneShot(summary);
+                        // A returned Cursor result can still be pending acknowledgement.
+                        // Do not archive it when output preparation fails, but retry Pi
+                        // one-shot cleanup when finalization or stop itself rejects.
+                        if ((!promptReturned || summary.runtime === "pi") && !(error instanceof SubagentCursorPromptFailure)) {
+                            await stopFailedOneShot(summary);
+                        }
                         finishForkPersistence();
                         throw error;
                     }
@@ -938,12 +1248,16 @@ export default function (
                         const personas = page.map(({
                             name,
                             description,
+                            runtime,
                             contextRequirements,
                             preferredLifetime,
+                            preferredProfile,
                         }) => ({
                             name,
                             description,
+                            runtime,
                             ...(preferredLifetime ? { preferredLifetime } : {}),
+                            ...(preferredProfile ? { preferredProfile } : {}),
                             ...(contextRequirements ? { contextRequirements } : {}),
                         }));
                         return {
@@ -957,7 +1271,7 @@ export default function (
                     const subagents = registry.list();
                     const reusable = subagents.filter((subagent) => subagent.status !== "stopped");
                     const text = reusable.length > 0
-                        ? reusable.map(formatSubagentForModel).join("\n")
+                        ? reusable.map((subagent) => formatSubagentForModel(subagent, true)).join("\n")
                         : "No reusable subagents.";
                     return {
                         content: [{ type: "text", text: boundedText(text, "Subagent list truncated") }],
@@ -969,6 +1283,7 @@ export default function (
                     const prompt = requireText(params.prompt, "prompt");
                     const summary = registry.summaryFor(id);
                     let lastProgress = "";
+                    let promptReturned = false;
                     try {
                         const result = await registry.prompt(
                             ctx,
@@ -988,29 +1303,48 @@ export default function (
                                 },
                             },
                         );
+                        promptReturned = true;
                         return await finalizeModelPrompt(result, "prompt");
                     } catch (error) {
-                        await stopFailedOneShot(summary);
+                        // A returned Cursor result can still be pending acknowledgement.
+                        // Do not archive it when output preparation fails, but retry Pi
+                        // one-shot cleanup when finalization or stop itself rejects.
+                        if ((!promptReturned || summary.runtime === "pi") && !(error instanceof SubagentCursorPromptFailure)) {
+                            await stopFailedOneShot(summary);
+                        }
                         throw error;
                     }
                 }
                 case "status": {
-                    const summary = registry.summaryFor(requireText(params.id, "id"));
+                    const summary = await registry.status(requireText(params.id, "id"));
                     return {
                         content: [{ type: "text", text: formatSubagentForModel(summary) }],
-                        details: { ok: true, tool: "subagent", action: "status", subagent: summary },
+                        details: {
+                            ok: true,
+                            tool: "subagent",
+                            action: "status",
+                            subagent: summary,
+                            runtime: runtimeDetailsFor(summary),
+                        },
                     };
                 }
                 case "stop": {
                     const summary = await registry.stop(requireText(params.id, "id"));
                     return {
-                        content: [{ type: "text", text: `Stopped ${summary.name}.` }],
-                        details: { ok: true, tool: "subagent", action: "stop", subagent: summary },
+                        content: [{ type: "text", text: formatSubagentStopResult(summary) }],
+                        details: {
+                            ok: summary.status === "stopped",
+                            tool: "subagent",
+                            action: "stop",
+                            subagent: summary,
+                            runtime: runtimeDetailsFor(summary),
+                        },
                     };
                 }
             }
             } catch (error) {
                 const failure = subagentFailure(error, signal);
+                const cursorFailure = receiptForCursorFailure(error);
                 return {
                     ...failure,
                     content: fallbackText
@@ -1018,6 +1352,11 @@ export default function (
                         : failure.content,
                     details: {
                         ...failure.details,
+                        ...(cursorFailure ? {
+                            subagent: cursorFailure.failure.summary,
+                            runtime: cursorFailure.failure.metadata,
+                            ...(cursorFailure.receipt ? { [SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY]: cursorFailure.receipt } : {}),
+                        } : {}),
                         ...fallbackDetails,
                         ...deferredRegistryDetails(deferredMutation),
                     },
@@ -1030,6 +1369,15 @@ export default function (
         parentDiscoveredSkills = (event.systemPromptOptions.skills ?? [])
             .filter((skill) => !skill.disableModelInvocation)
             .map(({ name, filePath }) => ({ name, filePath }));
+    });
+
+    pi.on("turn_end", async (event) => {
+        for (const toolResult of event.toolResults) {
+            if (toolResult.toolName !== "subagent") continue;
+            const details = toolResult.details;
+            if (!details || typeof details !== "object" || Array.isArray(details)) continue;
+            await registry.processCursorDeliveryReceipt((details as Record<string, unknown>)[SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY]);
+        }
     });
 
     pi.on("session_start", (_event, ctx) => {

@@ -22,6 +22,8 @@ type PendingRequest = {
     resolve: (value: SubagentRpcOutput) => void;
     reject: (error: Error) => void;
     timer?: ReturnType<typeof setTimeout>;
+    signal?: AbortSignal;
+    abort?: () => void;
 };
 
 type ExitDetails = {
@@ -55,6 +57,10 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 
 function isRecord(value: unknown): value is SubagentRpcOutput {
     return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function abortError(signal: AbortSignal): Error {
+    return signal.reason instanceof Error ? signal.reason : new Error("Subagent RPC request aborted");
 }
 
 export class SubagentRpcClient {
@@ -116,11 +122,10 @@ export class SubagentRpcClient {
         const subagent = this.process;
         if (!subagent) return;
         this.stopping = true;
-        for (const request of this.pending.values()) {
-            if (request.timer) clearTimeout(request.timer);
+        for (const [id, request] of this.pending) {
+            this.removePending(id, request);
             request.reject(new Error("Subagent RPC process stopped"));
         }
-        this.pending.clear();
 
         subagent.kill("SIGTERM");
         await new Promise<void>((resolve) => {
@@ -143,18 +148,18 @@ export class SubagentRpcClient {
         return this.stderr;
     }
 
-    async prompt(message: string): Promise<void> {
+    async prompt(message: string, signal?: AbortSignal): Promise<void> {
         // Prompt preflight can include an extension dialog, so process exit—not a
         // fixed request timer—is the authoritative cancellation boundary.
-        this.data<void>(await this.send({ type: "prompt", message }, 0));
+        this.data<void>(await this.send({ type: "prompt", message }, 0, signal));
     }
 
     async steer(message: string): Promise<void> {
         this.data<void>(await this.send({ type: "steer", message }));
     }
 
-    async followUp(message: string): Promise<void> {
-        this.data<void>(await this.send({ type: "follow_up", message }));
+    async followUp(message: string, signal?: AbortSignal): Promise<void> {
+        this.data<void>(await this.send({ type: "follow_up", message }, REQUEST_TIMEOUT_MS, signal));
     }
 
     async abort(): Promise<void> {
@@ -234,8 +239,7 @@ export class SubagentRpcClient {
         if (parsed.type === "response" && typeof parsed.id === "string") {
             const request = this.pending.get(parsed.id);
             if (request) {
-                this.pending.delete(parsed.id);
-                if (request.timer) clearTimeout(request.timer);
+                this.removePending(parsed.id, request);
                 request.resolve(parsed);
                 return;
             }
@@ -243,7 +247,12 @@ export class SubagentRpcClient {
         this.options.onOutput(parsed);
     }
 
-    private async send(command: SubagentRpcOutput, timeoutMs = REQUEST_TIMEOUT_MS): Promise<SubagentRpcOutput> {
+    private async send(
+        command: SubagentRpcOutput,
+        timeoutMs = REQUEST_TIMEOUT_MS,
+        signal?: AbortSignal,
+    ): Promise<SubagentRpcOutput> {
+        if (signal?.aborted) throw abortError(signal);
         if (this.exitError) throw this.exitError;
         const subagent = this.process;
         if (!subagent || subagent.exitCode !== null || !subagent.stdin.writable || subagent.stdin.destroyed) {
@@ -252,18 +261,32 @@ export class SubagentRpcClient {
 
         const id = `subagent_${++this.requestId}`;
         return new Promise<SubagentRpcOutput>((resolve, reject) => {
+            let request!: PendingRequest;
             const timer = timeoutMs > 0
                 ? setTimeout(() => {
-                    this.pending.delete(id);
+                    if (!this.removePending(id, request)) return;
                     reject(new Error(`Timed out waiting for subagent RPC response to ${String(command.type)}`));
                 }, timeoutMs)
                 : undefined;
-            this.pending.set(id, { resolve, reject, timer });
+            const abort = signal
+                ? () => {
+                    if (!this.removePending(id, request)) return;
+                    reject(abortError(signal));
+                }
+                : undefined;
+            request = { resolve, reject, timer, ...(signal ? { signal } : {}), ...(abort ? { abort } : {}) };
+            this.pending.set(id, request);
+            if (signal) {
+                if (signal.aborted) {
+                    abort?.();
+                    return;
+                }
+                signal.addEventListener("abort", abort!, { once: true });
+            }
             try {
                 this.write({ ...command, id });
             } catch (error) {
-                if (timer) clearTimeout(timer);
-                this.pending.delete(id);
+                this.removePending(id, request);
                 reject(error instanceof Error ? error : new Error(String(error)));
             }
         });
@@ -282,11 +305,18 @@ export class SubagentRpcClient {
         return response.data as T;
     }
 
+    private removePending(id: string, request: PendingRequest): boolean {
+        if (this.pending.get(id) !== request) return false;
+        this.pending.delete(id);
+        if (request.timer) clearTimeout(request.timer);
+        if (request.signal && request.abort) request.signal.removeEventListener("abort", request.abort);
+        return true;
+    }
+
     private failPending(error: Error): void {
-        for (const request of this.pending.values()) {
-            if (request.timer) clearTimeout(request.timer);
+        for (const [id, request] of this.pending) {
+            this.removePending(id, request);
             request.reject(error);
         }
-        this.pending.clear();
     }
 }

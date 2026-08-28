@@ -7,11 +7,22 @@ import { join } from "node:path";
 const subagentsModule = await import("../../extensions/subagents/index.ts");
 const {
   SubagentPanel,
+  renderSubagentPanelControls,
+  renderSubagentPanelDetails,
+  runSubagentDialog,
+} = await import("../../extensions/subagents/ui.ts");
+const { visibleWidth } = await import("@earendil-works/pi-tui");
+const { initTheme } = await import("@earendil-works/pi-coding-agent");
+const {
   SubagentSessionController,
+  MAX_SUBAGENT_PANEL_DETAILS_CHARS,
   MAX_SUBAGENT_TRANSCRIPT_ITEMS,
   promptFingerprint,
-} = await import("../../extensions/subagents/ui.ts");
+} = await import("../../extensions/subagents/controller.ts");
 const { SubagentRpcClient } = await import("../../extensions/subagents/rpc.ts");
+const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("../../extensions/subagents/cursor-backend.ts");
+const { PiRpcBackend } = await import("../../extensions/subagents/pi-backend.ts");
+const { CursorModelCatalog } = await import("../../extensions/subagents/cursor-models.ts");
 const { normalizePersonaDescription } = await import("../../extensions/subagents/personas.ts");
 const {
   BUNDLED_PERSONA_DIRECTORY,
@@ -54,38 +65,88 @@ function makeControllerHarness({
   promptAttributions = [],
   promptStartsAgent = true,
   promptError,
+  panelDetails,
 } = {}) {
   let streaming = false;
   let callbacks;
+  let runSequence = 0;
+  let run;
+  const connection = { id: "fake-connection", runtime: "pi" };
+  const startRun = () => {
+    run = { id: `fake-run-${++runSequence}`, runtime: "pi" };
+    streaming = true;
+    callbacks.onEvent({ type: "run_started", run });
+    return run;
+  };
   const calls = { prompt: [], steer: [], followUp: [], abort: 0, stop: 0 };
   const acceptedAttributions = [];
-  const rpcFactory = (options) => {
+  const messageText = (message) => typeof message.content === "string"
+    ? message.content
+    : Array.isArray(message.content)
+      ? message.content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("")
+      : "";
+  const history = () => messages.flatMap((message) => {
+    if (message?.role === "user") return [{ role: "user", text: messageText(message) }];
+    if (message?.role !== "assistant") return [];
+    const thinking = Array.isArray(message.content)
+      ? message.content.filter((part) => part?.type === "thinking" && typeof part.thinking === "string").map((part) => part.thinking).join("\n")
+      : "";
+    return [{
+      role: "assistant",
+      text: messageText(message),
+      thinking,
+      ...(message.stopReason ? { stopReason: message.stopReason } : {}),
+      ...(message.errorMessage ? { errorMessage: message.errorMessage } : {}),
+    }];
+  });
+  const backendFactory = (options) => {
     callbacks = options;
     return {
+      runtime: "pi",
+      displayName: "Pi",
+      capabilities: {
+        extensionUi: true,
+        steering: true,
+        queuedFollowUp: true,
+        modelControls: true,
+        thinkingControls: true,
+        sessionHistory: true,
+        sessionFile: true,
+        usage: true,
+        toolOutput: true,
+      },
+      run,
       async start() {},
       async stop() { calls.stop++; streaming = false; },
       async getState() {
         return {
+          connection,
+          ...(streaming ? { run } : {}),
+          ...(panelDetails ? { details: panelDetails } : {}),
           thinkingLevel: "low",
           isStreaming: streaming,
           isCompacting: false,
           sessionFile: "/tmp/fake-subagent.jsonl",
         };
       },
-      async getMessages() { return messages; },
+      async getHistory() { return history(); },
       async getSessionStats() { return {}; },
-      getStderr() { return ""; },
+      getDiagnostics() { return ""; },
       async prompt(text) {
         calls.prompt.push(text);
         if (promptError) throw new Error(promptError);
-        if (promptStartsAgent) {
-          streaming = true;
-          callbacks.onOutput({ type: "agent_start" });
-        }
+        if (promptStartsAgent) return { run: startRun() };
+        return { handledWithoutRun: true };
       },
       async steer(text) { calls.steer.push(text); },
-      async followUp(text) { calls.followUp.push(text); },
+      async followUp(text) { calls.followUp.push(text); return { run }; },
       async abort() { calls.abort++; streaming = false; },
+      async getAvailableModels() { return []; },
+      async setModel() { throw new Error("No fake models"); },
+      async cycleModel() { return null; },
+      async setThinkingLevel() {},
+      async cycleThinkingLevel() { return null; },
+      respondToExtensionUI() {},
     };
   };
   const context = { ui: {} };
@@ -97,35 +158,32 @@ function makeControllerHarness({
     scopedModels: [],
     promptAttributions,
     onPromptAccepted(attribution) { acceptedAttributions.push(attribution); },
-  }, rpcFactory);
+  }, backendFactory);
   return {
     controller,
     calls,
     acceptedAttributions,
     message(text, stopReason = "stop") {
-      callbacks.onOutput({
-        type: "message_end",
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text }],
-          stopReason,
-        },
+      callbacks.onEvent({
+        type: "message_completed",
+        run,
+        message: { role: "assistant", text, thinking: "", stopReason },
       });
     },
     startFollowUp() {
-      callbacks.onOutput({ type: "agent_start" });
+      callbacks.onEvent({ type: "run_started", run });
     },
     startCompaction() {
-      callbacks.onOutput({ type: "compaction_start", reason: "automatic" });
+      callbacks.onEvent({ type: "compaction_started", run, reason: "automatic" });
     },
-    exit(stderr) {
+    exit(diagnostics) {
       streaming = false;
-      callbacks.onExit({ code: 1, signal: null, stderr, intentional: false });
+      callbacks.onExit({ description: "Subagent process", code: 1, signal: null, diagnostics, intentional: false });
     },
     settle(text, stopReason = "stop") {
       this.message(text, stopReason);
       streaming = false;
-      callbacks.onOutput({ type: "agent_settled" });
+      callbacks.onEvent({ type: "run_settled", run });
     },
   };
 }
@@ -139,7 +197,7 @@ function restoredRegistryState(entries, ownerSessionId) {
       for (const stored of entry.data.subagents) records.set(stored.id, structuredClone(stored));
       continue;
     }
-    if (entry.data.version !== 2) continue;
+    if (entry.data.version !== 2 && entry.data.version !== 3) continue;
     for (const id of entry.data.removedIds ?? []) records.delete(id);
     for (const stored of entry.data.upserts ?? []) records.set(stored.id, structuredClone(stored));
   }
@@ -181,7 +239,7 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.deepEqual(tools.map(({ name }) => name), ["subagent"]);
   assert.deepEqual(tools[0].parameters.properties.action.enum, ["create", "list", "prompt", "status", "stop"]);
   assert.deepEqual(Object.keys(tools[0].parameters.properties), [
-    "action", "id", "name", "purpose", "persona", "profile", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
+    "action", "id", "name", "purpose", "persona", "profile", "runtime", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
   ]);
   assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
@@ -197,15 +255,13 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
   assert.equal(tools[0].parameters.properties.context.description, "Concise background");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, list when options are unknown and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, and deep only after cheaper failure or unsafe ambiguity.",
-    "Use subagent one-shot for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
-    "Give each subagent exact objective, scope, and output; avoid adjacent work.",
-    "Create a subagent only when isolation from large intermediate context or retained continuity materially helps; do not delegate simple work.",
-    "Prefer fresh context. Fork only when parent history is material and a concise handoff is insufficient. Use one task subagent for the complete objective and reuse it.",
+    "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
+    "Use a one-shot subagent for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+    "Give subagent objective, scope, and output; avoid adjacent work.",
+    "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
+    "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",
   ]);
-  assert.match(tools[0].description, /isolate conversation context/);
-  assert.match(tools[0].description, /share the parent worktree/);
-  assert.match(tools[0].description, /host authority/);
+  assert.equal(tools[0].description, "Up to 4 subagents isolate context. Pi subagents share the local worktree and host authority; Cursor Cloud subagents inspect pushed repositories with configured Cloud MCPs.");
   assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
   assert.ok(tools[0].promptGuidelines.every((guideline) => guideline.includes("subagent")));
   const modelFacingDefinition = JSON.stringify({
@@ -241,7 +297,7 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(commands.includes("children"), false);
   assert.equal(commands.some((name) => name.startsWith("child:")), false);
   assert.equal(commands.includes("subagent-blockers"), false);
-  assert.deepEqual(events, ["before_agent_start", "session_start", "session_tree", "session_shutdown"]);
+  assert.deepEqual(events, ["before_agent_start", "turn_end", "session_start", "session_tree", "session_shutdown"]);
   const controlHeavyField = "\u0000".repeat(1_000);
   const boundedError = await tools[0].execute("bounded-subagent-error", {
     action: "list",
@@ -500,6 +556,92 @@ test("subagents command accepts direct open and explicit stop actions", () => {
   });
 });
 
+test("panel handoff acknowledges Cursor results only after editor delivery and retains incomplete one-shots", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-panel-delivery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const commands = new Map();
+  const events = new Map();
+  const pi = {
+    appendEntry() {}, getThinkingLevel() { return "off"; }, getActiveTools() { return ["subagent"]; }, setActiveTools() {},
+    registerCommand(name, command) { commands.set(name, command); }, registerShortcut() {}, registerTool() {}, on(name, handler) { events.set(name, handler); },
+  };
+  subagentsModule.default(pi, { personaDirectory: join(root, "missing-personas") });
+  const summary = {
+    id: "sa-panel-delivery", name: "panel-delivery", runtime: "cursor-cloud", purpose: "Return a durable result",
+    lifetime: "task", status: "idle", createdAt: 1, lastActiveAt: 1,
+  };
+  const originalOpen = PersistentSubagentRegistry.prototype.open;
+  const originalSetLifetime = PersistentSubagentRegistry.prototype.setLifetime;
+  const originalStop = PersistentSubagentRegistry.prototype.stop;
+  const order = [];
+  let phase = "editor-failure";
+  PersistentSubagentRegistry.prototype.open = async function () {
+    const truncated = phase === "incomplete";
+    const limited = phase === "length";
+    return {
+      action: "return",
+      text: truncated ? "Capped result" : limited ? "Output-limited result" : "Complete result",
+      summary,
+      delivery: {
+        runId: "run-panel-delivery",
+        archiveAfterDelivery: true,
+        completion: {
+          text: truncated ? "Capped result" : limited ? "Output-limited result" : "Complete result",
+          responseProduced: true,
+          stopReason: limited ? "length" : "stop",
+          ...(truncated ? { truncated: true } : {}),
+        },
+        async acknowledge() { order.push("acknowledge"); return { acknowledged: true, archiveAfterDelivery: true, summary }; },
+      },
+    };
+  };
+  PersistentSubagentRegistry.prototype.setLifetime = async function () {
+    order.push("lifetime");
+    return summary;
+  };
+  PersistentSubagentRegistry.prototype.stop = async function () {
+    order.push("archive");
+    return { ...summary, status: "stopped" };
+  };
+  t.after(() => {
+    PersistentSubagentRegistry.prototype.open = originalOpen;
+    PersistentSubagentRegistry.prototype.setLifetime = originalSetLifetime;
+    PersistentSubagentRegistry.prototype.stop = originalStop;
+  });
+  const notifications = [];
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
+    sessionManager: { getSessionId: () => "panel-delivery", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] },
+    ui: {
+      setEditorText() {
+        order.push("editor");
+        if (phase === "editor-failure") throw new Error("editor handoff failed");
+      },
+      notify(message, level) { notifications.push({ message, level }); }, async select() { return undefined; }, async confirm() { return true; },
+    },
+  };
+  events.get("session_start")({}, context);
+  const command = commands.get("subagents");
+  await command.handler(summary.id, context);
+  assert.deepEqual(order, ["editor"], "a failed editor handoff leaves the result unacknowledged and unarchived");
+
+  phase = "incomplete";
+  order.length = 0;
+  await command.handler(summary.id, context);
+  assert.deepEqual(order, ["editor", "lifetime", "acknowledge"], "a capped one-shot is retained before acknowledgement and never archived");
+
+  phase = "length";
+  order.length = 0;
+  await command.handler(summary.id, context);
+  assert.deepEqual(order, ["editor", "lifetime", "acknowledge"], "a non-stop panel result is retained before acknowledgement and never archived");
+
+  phase = "complete";
+  order.length = 0;
+  await command.handler(summary.id, context);
+  assert.deepEqual(order, ["editor", "acknowledge", "archive"], "a complete one-shot archives only after acknowledgement");
+  assert.ok(notifications.some(({ message }) => /Could not open subagent: editor handoff failed/.test(message)));
+});
+
 test("fresh subagent args load bundled extensions, disable ambient resources, and persist sessions", () => {
   const args = buildSubagentProcessArgs({
     mode: "fresh",
@@ -664,6 +806,171 @@ test("subagent panel sizing never exceeds the supplied terminal width", () => {
   assert.deepEqual(getSubagentPanelWidths(72), { dialogWidth: 72, innerWidth: 70 });
 });
 
+test("expanded panel details render real Pi controller state without backend metadata", async () => {
+  let emit;
+  const rpc = {
+    async start() {}, async stop() {}, getStderr() { return ""; },
+    async prompt() {}, async steer() {}, async followUp() {}, async abort() {},
+    async getState() { return { thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+    async getMessages() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  };
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, (options) => new PiRpcBackend(options, (rpcOptions) => {
+    emit = rpcOptions.onOutput;
+    return rpc;
+  }));
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  await controller.start();
+  assert.equal(controller.state.details, undefined);
+  emit({ type: "agent_start" });
+  const active = renderSubagentPanelDetails(controller.state, 80, theme).join("\n");
+  assert.match(active, /Connection: pi\/pi-connection-/);
+  assert.match(active, /Active run ID: pi-run-/);
+  assert.match(active, /Lifecycle: ready/);
+
+  emit({ type: "agent_settled" });
+  await waitFor(() => !controller.state.busy);
+  const settled = renderSubagentPanelDetails(controller.state, 80, theme).join("\n");
+  assert.match(settled, /Last run ID: pi-run-/);
+  assert.match(settled, /Lifecycle: ready/);
+  await controller.stop();
+});
+
+test("expanded panel details render complete Cursor delivery metadata together", async () => {
+  const harness = makeControllerHarness({
+    panelDetails: {
+      agent: { id: "agent-complete" },
+      run: { id: "run-complete" },
+      lifecycle: "idle",
+      repositories: [{ url: "https://github.com/example/complete", startingRef: "f".repeat(40) }],
+      artifacts: [{
+        id: "artifact-complete", name: "complete-report", path: "reports/complete.md",
+        url: "https://cursor.example/artifacts/complete", sizeBytes: 42, updatedAt: "2025-01-02T03:04:05Z",
+      }],
+      runtimeWarnings: ["The worktree has local changes."],
+      policyWarnings: ["Cloud branch policy applies."],
+    },
+  });
+  await harness.controller.start();
+  harness.controller.state.durationMs = 1_234;
+  harness.controller.state.usage = {
+    turns: 2, input: 1_000, output: 500, cacheRead: 0, cacheWrite: 0, totalTokens: 1_500,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1234 },
+  };
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  const rendered = renderSubagentPanelDetails(harness.controller.state, 240, theme).join("\n");
+  assert.match(rendered, /Connection: pi\/fake-connection/);
+  assert.match(rendered, /Agent ID: agent-complete/);
+  assert.match(rendered, /Run ID: run-complete/);
+  assert.match(rendered, /Lifecycle: idle/);
+  assert.match(rendered, /Duration: 1\.2 s/);
+  assert.match(rendered, /Usage: 2 turns ↑1\.0k ↓500 \$0\.1234/);
+  assert.match(rendered, /Repository: https:\/\/github\.com\/example\/complete @ f{40}/);
+  assert.match(rendered, /Artifact: complete-report \(path reports\/complete\.md, URL https:\/\/cursor\.example\/artifacts\/complete, 42 bytes, updated 2025-01-02T03:04:05Z, ID artifact-complete\)/);
+  assert.match(rendered, /Runtime warning: The worktree has local changes\./);
+  assert.match(rendered, /Policy warning: Cloud branch policy applies\./);
+  await harness.controller.stop();
+});
+
+test("expanded panel details bound Cursor metadata", async () => {
+  const sha = "a".repeat(40);
+  const harness = makeControllerHarness({
+    panelDetails: {
+      agent: { id: "agent-bounded" },
+      run: { id: "run-bounded" },
+      lifecycle: "idle",
+      repositories: [
+        { url: "https://github.com/example/project", startingRef: sha },
+        ...Array.from({ length: 80 }, (_, index) => ({ url: `https://github.com/example/${index}-${"r".repeat(2_000)}`, startingRef: sha })),
+      ],
+      artifacts: Array.from({ length: 80 }, (_, index) => ({
+        id: `artifact-${index}-${"i".repeat(2_000)}`,
+        name: `report-${index}-${"n".repeat(2_000)}`,
+        path: `reports/${"p".repeat(2_000)}`,
+      })),
+      runtimeWarnings: ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."],
+      policyWarnings: ["Cursor Cloud reported branch metadata."],
+    },
+  });
+  await harness.controller.start();
+  const details = harness.controller.state.details;
+  const detailChars = (value) => {
+    if (typeof value === "string") return value.length;
+    if (Array.isArray(value)) return value.reduce((total, item) => total + detailChars(item), 0);
+    if (value && typeof value === "object") return Object.values(value).reduce((total, item) => total + detailChars(item), 0);
+    return 0;
+  };
+  assert.ok(detailChars(details) <= MAX_SUBAGENT_PANEL_DETAILS_CHARS);
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  const lines = renderSubagentPanelDetails(harness.controller.state, 80, theme);
+  const rendered = lines.join("\n");
+  assert.match(rendered, /Repository: https:\/\/github\.com\/example\/project @/);
+  assert.match(rendered, new RegExp(sha));
+  assert.match(rendered, /Runtime warning: The worktree has local changes/);
+  assert.match(rendered, /Policy warning: Cursor Cloud reported branch metadata/);
+  await harness.controller.stop();
+});
+
+test("busy subagent panel controls use runtime capabilities without duplicate separators", () => {
+  const hint = (action, label) => `${action}:${label}`;
+  const pi = renderSubagentPanelControls(
+    { busy: true },
+    { steering: true, queuedFollowUp: true },
+    hint,
+  );
+  assert.equal(pi, "tui.input.submit:steer · app.message.followUp:follow-up · app.interrupt:abort · app.exit:detach · app.message.copy:return");
+  assert.doesNotMatch(pi, /· ·/);
+  const cursor = renderSubagentPanelControls(
+    { busy: true },
+    { steering: false, queuedFollowUp: false },
+    hint,
+  );
+  assert.equal(cursor, "app.interrupt:abort · app.exit:detach · app.message.copy:return");
+  assert.doesNotMatch(cursor, /steer|follow-up|· ·/);
+});
+
+test("SubagentPanel renders safely within widths from zero through narrow panels", () => {
+  initTheme("dark");
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  const controller = {
+    state: {
+      revision: 0, connected: true, busy: false, lifecycle: "ready", phase: "Ready", readOnly: false, canFollowUp: false,
+      controls: { model: false, thinking: false }, thinking: "off", items: [], omittedItems: 0,
+      usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      extensionUi: false, extensionStatuses: new Map(), extensionWidgets: new Map(),
+    },
+    capabilities: { steering: false, queuedFollowUp: false },
+  };
+  const panel = new SubagentPanel(
+    { requestRender() {} }, theme, { matches() { return false; } }, controller, "Narrow", () => {}, () => {},
+  );
+  for (const width of [0, 1, 2, 3, 12]) {
+    const lines = panel.render(width);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)}`);
+  }
+});
+
+test("supported Pi extension UI renders in the panel transcript", async () => {
+  initTheme("dark");
+  const harness = makeControllerHarness();
+  await harness.controller.start();
+  harness.controller.state.extensionStatuses.set("review", "ready");
+  harness.controller.state.extensionWidgets.set("checks", ["type check passed"]);
+  const panel = new SubagentPanel(
+    { requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } },
+    { matches() { return false; } }, harness.controller, "Pi extension UI", () => {}, () => {},
+  );
+  const rendered = panel.render(80).join("\n");
+  assert.match(rendered, /Subagent extension UI/);
+  assert.match(rendered, /review: ready/);
+  assert.match(rendered, /checks:/);
+  assert.match(rendered, /type check passed/);
+  await harness.controller.stop();
+});
+
 test("busy subagent panels can detach without interrupting the subagent", () => {
   let detached = 0;
   let interrupted = 0;
@@ -687,6 +994,402 @@ test("busy subagent panels can detach without interrupting the subagent", () => 
   panel.handleInput("ctrl+d");
   assert.equal(detached, 1);
   assert.equal(interrupted, 0);
+});
+
+test("Ctrl+D detaches an active Cursor dialog without aborting remote work", async () => {
+  const run = { id: "dialog-detach-run", runtime: "cursor-cloud" };
+  let disposed = 0;
+  let aborts = 0;
+  let cancelRuns = 0;
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, (options) => ({
+    runtime: "cursor-cloud",
+    displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() { options.onEvent({ type: "run_started", run }); }, async stop() {},
+    async disposeObservation() { disposed++; }, getDiagnostics() { return ""; },
+    async prompt() { return { run }; }, async steer() {}, async followUp() { return { run }; }, async abort() { aborts++; },
+    async cancelRun() { cancelRuns++; },
+    async getState() {
+      return {
+        connection: { id: "dialog-detach-agent", runtime: "cursor-cloud" }, run,
+        thinkingLevel: "low", isStreaming: true, isCompacting: false,
+      };
+    },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const context = {
+    ui: {
+      async custom(factory) {
+        let finish;
+        const result = new Promise((resolve) => { finish = resolve; });
+        const panel = factory(
+          { requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } },
+          { matches(data, action) { return data === "ctrl+d" && action === "app.exit"; } }, finish,
+        );
+        await waitFor(() => controller.state.busy);
+        panel.handleInput("ctrl+d");
+        return await result;
+      },
+    },
+  };
+  assert.deepEqual(await runSubagentDialog(context, controller, "Detach Cursor"), { action: "cancel" });
+  assert.equal(disposed, 1);
+  assert.equal(aborts, 0);
+  assert.equal(cancelRuns, 0);
+  assert.equal(controller.state.connected, false);
+});
+
+test("closing one of two Cursor dialogs keeps the other observation connected", async () => {
+  let disposals = 0;
+  let aborts = 0;
+  let cancelRuns = 0;
+  let followUps = 0;
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, () => ({
+    runtime: "cursor-cloud", displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() {}, async stop() {}, async disposeObservation() { disposals++; }, getDiagnostics() { return ""; },
+    async prompt() { return { run: { id: "unused", runtime: "cursor-cloud" } }; }, async steer() {},
+    async followUp() { followUps++; return { run: { id: `follow-up-${followUps}`, runtime: "cursor-cloud" } }; },
+    async abort() { aborts++; }, async cancelRun() { cancelRuns++; },
+    async getState() {
+      return {
+        connection: { id: "two-panel-agent", runtime: "cursor-cloud" },
+        thinkingLevel: "low", isStreaming: false, isCompacting: false,
+      };
+    },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const dialogs = [];
+  const context = {
+    ui: {
+      custom(factory) {
+        return new Promise((resolve) => {
+          const panel = factory(
+            { requestRender() {} }, {},
+            { matches(data, action) { return data === "ctrl+d" && action === "app.exit"; } }, resolve,
+          );
+          dialogs.push(panel);
+        });
+      },
+    },
+  };
+  const first = runSubagentDialog(context, controller, "First Cursor panel");
+  const second = runSubagentDialog(context, controller, "Second Cursor panel");
+  await waitFor(() => dialogs.length === 2 && controller.state.connected);
+  controller.state.canFollowUp = true;
+  dialogs[0].handleInput("ctrl+d");
+  assert.deepEqual(await first, { action: "cancel" });
+  assert.equal(controller.state.connected, true);
+  assert.equal(controller.state.readOnly, false);
+  assert.equal(await controller.submit("Continue from the remaining panel", "followUp"), true);
+  assert.equal(followUps, 1);
+  assert.equal(disposals, 0);
+
+  dialogs[1].handleInput("ctrl+d");
+  assert.deepEqual(await second, { action: "cancel" });
+  assert.equal(disposals, 1);
+  assert.equal(aborts, 0);
+  assert.equal(cancelRuns, 0);
+  assert.equal(controller.state.connected, false);
+  await controller.stop();
+});
+
+test("controller stop remains forced while a Cursor panel is attached", async () => {
+  let backendStops = 0;
+  let observerDisposals = 0;
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, () => ({
+    runtime: "cursor-cloud", displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() {}, async stop() { backendStops++; observerDisposals++; }, async disposeObservation() { observerDisposals++; },
+    getDiagnostics() { return ""; }, async prompt() { return { run: { id: "unused", runtime: "cursor-cloud" } }; },
+    async steer() {}, async followUp() { return { run: { id: "unused", runtime: "cursor-cloud" } }; }, async abort() {},
+    async getState() { return { connection: { id: "forced-stop-agent", runtime: "cursor-cloud" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const detach = controller.attach({ ui: {} }, () => {}, () => {});
+  await controller.start();
+  await controller.stop();
+  assert.equal(backendStops, 1);
+  assert.equal(observerDisposals, 1, "backend stop disposes even while a panel is attached");
+  assert.equal(controller.state.connected, false);
+  detach();
+});
+
+test("a new Cursor panel start waits for an in-flight last-panel observer disposal", async () => {
+  let starts = 0;
+  let disposals = 0;
+  let followUps = 0;
+  let signalDisposal;
+  let releaseDisposal;
+  const disposalStarted = new Promise((resolve) => { signalDisposal = resolve; });
+  const disposalGate = new Promise((resolve) => { releaseDisposal = resolve; });
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, () => ({
+    runtime: "cursor-cloud", displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() { starts++; }, async stop() {}, async disposeObservation() {
+      disposals++;
+      signalDisposal();
+      await disposalGate;
+    },
+    getDiagnostics() { return ""; }, async prompt() { return { run: { id: "unused", runtime: "cursor-cloud" } }; },
+    async steer() {}, async followUp() { followUps++; return { run: { id: `restart-follow-up-${followUps}`, runtime: "cursor-cloud" } }; }, async abort() {},
+    async getState() { return { connection: { id: "dispose-race-agent", runtime: "cursor-cloud" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const firstDetach = controller.attach({ ui: {} }, () => {}, () => {});
+  await controller.start();
+  firstDetach();
+  const disposing = controller.disposePanelObservation();
+  await disposalStarted;
+
+  const secondDetach = controller.attach({ ui: {} }, () => {}, () => {});
+  let restarted = false;
+  const restarting = controller.start().then(() => { restarted = true; });
+  await Promise.resolve();
+  assert.equal(restarted, false, "start waits until the stale observer has detached");
+  releaseDisposal();
+  await disposing;
+  await restarting;
+  assert.equal(starts, 2);
+  assert.equal(controller.state.connected, true);
+  controller.state.canFollowUp = true;
+  assert.equal(await controller.submit("Continue after observer restart", "followUp"), true);
+  assert.equal(followUps, 1);
+  secondDetach();
+  await controller.disposePanelObservation();
+  assert.equal(disposals, 2);
+  await controller.stop();
+});
+
+test("a parent prompt waits through the last-panel disposal grace window", async () => {
+  let callbacks;
+  let starts = 0;
+  let disposals = 0;
+  let prompts = 0;
+  let run;
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, (options) => {
+    callbacks = options;
+    return {
+      runtime: "cursor-cloud", displayName: "Cursor Cloud",
+      capabilities: {
+        extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+        modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+      },
+      async start() { starts++; }, async stop() {}, async disposeObservation() { disposals++; }, getDiagnostics() { return ""; },
+      async prompt() {
+        prompts++;
+        run = { id: `grace-parent-${prompts}`, runtime: "cursor-cloud" };
+        callbacks.onEvent({ type: "run_started", run });
+        return { run };
+      },
+      async steer() {}, async followUp() { return { run }; }, async abort() {},
+      async getState() { return { connection: { id: "grace-parent-agent", runtime: "cursor-cloud" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+      async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+      async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+      async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+    };
+  });
+  const detach = controller.attach({ ui: {} }, () => {}, () => {});
+  await controller.start();
+  detach();
+  const disposing = controller.disposePanelObservation();
+  const parent = controller.promptAndWait("Continue after the panel closes");
+  await disposing;
+  await waitFor(() => prompts === 1);
+  assert.equal(disposals, 1);
+  assert.equal(starts, 2, "the parent prompt restarts after the published disposal");
+  callbacks.onEvent({ type: "message_completed", run, message: { role: "assistant", text: "Continued", thinking: "", stopReason: "stop" } });
+  callbacks.onEvent({ type: "run_settled", run });
+  assert.equal((await parent).text, "Continued");
+  await controller.stop();
+});
+
+test("stop during a panel-observation wait does not restart the backend", async () => {
+  let starts = 0;
+  let signalDisposal;
+  let releaseDisposal;
+  const disposalStarted = new Promise((resolve) => { signalDisposal = resolve; });
+  const disposalGate = new Promise((resolve) => { releaseDisposal = resolve; });
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, () => ({
+    runtime: "cursor-cloud", displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() { starts++; }, async stop() {}, async disposeObservation() {
+      signalDisposal();
+      await disposalGate;
+    },
+    getDiagnostics() { return ""; }, async prompt() { return { run: { id: "unused", runtime: "cursor-cloud" } }; },
+    async steer() {}, async followUp() { return { run: { id: "unused", runtime: "cursor-cloud" } }; }, async abort() {},
+    async getState() { return { connection: { id: "stop-wait-agent", runtime: "cursor-cloud" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const detach = controller.attach({ ui: {} }, () => {}, () => {});
+  await controller.start();
+  detach();
+  const disposing = controller.disposePanelObservation();
+  await disposalStarted;
+  const restarting = controller.start();
+  const stopping = controller.stop();
+  releaseDisposal();
+  await Promise.all([disposing, restarting, stopping]);
+  assert.equal(starts, 1);
+  assert.equal(controller.state.connected, false);
+  assert.equal(controller.state.lifecycle, "stopped");
+});
+
+test("Pi panel attachments restore the previous live extension UI target", async () => {
+  let callbacks;
+  const responses = [];
+  const baseInputs = [];
+  const olderInputs = [];
+  const newerInputs = [];
+  let baseSelects = 0;
+  let olderSelects = 0;
+  let newerSelects = 0;
+  const controller = new SubagentSessionController({
+    ui: {
+      async select() { baseSelects++; return "base choice"; },
+      setEditorText(text) { baseInputs.push(text); },
+    },
+  }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, (options) => {
+    callbacks = options;
+    return {
+      runtime: "pi", displayName: "Pi",
+      capabilities: {
+        extensionUi: true, steering: true, queuedFollowUp: true, settledFollowUp: false,
+        modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+      },
+      async start() {}, async stop() {}, getDiagnostics() { return ""; },
+      async prompt() { return { handledWithoutRun: true }; }, async steer() {}, async followUp() { return { handledWithoutRun: true }; }, async abort() {},
+      async getState() { return { connection: { id: "pi-panel-target", runtime: "pi" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+      async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+      async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+      async setThinkingLevel() {}, async cycleThinkingLevel() { return null; },
+      respondToExtensionUI(response) { responses.push(response); },
+    };
+  });
+  await controller.start();
+  const olderDetach = controller.attach({
+    ui: { async select() { olderSelects++; return "older choice"; } },
+  }, () => {}, (text) => olderInputs.push(text));
+  const newerDetach = controller.attach({
+    ui: { async select() { newerSelects++; return "newer choice"; } },
+  }, () => {}, (text) => newerInputs.push(text));
+  newerDetach();
+  callbacks.onEvent({ type: "extension_ui_request", request: { method: "set_editor_text", text: "to older" } });
+  callbacks.onEvent({ type: "extension_ui_request", request: { method: "select", id: "older-select", title: "Choose", options: ["older choice"] } });
+  await waitFor(() => responses.length === 1);
+  assert.deepEqual(olderInputs, ["to older"]);
+  assert.deepEqual(newerInputs, []);
+  assert.equal(olderSelects, 1);
+  assert.equal(newerSelects, 0);
+  assert.deepEqual(responses[0], { id: "older-select", value: "older choice" });
+
+  olderDetach();
+  callbacks.onEvent({ type: "extension_ui_request", request: { method: "set_editor_text", text: "to base context" } });
+  callbacks.onEvent({ type: "extension_ui_request", request: { method: "select", id: "base-select", title: "Choose", options: ["base choice"] } });
+  await waitFor(() => responses.length === 2);
+  assert.deepEqual(olderInputs, ["to older"]);
+  assert.deepEqual(newerInputs, []);
+  assert.deepEqual(baseInputs, ["to base context"]);
+  assert.equal(baseSelects, 1);
+  assert.deepEqual(responses[1], { id: "base-select", value: "base choice" });
+  await controller.stop();
+});
+
+test("a no-panel Pi model prompt uses the base extension UI", async () => {
+  let callbacks;
+  let run;
+  const responses = [];
+  const editorTexts = [];
+  const controller = new SubagentSessionController({
+    ui: {
+      async select() { return "selected"; },
+      async confirm() { return true; },
+      async input() { return "entered"; },
+      async editor() { return "edited"; },
+      setEditorText(text) { editorTexts.push(text); },
+    },
+  }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, (options) => {
+    callbacks = options;
+    return {
+      runtime: "pi", displayName: "Pi",
+      capabilities: {
+        extensionUi: true, steering: true, queuedFollowUp: true, settledFollowUp: false,
+        modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+      },
+      async start() {}, async stop() {}, getDiagnostics() { return ""; },
+      async prompt() {
+        run = { id: "base-ui-run", runtime: "pi" };
+        callbacks.onEvent({ type: "run_started", run });
+        callbacks.onEvent({ type: "extension_ui_request", request: { method: "select", id: "select", title: "Select", options: ["selected"] } });
+        callbacks.onEvent({ type: "extension_ui_request", request: { method: "confirm", id: "confirm", title: "Confirm", message: "Continue?" } });
+        callbacks.onEvent({ type: "extension_ui_request", request: { method: "input", id: "input", title: "Input", placeholder: "Value" } });
+        callbacks.onEvent({ type: "extension_ui_request", request: { method: "editor", id: "editor", title: "Editor", prefill: "Draft" } });
+        callbacks.onEvent({ type: "extension_ui_request", request: { method: "set_editor_text", text: "Base editor text" } });
+        return { run };
+      },
+      async steer() {}, async followUp() { return { run }; }, async abort() {},
+      async getState() { return { connection: { id: "base-ui-agent", runtime: "pi" }, thinkingLevel: "low", isStreaming: false, isCompacting: false }; },
+      async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+      async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+      async setThinkingLevel() {}, async cycleThinkingLevel() { return null; },
+      respondToExtensionUI(response) { responses.push(response); },
+    };
+  });
+  const pending = controller.promptAndWait("Use the model extension UI");
+  await waitFor(() => responses.length === 4);
+  assert.deepEqual(responses, [
+    { id: "select", value: "selected" },
+    { id: "confirm", confirmed: true },
+    { id: "input", value: "entered" },
+    { id: "editor", value: "edited" },
+  ]);
+  assert.deepEqual(editorTexts, ["Base editor text"]);
+  callbacks.onEvent({ type: "message_completed", run, message: { role: "assistant", text: "Done", thinking: "", stopReason: "stop" } });
+  callbacks.onEvent({ type: "run_settled", run });
+  assert.equal((await pending).text, "Done");
+  await controller.stop();
 });
 
 test("subagent RPC commands reject unsuccessful protocol responses", async (t) => {
@@ -737,6 +1440,53 @@ process.stdin.on("data", (chunk) => {
   await assert.rejects(client.followUp("hello"), /Rejected follow_up/);
   await assert.rejects(client.abort(), /Rejected abort/);
   await assert.rejects(client.setThinkingLevel("high"), /Rejected set_thinking_level/);
+  await client.stop();
+});
+
+test("subagent RPC prompt acceptance rejects promptly on cancellation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-rpc-cancel-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const server = join(root, "rpc-server.mjs");
+  await writeFile(server, `
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const newline = buffer.indexOf("\\n");
+    const line = buffer.slice(0, newline);
+    buffer = buffer.slice(newline + 1);
+    if (!line.trim()) continue;
+    const command = JSON.parse(line);
+    if (command.type === "prompt") {
+      process.stdout.write(JSON.stringify({ type: "prompt_received" }) + "\\n");
+      continue;
+    }
+    process.stdout.write(JSON.stringify({
+      type: "response",
+      id: command.id,
+      command: command.type,
+      success: true,
+      data: command.type === "get_state" ? { thinkingLevel: "off", isStreaming: false, isCompacting: false } : undefined,
+    }) + "\\n");
+  }
+});
+`);
+  const output = [];
+  const client = new SubagentRpcClient({
+    cwd: root,
+    args: [],
+    invocation: { command: process.execPath, args: [server] },
+    onOutput(event) { output.push(event); },
+    onExit() {},
+  });
+  await client.start();
+  const abort = new AbortController();
+  const pending = client.prompt("Wait indefinitely", abort.signal);
+  await waitFor(() => output.some((event) => event.type === "prompt_received"));
+  abort.abort(new Error("Parent prompt cancelled"));
+  await assert.rejects(pending, /Parent prompt cancelled/);
+  await client.abort();
   await client.stop();
 });
 
@@ -802,6 +1552,24 @@ test("parent prompts return before automatic compaction and can queue a follow-u
   await waitFor(() => harness.calls.followUp.length === 1);
   harness.settle("Session refresh summary");
   assert.equal((await followUp).text, "Session refresh summary");
+  await harness.controller.stop();
+});
+
+test("parent prompts return when a response completes after automatic compaction starts", async () => {
+  const harness = makeControllerHarness();
+  const pending = harness.controller.promptAndWait("Inspect authentication");
+  await waitFor(() => harness.calls.prompt.length === 1);
+  harness.startCompaction();
+
+  let returned = false;
+  void pending.then(() => { returned = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(returned, false);
+
+  harness.message("Authentication summary");
+  const result = await pending;
+  assert.equal(result.text, "Authentication summary");
+  assert.equal(harness.controller.state.busy, true);
   await harness.controller.stop();
 });
 
@@ -1030,7 +1798,7 @@ test("persistent subagent registry stores branch-local mutations and restores do
   assert.match(created.id, /^sa_[a-f0-9]{10}$/);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].customType, "persistent-subagents");
-  assert.equal(entries[0].data.version, 2);
+  assert.equal(entries[0].data.version, 3);
   assert.deepEqual(entries[0].data.removedIds, []);
   assert.equal(entries[0].data.upserts.length, 1);
 
@@ -1143,6 +1911,7 @@ test("persistent subagent registry stores branch-local mutations and restores do
       systemPrompt: "Analyze product requirements.",
       contextRequirements: "Provide the goal, constraints, Git base, and relevant scope.",
       preferredLifetime: "task",
+      preferredProfile: "fast",
       extensions: ["/personas/extensions/unsafe.ts"],
       skills: ["/personas/skills/product/SKILL.md"],
       filePath: "/personas/product-manager.md",
@@ -1158,6 +1927,7 @@ test("persistent subagent registry stores branch-local mutations and restores do
   assert.deepEqual(storedPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(storedPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
   assert.equal(storedPersona.preferredLifetime, "task");
+  assert.equal(storedPersona.preferredProfile, "fast");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, undefined);
 
@@ -1258,6 +2028,7 @@ NEEDS: A release decision from the parent`;
   assert.deepEqual(restoredPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(restoredPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
   assert.equal(restoredPersona.preferredLifetime, "task");
+  assert.equal(restoredPersona.preferredProfile, "fast");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, true);
   assert.deepEqual(storedSkilled.selectedSkillPaths, [
@@ -1310,7 +2081,7 @@ test("registry persistence is incremental and bounds stopped metadata", async (t
   assert.ok(registry.list().every(({ status }) => status === "stopped"));
   assert.throws(() => registry.summaryFor("bounded-0"), /Unknown subagent/);
   assert.equal(registry.summaryFor(`bounded-${MAX_RETAINED_STOPPED_SUBAGENTS + 4}`).status, "stopped");
-  assert.ok(entries.every(({ data }) => data.version === 2));
+  assert.ok(entries.every(({ data }) => data.version === 3));
   assert.ok(entries.every(({ data }) => data.upserts.length <= 1));
   assert.ok(entries.some(({ data }) => data.removedIds.length === 1));
   assert.ok(entries.every(({ data }) => data.subagents === undefined));
@@ -1648,7 +2419,7 @@ test("persona-based model creation remains unavailable when no personas are conf
   assert.match(result.details.error.message, /No subagent personas are configured; create requires an existing persona/i);
 });
 
-test("model-created subagents honor persona lifetime preferences and explicit overrides", async (t) => {
+test("model-created subagents honor persona lifetime and profile preferences", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-lifetimes-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDirectory = join(root, "personas");
@@ -1657,6 +2428,7 @@ test("model-created subagents honor persona lifetime preferences and explicit ov
 name: bounded-analyst
 description: Complete bounded analysis
 preferred-lifetime: one-shot
+preferred-profile: fast
 ---
 Return a complete analysis.
 `);
@@ -1740,8 +2512,9 @@ NEEDS: The expected behavior from the parent`;
     action: "list",
     kind: "personas",
   }, signal, undefined, context);
-  assert.match(personas.content[0].text, /bounded-analyst: Complete bounded analysis \[prefers one-shot\]/);
+  assert.match(personas.content[0].text, /bounded-analyst \[pi\]: Complete bounded analysis \[prefers one-shot\] \[prefers fast profile\]/);
   assert.equal(personas.details.personas[0].preferredLifetime, "one-shot");
+  assert.equal(personas.details.personas[0].preferredProfile, "fast");
   const invalidOneShot = await tool.execute("preferred-one-shot-without-prompt", {
     action: "create",
     name: "invalid-preferred-one-shot",
@@ -1760,6 +2533,8 @@ NEEDS: The expected behavior from the parent`;
     prompt: "Complete this bounded request",
   }, signal, undefined, context);
   assert.equal(oneShot.details.subagent.lifetime, "one-shot");
+  assert.equal(oneShot.details.subagent.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(oneShot.details.subagent.thinking, "high");
   assert.equal(oneShot.details.subagent.status, "stopped");
   assert.equal(oneShot.content[0].text, "Completed one-shot one-shot-default.\n\nBounded result");
 
@@ -1980,7 +2755,7 @@ Inspect the project without changing it.
     }, signal, undefined, context));
   }
   assert.deepEqual(
-    createdWithProfiles.slice(0, 3).map(({ details }) => ({
+    createdWithProfiles.map(({ details }) => ({
       model: details.subagent.model,
       thinking: details.subagent.thinking,
     })),
@@ -1988,6 +2763,7 @@ Inspect the project without changing it.
       { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
       { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
       { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
+      { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
     ],
   );
   const duplicate = await subagentTool.execute("create-duplicate-purpose", {
@@ -2034,7 +2810,7 @@ Inspect the project without changing it.
   const listed = await subagentTool.execute("list-with-purposes", {
     action: "list",
   }, signal, undefined, context);
-  assert.match(listed.content[0].text, /agent-9 \[dormant, persistent\]: Retain context for the replacement project area/);
+  assert.match(listed.content[0].text, /agent-9 \[pi, dormant, persistent\]: Retain context for the replacement project area/);
   assert.doesNotMatch(listed.content[0].text, /agent-1|sa_[a-f0-9]+|thinking|\/gpt|\/claude/);
   await events.get("session_shutdown")({}, context);
 });
@@ -2063,16 +2839,14 @@ test("forked persona args load bundled and declared resources with Pi's normal t
     systemPrompt: "You are a reviewer.",
     extensions: [SUBAGENT_EXTENSION_PATHS[0], "/personas/extensions/review.ts"],
     skills: ["/personas/skills/review/SKILL.md"],
-    model: "openai/gpt-5.4",
-    thinking: "medium",
     filePath: "/personas/reviewer.md",
   };
   const args = buildSubagentProcessArgs({
     mode: "fork",
     parentSessionFile: "/sessions/parent.jsonl",
     persona,
-    model: "anthropic/ignored",
-    thinking: "off",
+    model: "openai/gpt-5.4",
+    thinking: "medium",
     skills: ["/parent/skills/create-pr/SKILL.md", "/personas/skills/review/SKILL.md"],
   });
 
@@ -2107,8 +2881,6 @@ test("restored subagent args use its session model history", () => {
     systemPrompt: "Read the project.",
     extensions: [],
     skills: [],
-    model: "anthropic/should-not-override",
-    thinking: "max",
     filePath: "/personas/codebase-explorer.md",
   };
   const args = buildSubagentProcessArgs({
@@ -2190,17 +2962,12 @@ test("bundled personas provide focused defaults and user personas override by na
     "Provide the objective, subsystem or scope, key questions, and relevant constraints.",
   );
   assert.deepEqual(
-    bundled.personas.map(({ name, model, thinking, preferredLifetime }) => ({
-      name,
-      model,
-      thinking,
-      preferredLifetime,
-    })),
+    bundled.personas.map(({ name, preferredLifetime, preferredProfile }) => ({ name, preferredLifetime, preferredProfile })),
     [
-      { name: "codebase-explorer", model: "openai-codex/gpt-5.6-luna", thinking: "high", preferredLifetime: "persistent" },
-      { name: "doc-auditor", model: "openai-codex/gpt-5.6-luna", thinking: "high", preferredLifetime: "one-shot" },
-      { name: "reviewer", model: "openai-codex/gpt-5.6-terra", thinking: "xhigh", preferredLifetime: "task" },
-      { name: "test-analyst", model: "openai-codex/gpt-5.6-terra", thinking: "xhigh", preferredLifetime: "one-shot" },
+      { name: "codebase-explorer", preferredLifetime: "persistent", preferredProfile: "fast" },
+      { name: "doc-auditor", preferredLifetime: "one-shot", preferredProfile: "fast" },
+      { name: "reviewer", preferredLifetime: "task", preferredProfile: "balanced" },
+      { name: "test-analyst", preferredLifetime: "one-shot", preferredProfile: "balanced" },
     ],
   );
   assert.match(
@@ -2220,6 +2987,7 @@ Review using local conventions.
   assert.deepEqual(merged.diagnostics, []);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").description, "Custom reviewer");
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredLifetime, undefined);
+  assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredProfile, undefined);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").filePath, join(root, "reviewer.md"));
 });
 
@@ -2247,14 +3015,13 @@ context-requirements: >
   Provide the goal, expected behavior, constraints, Git base revision,
   and relevant scope. Do not include patch text.
 preferred-lifetime: task
+preferred-profile: deep
 extensions:
   - ../extensions/context.ts
 skill: ../skills/research/SKILL.md
 skills:
   - ../skills/research/SKILL.md
   - ../skills/product/SKILL.md
-model: anthropic/claude-sonnet-4-6
-thinking: low
 ---
 You are a product manager, not a coding agent.
 `);
@@ -2304,29 +3071,43 @@ preferred-lifetime: temporary
 ---
 This persona should be rejected.
 `);
+  await writeFile(join(personaDir, "model.md"), `---
+name: model
+description: Invalid model selection
+model: anthropic/claude-sonnet-4-6
+---
+This persona should be rejected.
+`);
+  await writeFile(join(personaDir, "thinking.md"), `---
+name: thinking
+description: Invalid thinking selection
+thinking: low
+---
+This persona should be rejected.
+`);
 
   const discovery = loadSubagentPersonas(personaDir);
   assert.equal(discovery.personas.length, 1);
   assert.equal(
     formatPersonaForModel(discovery.personas[0]),
-    "product-manager: Explore product decisions [prefers task] [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
+    "product-manager [pi]: Explore product decisions [prefers task] [prefers deep profile] [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
   );
   assert.deepEqual(discovery.personas[0], {
     name: "product-manager",
     description: "Explore product decisions",
     systemPrompt: "You are a product manager, not a coding agent.",
+    runtime: "pi",
     contextRequirements: "Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.",
     preferredLifetime: "task",
+    preferredProfile: "deep",
     extensions: [join(root, "extensions", "context.ts")],
     skills: [
       join(root, "skills", "research", "SKILL.md"),
       join(root, "skills", "product", "SKILL.md"),
     ],
-    model: "anthropic/claude-sonnet-4-6",
-    thinking: "low",
     filePath: join(personaDir, "a-product.md"),
   });
-  assert.equal(discovery.diagnostics.length, 8);
+  assert.equal(discovery.diagnostics.length, 10);
   assert.ok(discovery.diagnostics.some((diagnostic) => /duplicate subagent persona/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name.*at most 64/i.test(diagnostic)));
@@ -2335,4 +3116,495 @@ This persona should be rejected.
   assert.ok(discovery.diagnostics.some((diagnostic) => /skill path does not exist/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /context-requirements exceeds 240 characters/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid preferred-lifetime.*temporary/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /model is not valid in a persona.*creation profile/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /thinking is not valid in a persona.*creation profile/i.test(diagnostic)));
+});
+
+test("public stop output reports pending and uncertain Cursor cleanup", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-stop-output-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const commands = new Map();
+  const notifications = [];
+  const originalStop = PersistentSubagentRegistry.prototype.stop;
+  const originalSummaryFor = PersistentSubagentRegistry.prototype.summaryFor;
+  t.after(() => {
+    PersistentSubagentRegistry.prototype.stop = originalStop;
+    PersistentSubagentRegistry.prototype.summaryFor = originalSummaryFor;
+  });
+  let status = "archive-pending";
+  const summary = () => ({
+    id: "sa_cursor",
+    name: "cursor-agent",
+    runtime: "cursor-cloud",
+    purpose: "Inspect Cloud cleanup state",
+    lifetime: "task",
+    status,
+    createdAt: 1,
+    lastActiveAt: 1,
+  });
+  PersistentSubagentRegistry.prototype.stop = async () => summary();
+  PersistentSubagentRegistry.prototype.summaryFor = () => summary();
+  subagentsModule.default({
+    registerTool(tool) { tools.set(tool.name, tool); },
+    registerCommand(name, command) { commands.set(name, command); },
+    registerShortcut() {},
+    on() {},
+  }, { personaDirectory: join(root, "missing-personas") });
+  const context = {
+    cwd: root,
+    mode: "tui",
+    hasUI: true,
+    model: undefined,
+    scopedModels: [],
+    sessionManager: {
+      getSessionId: () => "stop-output-parent",
+      getSessionFile: () => join(root, "parent.jsonl"),
+      getBranch: () => [],
+    },
+    ui: {
+      notify(message, level) { notifications.push({ message, level }); },
+      async confirm() { return true; },
+      async select() { return undefined; },
+    },
+  };
+
+  const tool = tools.get("subagent");
+  const archivePending = await tool.execute("archive-pending", {
+    action: "stop",
+    id: "cursor-agent",
+  }, undefined, undefined, context);
+  assert.match(archivePending.content[0].text, /archival is pending.*Retry action "stop"/i);
+  assert.doesNotMatch(archivePending.content[0].text, /^Stopped /);
+  assert.equal(archivePending.details.ok, false);
+  await commands.get("subagents").handler("--stop cursor-agent", context);
+  assert.match(notifications.at(-1).message, /archival is pending.*Retry action "stop"/i);
+  assert.doesNotMatch(notifications.at(-1).message, /^Stopped /);
+
+  status = "remote-state-unknown";
+  const unknown = await tool.execute("remote-unknown", {
+    action: "stop",
+    id: "cursor-agent",
+  }, undefined, undefined, context);
+  assert.match(unknown.content[0].text, /not confirmed.*remote state is unknown.*action "status"/i);
+  assert.doesNotMatch(unknown.content[0].text, /^Stopped /);
+  assert.equal(unknown.details.ok, false);
+  await commands.get("subagents").handler("--stop cursor-agent", context);
+  assert.match(notifications.at(-1).message, /not confirmed.*remote state is unknown.*action "status"/i);
+  assert.doesNotMatch(notifications.at(-1).message, /^Stopped /);
+
+  status = "stopping";
+  const stopping = await tool.execute("stopping", {
+    action: "stop",
+    id: "cursor-agent",
+  }, undefined, undefined, context);
+  assert.match(stopping.content[0].text, /^Stopping cursor-agent.*action "status"/i);
+  assert.equal(stopping.details.ok, false);
+
+  status = "stopped";
+  const stopped = await tool.execute("stopped", {
+    action: "stop",
+    id: "cursor-agent",
+  }, undefined, undefined, context);
+  assert.equal(stopped.content[0].text, "Stopped cursor-agent.");
+  assert.equal(stopped.details.ok, true);
+});
+
+test("public status tool awaits reconciliation and returns reconciled details", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-status-output-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const originalStatus = PersistentSubagentRegistry.prototype.status;
+  t.after(() => { PersistentSubagentRegistry.prototype.status = originalStatus; });
+  const summary = {
+    id: "sa_reconciled",
+    name: "reconciled-agent",
+    runtime: "cursor-cloud",
+    purpose: "Inspect reconciled remote state",
+    lifetime: "task",
+    status: "idle",
+    createdAt: 1,
+    lastActiveAt: 2,
+  };
+  let entered;
+  const statusEntered = new Promise((resolve) => { entered = resolve; });
+  let resolveSummary;
+  PersistentSubagentRegistry.prototype.status = async () => {
+    entered();
+    return await new Promise((resolve) => { resolveSummary = resolve; });
+  };
+  subagentsModule.default({
+    registerTool(tool) { tools.set(tool.name, tool); },
+    registerCommand() {},
+    registerShortcut() {},
+    on() {},
+  }, { personaDirectory: join(root, "missing-personas") });
+  const context = {
+    cwd: root,
+    mode: "tui",
+    hasUI: true,
+    model: undefined,
+    scopedModels: [],
+    sessionManager: {
+      getSessionId: () => "status-output-parent",
+      getSessionFile: () => join(root, "parent.jsonl"),
+      getBranch: () => [],
+    },
+    ui: {},
+  };
+
+  const resultPromise = tools.get("subagent").execute("reconciled-status", {
+    action: "status",
+    id: "reconciled-agent",
+  }, undefined, undefined, context);
+  await statusEntered;
+  let settled = false;
+  void resultPromise.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  resolveSummary(summary);
+  const result = await resultPromise;
+  assert.equal(result.content[0].text, "reconciled-agent [idle, task]: Inspect reconciled remote state");
+  assert.deepEqual(result.details.subagent, summary);
+});
+
+test("model-facing subagent results retain policy, dirty-worktree, artifact, and partial-usage details", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-policy-output-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const originalPrompt = PersistentSubagentRegistry.prototype.prompt;
+  const originalSummaryFor = PersistentSubagentRegistry.prototype.summaryFor;
+  t.after(() => {
+    PersistentSubagentRegistry.prototype.prompt = originalPrompt;
+    PersistentSubagentRegistry.prototype.summaryFor = originalSummaryFor;
+  });
+  const summary = {
+    id: "sa_policy_result", name: "policy-result", runtime: "cursor-cloud", purpose: "Inspect policy metadata", lifetime: "task", status: "idle", createdAt: 1, lastActiveAt: 1,
+  };
+  let reportedUsage = { input: 0, totalTokens: 0, reasoningTokens: 0, cost: { total: 0 } };
+  PersistentSubagentRegistry.prototype.summaryFor = () => summary;
+  PersistentSubagentRegistry.prototype.prompt = async () => ({
+    summary,
+    text: "Safe response content",
+    usage: reportedUsage,
+    responseProduced: true,
+    handledWithoutAgent: false,
+    stopReason: "stop",
+    policyWarnings: ["Cursor Cloud reported branch metadata."],
+    runtimeWarnings: ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."],
+    artifacts: [{ id: "artifact-1", name: "report.md", path: "report.md", sizeBytes: 12 }],
+  });
+  subagentsModule.default({
+    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, registerShortcut() {}, on() {},
+  }, { personaDirectory: join(root, "missing-personas") });
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
+    sessionManager: { getSessionId: () => "policy-output-parent", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] }, ui: {},
+  };
+  const result = await tools.get("subagent").execute("policy-result", { action: "prompt", id: summary.id, prompt: "Read saved result" }, undefined, undefined, context);
+  assert.match(result.content[0].text, /^Policy warning: Cursor Cloud reported branch metadata\.\nRuntime warning: The worktree has local changes\. Cursor Cloud sees only the committed HEAD state\.\n\nSafe response content$/);
+  assert.deepEqual(result.details.policyWarnings, ["Cursor Cloud reported branch metadata."]);
+  assert.deepEqual(result.details.runtimeWarnings, ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."]);
+  assert.deepEqual(result.details.artifacts, [{ id: "artifact-1", name: "report.md", path: "report.md", sizeBytes: 12 }]);
+  assert.deepEqual(result.details.usage, { input: 0, totalTokens: 0, reasoningTokens: 0, cost: { total: 0 } });
+  assert.equal(result.usage, undefined, "partial Cursor usage remains structured details, not incomplete Pi accounting");
+
+  summary.runtime = "pi";
+  reportedUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  const piResult = await tools.get("subagent").execute("pi-usage-result", { action: "prompt", id: summary.id, prompt: "Read Pi usage" }, undefined, undefined, context);
+  assert.deepEqual(piResult.usage, reportedUsage);
+  assert.equal(Object.hasOwn(piResult.details, "usage"), false, "Pi usage stays only in the complete tool usage payload");
+});
+
+test("public Pi tool retains complete zero usage when no usage event arrives", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-public-pi-zero-usage-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const events = new Map();
+  const backendFactory = (options) => {
+    const run = { id: "run-pi-zero-usage", runtime: "pi" };
+    return {
+      runtime: "pi", displayName: "Pi", getDiagnostics() { return ""; },
+      capabilities: { extensionUi: false, steering: true, queuedFollowUp: true, modelControls: false, thinkingControls: false, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false },
+      async start() {}, async stop() {},
+      async prompt() {
+        options.onEvent({ type: "run_started", run });
+        options.onEvent({ type: "message_completed", run, message: { role: "assistant", text: "Pi result without usage event", thinking: "", stopReason: "stop" } });
+        options.onEvent({ type: "run_settled", run });
+        return { run };
+      },
+      async steer() {}, async followUp() { return { run }; }, async abort() {},
+      async getState() { return { connection: { id: "pi-zero-usage", runtime: "pi" }, thinkingLevel: "off", isStreaming: false, isCompacting: false }; },
+      async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+      async setModel() { throw new Error("unsupported"); }, async cycleModel() { return null; }, async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+    };
+  };
+  const pi = {
+    getThinkingLevel() { return "off"; }, appendEntry() {}, registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, registerShortcut() {}, on(name, listener) { events.set(name, listener); },
+  };
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
+    sessionManager: { getSessionId: () => "public-pi-zero-usage", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] }, ui: {},
+  };
+  subagentsModule.default(pi, { personaDirectory: join(root, "missing-personas"), backendFactory });
+  events.get("session_start")({}, context);
+  const result = await tools.get("subagent").execute("pi-zero-usage", {
+    action: "create", name: "pi-zero-usage", purpose: "Verify Pi zero usage", lifetime: "task", mode: "fresh", prompt: "Respond without usage",
+  }, undefined, undefined, context);
+  assert.deepEqual(result.usage, {
+    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  });
+  assert.equal(Object.hasOwn(result.details, "usage"), false);
+});
+
+test("public Cursor one-shot oversized results retain a task and dispatch a new follow-up", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-public-cursor-oversized-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const events = new Map();
+  const runs = new Map();
+  const sends = [];
+  let archives = 0;
+  const sha = "b".repeat(40);
+  const makeRun = (id, result) => ({
+    id, requestId: `request-${id}`, agentId: agent.agentId, status: "finished", result, createdAt: sends.length,
+    supports(operation) { return operation === "wait"; }, unsupportedReason() { return undefined; }, async *stream() {},
+    async wait() { return { id, requestId: `request-${id}`, status: "finished", result }; }, async cancel() {}, onDidChangeStatus() { return () => {}; },
+  });
+  const agent = {
+    agentId: "",
+    async send(message, options) {
+      sends.push({ message, options });
+      const id = `run-oversized-${sends.length}`;
+      const result = sends.length === 1 ? "x".repeat(MAX_SUBAGENT_RESPONSE_BYTES + 1_000) : "New follow-up result";
+      const run = makeRun(id, result);
+      runs.set(id, run);
+      return run;
+    },
+    close() {}, async listArtifacts() { return []; }, async getUsage() { return {}; },
+  };
+  const sdk = {
+    async createAgent(options) { agent.agentId = options.agentId; return agent; }, async resumeAgent(agentId) { agent.agentId = agentId; return agent; },
+    async getAgent() { return { status: "finished" }; }, async listRuns() { return { runs: [...runs.values()], complete: true }; },
+    async getRun(id) { return runs.get(id); }, async cancelRun() { throw new Error("terminal results must not cancel"); },
+    async archiveAgent() { archives++; },
+    async listModels() {
+      return [{ id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }];
+    }, async listRepositories() { return []; },
+  };
+  const catalog = new CursorModelCatalog(sdk);
+  const git = {
+    async run(_cwd, args) {
+      const key = args.join(" ");
+      const stdout = key === "rev-parse --show-toplevel" ? root
+        : key === "rev-parse --verify HEAD^{commit}" ? sha
+        : key === "symbolic-ref --quiet --short HEAD" ? "main"
+        : key === "config --get branch.main.remote" ? "origin"
+        : key === "remote get-url origin" ? "https://github.com/example/project.git"
+        : key === "rev-parse --verify --quiet @{upstream}" ? sha
+        : key === "config --get branch.main.merge" ? "refs/heads/main"
+        : key === "rev-list --count @{upstream}..HEAD" ? "0"
+        : key === "status --porcelain=v1 -z" ? ""
+        : "";
+      return { exitCode: stdout || key === "status --porcelain=v1 -z" ? 0 : 1, stdout, stderr: "" };
+    },
+  };
+  const backendFactory = (options) => options.cursor
+    ? new CursorCloudBackend({ ...options, cursor: { ...options.cursor, sdk, catalog, git } })
+    : (() => { throw new Error("Pi backend is not part of this Cursor test"); })();
+  const pi = {
+    getThinkingLevel() { return "off"; }, appendEntry() {}, registerTool(tool) { tools.set(tool.name, tool); },
+    registerCommand() {}, registerShortcut() {}, on(name, listener) { events.set(name, listener); },
+  };
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
+    sessionManager: { getSessionId: () => "public-cursor-oversized", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] }, ui: {},
+  };
+  subagentsModule.default(pi, {
+    personaDirectory: join(root, "missing-personas"), backendFactory, cursorLifecycle: createCursorSubagentLifecyclePort(sdk),
+  });
+  events.get("session_start")({}, context);
+  const tool = tools.get("subagent");
+  const oversized = await tool.execute("cursor-oversized", {
+    action: "create", name: "cursor-oversized", runtime: "cursor-cloud", purpose: "Retain an oversized Cloud result", lifetime: "one-shot", mode: "fresh", prompt: "Return a large result",
+  }, undefined, undefined, context);
+  assert.equal(oversized.details.ok, true, oversized.content[0].text);
+  const id = oversized.details.subagent.id;
+  assert.equal(oversized.details.subagent.lifetime, "task");
+  assert.match(oversized.content[0].text, /^Retained .* as a task because its response was truncated\./);
+  assert.equal(archives, 0, "no one-shot archive starts before the retained ToolResult reaches turn_end");
+  await events.get("turn_end")({
+    message: { role: "assistant", content: [] },
+    toolResults: [{ role: "toolResult", toolName: "subagent", details: oversized.details }],
+  }, context);
+  assert.equal(archives, 0, "promoted oversized results remain reusable after acknowledgement");
+  const followUp = await tool.execute("cursor-oversized-follow-up", {
+    action: "prompt", id, prompt: "Continue with a compact result",
+  }, undefined, undefined, context);
+  assert.equal(followUp.content[0].text, "New follow-up result");
+  assert.equal(sends.length, 2, "the follow-up sends a new run instead of replaying the oversized result");
+  await events.get("turn_end")({
+    message: { role: "assistant", content: [] },
+    toolResults: [{ role: "toolResult", toolName: "subagent", details: followUp.details }],
+  }, context);
+});
+
+test("public Cursor tool actions use the injected real backend without a loader or network", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-public-cursor-actions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tools = new Map();
+  const events = new Map();
+  const persisted = [];
+  const sends = [];
+  const backendEvents = [];
+  const runs = new Map();
+  let creates = 0;
+  let cancels = 0;
+  let archives = 0;
+  let loaderCalls = 0;
+  const sha = "a".repeat(40);
+  const makeRun = (id, result) => ({
+    id,
+    requestId: `request-${id}`,
+    agentId: agent.agentId,
+    createdAt: runs.size + 1,
+    status: "finished",
+    result,
+    usage: { inputTokens: 3, reasoningTokens: 1, totalTokens: 3 },
+    git: { branches: [{ repoUrl: "https://github.com/example/project", prUrl: "https://github.com/example/project/pull/7" }] },
+    supports(operation) { return operation === "wait"; }, unsupportedReason() { return undefined; }, async *stream() {},
+    async wait() { return { id, requestId: `request-${id}`, status: "finished", result, usage: { inputTokens: 3, reasoningTokens: 1, totalTokens: 3 }, git: { branches: [{ repoUrl: "https://github.com/example/project", prUrl: "https://github.com/example/project/pull/7" }] } }; },
+    async cancel() {}, onDidChangeStatus() { return () => {}; },
+  });
+  const agent = {
+    agentId: "",
+    async send(message, options) {
+      const saved = persisted.flatMap((entry) => entry.upserts ?? []).at(-1);
+      assert.equal(saved.agentId, agent.agentId, "agent identity persists before send");
+      assert.ok(saved.pendingOperations.some((operation) => operation.kind === "start-run" || operation.kind === "follow-up"), "send key persists before send");
+      sends.push({ message, options });
+      const run = makeRun(`run-public-${sends.length}`, sends.length === 1 ? "Initial public result" : "Follow-up public result");
+      runs.set(run.id, run);
+      return run;
+    },
+    close() {},
+    async listArtifacts() { return [{ path: "report.md", sizeBytes: 12 }, { path: "logs/summary.txt", sizeBytes: 8 }]; },
+    async getUsage() { return {}; },
+  };
+  const sdk = {
+    get load() { loaderCalls++; throw new Error("production SDK loader must not run"); },
+    async createAgent(options) {
+      creates++;
+      agent.agentId = options.agentId;
+      const saved = persisted.flatMap((entry) => entry.upserts ?? []).at(-1);
+      assert.equal(saved.agentId, options.agentId, "lazy agent identity persists before Agent.create");
+      assert.equal(Object.hasOwn(options, "mcpServers"), false);
+      assert.equal(Object.hasOwn(options.cloud, "mcpServers"), false);
+      assert.deepEqual(options.cloud.metadata, { "pi-subagent-id": saved.id, "pi-subagent-lifetime": "task" });
+      return agent;
+    },
+    async resumeAgent(agentId) { agent.agentId = agentId; return agent; },
+    async getAgent() { return { status: "finished" }; },
+    async listRuns() { return { runs: [...runs.values()], complete: true }; },
+    async getRun(id) { return runs.get(id); },
+    async cancelRun() { cancels++; },
+    async archiveAgent() { archives++; },
+    async listModels() { return [{ id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }]; },
+    async listRepositories() { return []; },
+  };
+  const catalog = new CursorModelCatalog(sdk);
+  const git = {
+    async run(_cwd, args) {
+      const key = args.join(" ");
+      const stdout = key === "rev-parse --show-toplevel" ? root
+        : key === "rev-parse --verify HEAD^{commit}" ? sha
+        : key === "symbolic-ref --quiet --short HEAD" ? "main"
+        : key === "config --get branch.main.remote" ? "origin"
+        : key === "remote get-url origin" ? "https://github.com/example/project.git"
+        : key === "rev-parse --verify --quiet @{upstream}" ? sha
+        : key === "config --get branch.main.merge" ? "refs/heads/main"
+        : key === "rev-list --count @{upstream}..HEAD" ? "0"
+        : key === "status --porcelain=v1 -z" ? "M src/local-only.ts\0"
+        : "";
+      return { exitCode: stdout || key === "status --porcelain=v1 -z" ? 0 : 1, stdout, stderr: "" };
+    },
+  };
+  const backendFactory = (options) => {
+    if (!options.cursor) throw new Error("Pi backend is not part of this Cursor test");
+    return new CursorCloudBackend({
+      ...options,
+      cursor: { ...options.cursor, sdk, catalog, git },
+      onEvent(event) { backendEvents.push(event); options.onEvent(event); },
+    });
+  };
+  const pi = {
+    getThinkingLevel() { return "off"; },
+    appendEntry(_type, data) { persisted.push(structuredClone(data)); },
+    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, registerShortcut() {},
+    on(name, listener) { events.set(name, listener); },
+  };
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [],
+    sessionManager: { getSessionId: () => "public-cursor-parent", getSessionFile: () => join(root, "parent.jsonl"), getBranch: () => [] },
+    ui: {},
+  };
+  subagentsModule.default(pi, {
+    personaDirectory: join(root, "missing-personas"),
+    backendFactory,
+    cursorLifecycle: createCursorSubagentLifecyclePort(sdk),
+  });
+  events.get("session_start")({}, context);
+  const tool = tools.get("subagent");
+  const created = await tool.execute("cursor-create", {
+    action: "create", name: "public-cursor", runtime: "cursor-cloud", purpose: "Validate all public Cursor actions", lifetime: "task", mode: "fresh", prompt: "Inspect the repository",
+  }, undefined, undefined, context);
+  const id = created.details.subagent.id;
+  assert.equal(created.details.action, "create");
+  assert.equal(creates, 1);
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].options.mode, "plan");
+  assert.match(sends[0].message, /Inspect the repository/);
+  assert.equal(created.usage, undefined, "partial Cursor usage is not converted to Pi tool accounting");
+  assert.deepEqual(created.details.usage, { input: 3, totalTokens: 3, reasoningTokens: 1 });
+  assert.equal(created.details.artifacts.length, 2);
+  assert.deepEqual(created.details.policyWarnings, ["Cursor Cloud reported branch or pull-request metadata despite the no-change policy."]);
+  assert.deepEqual(created.details.runtimeWarnings, ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."]);
+  assert.equal(created.details.runtime.kind, "cursor-cloud");
+  assert.equal(created.details.runtime.remote.agentId, agent.agentId);
+  assert.equal(created.details.runtime.remote.runId, "run-public-1");
+  assert.equal(created.details.runtime.remote.requestId, "request-run-public-1");
+  assert.deepEqual(created.details.cursorDeliveryReceipt, {
+    version: 1, subagentId: id, runId: "run-public-1",
+  });
+  assert.equal(archives, 0, "tool execute returns before Cursor receipt cleanup");
+  assert.doesNotMatch(created.content[0].text, new RegExp(agent.agentId));
+  await events.get("turn_end")({
+    message: { role: "assistant", content: [] },
+    toolResults: [{ role: "toolResult", toolName: "subagent", details: created.details }],
+  }, context);
+
+  const listed = await tool.execute("cursor-list", { action: "list" }, undefined, undefined, context);
+  assert.equal(listed.details.action, "list");
+  assert.equal(listed.details.subagents.some((summary) => summary.id === id), true);
+  const status = await tool.execute("cursor-status", { action: "status", id }, undefined, undefined, context);
+  const repeatedStatus = await tool.execute("cursor-status-repeat", { action: "status", id }, undefined, undefined, context);
+  assert.equal(status.details.subagent.status, "idle");
+  assert.equal(repeatedStatus.details.subagent.status, "idle");
+  assert.equal(backendEvents.filter((event) => event.type === "message_completed").length, 1);
+  assert.equal(backendEvents.filter((event) => event.type === "run_settled").length, 1);
+  assert.equal(backendEvents.filter((event) => event.type === "usage_update").length, 1);
+  const followUp = await tool.execute("cursor-follow-up", { action: "prompt", id, prompt: "Continue the inspection" }, undefined, undefined, context);
+  assert.equal(followUp.details.action, "prompt");
+  await events.get("turn_end")({
+    message: { role: "assistant", content: [] },
+    toolResults: [{ role: "toolResult", toolName: "subagent", details: followUp.details }],
+  }, context);
+  assert.equal(sends.length, 2);
+  assert.equal(sends[1].options.mode, "plan");
+  const stopped = await tool.execute("cursor-stop", { action: "stop", id }, undefined, undefined, context);
+  assert.equal(stopped.details.subagent.status, "stopped");
+  assert.equal(cancels, 0, "terminal public runs route directly to archive");
+  assert.equal(archives, 1);
+  assert.equal(loaderCalls, 0, "the injected SDK never invokes the production loader");
 });
