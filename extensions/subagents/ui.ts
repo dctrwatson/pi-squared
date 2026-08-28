@@ -3,6 +3,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
     Input,
     Markdown,
+    hyperlink,
     truncateToWidth,
     visibleWidth,
     wrapTextWithAnsi,
@@ -104,6 +105,11 @@ function formatDuration(durationMs: number | undefined): string | undefined {
     return `${Math.floor(durationMs / 60_000)}m ${Math.round((durationMs % 60_000) / 1_000)}s`;
 }
 
+function cursorAgentPageUrl(agentId: string): string | undefined {
+    if (!/^bc-[A-Za-z0-9-]+$/.test(agentId)) return undefined;
+    return `https://cursor.com/agents/${encodeURIComponent(agentId)}`;
+}
+
 /** Render dynamic model and thinking options without inspecting backend internals. */
 export function renderSubagentPanelOptions(
     state: Pick<SubagentViewState, "controls">,
@@ -129,7 +135,10 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     if (state.connection && !details?.agent && state.connection.runtime !== "cursor-cloud") {
         add("Connection", `${state.connection.runtime}/${state.connection.id}`);
     }
-    if (details?.agent) add("Agent ID", details.agent.id);
+    if (details?.agent) {
+        const url = cursorAgentPageUrl(details.agent.id);
+        add("Agent ID", url ? hyperlink(details.agent.id, url) : details.agent.id);
+    }
     if (details?.run) add("Run ID", details.run.id);
     else if (state.run) add("Active run ID", state.run.id);
     else if (state.lastRun) add("Last run ID", state.lastRun.id);
