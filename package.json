@@ -33,10 +33,10 @@
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
     "audit:prod": "node ./scripts/audit-prod.mjs",
-    "test": "concurrency=$(node -p \"Math.min(8, require('node:os').availableParallelism())\") && node --experimental-strip-types --test --test-concurrency=$concurrency tests/extensions/*.test.mjs tests/skills/*.test.mjs",
-    "test:quick": "node --experimental-strip-types --test $(find tests/extensions -name '*.test.mjs' ! -name 'workspace-*')",
-    "test:extensions": "node --experimental-strip-types --test tests/extensions/*.test.mjs",
-    "test:skills": "node --test tests/skills/*.test.mjs"
+    "test": "env -u CURSOR_API_KEY node --experimental-strip-types --test --test-concurrency=$(node -p \"Math.min(8, require('node:os').availableParallelism())\") tests/extensions/*.test.mjs tests/skills/*.test.mjs",
+    "test:quick": "env -u CURSOR_API_KEY node --experimental-strip-types --test $(find tests/extensions -name '*.test.mjs' ! -name 'workspace-*')",
+    "test:extensions": "env -u CURSOR_API_KEY node --experimental-strip-types --test tests/extensions/*.test.mjs",
+    "test:skills": "env -u CURSOR_API_KEY node --test tests/skills/*.test.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
