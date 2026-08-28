@@ -4,6 +4,10 @@ Repository for maintaining skills and extensions that I use with [Pi](https://bu
 
 Requires Node.js 22.19.0 or newer.
 
+## Validation
+
+See the [production audit gate](docs/production-audit.md).
+
 ## Skills
 
 - [**address-pr-feedback**](skills/address-pr-feedback/SKILL.md) — Handles GitHub PR feedback end-to-end: reviews comments and inline threads, makes or plans the appropriate changes, and posts replies on GitHub.
