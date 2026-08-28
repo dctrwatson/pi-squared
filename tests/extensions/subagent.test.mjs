@@ -255,9 +255,9 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.skills.items.maxLength, 64);
   assert.equal(tools[0].parameters.properties.skills.description, "Exact parent skill names");
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
-  assert.equal(tools[0].parameters.properties.context.description, "Concise background");
+  assert.equal(tools[0].parameters.properties.context.description, "Concise background; required for the first worker prompt");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, list unknown options and provide context. Use worker for general Pi execution; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
+    "Before subagent create, list unknown options and provide context. For a worker's first prompt, always supply context; use its listed context requirements. Use worker for general Pi execution; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
     "Default to task subagents. Use one-shot only when continuity cannot help; use persistent for open-ended work. Run at most 4; idle subagents do not count. Satisfy NEEDS; stop complete subagents.",
     "Give subagent objective, scope, and output; avoid adjacent work.",
     "Delegate substantive isolated work to subagents; keep only coordination and necessary integration in the parent context.",
