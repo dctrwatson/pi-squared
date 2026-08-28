@@ -516,6 +516,31 @@ export class SubagentSessionController {
         }
     }
 
+    /** Hold panel actions while Cursor reconciliation reconnects this controller. */
+    beginCursorPanelReconnect(): void {
+        if (this.backend.runtime !== "cursor-cloud" || this.stopping) return;
+        if (this.state.lifecycle === "starting" && this.startPromise) return;
+        this.startPromise = undefined;
+        this.state.connected = false;
+        this.state.lifecycle = "starting";
+        this.state.phase = "Reconnecting Cursor Cloud state…";
+        this.state.canFollowUp = false;
+        this.touch();
+    }
+
+    /** Record a panel-start failure that occurred before the backend started. */
+    reportStartupFailure(error: unknown): void {
+        if (this.stopping || this.state.lifecycle === "failed") return;
+        this.clearRefreshTimers();
+        this.state.connected = false;
+        this.state.busy = false;
+        this.state.lifecycle = "failed";
+        this.state.phase = "Failed to start";
+        const failure = boundedError(error);
+        this.addStatus(failure.message, "error");
+        this.rejectSettledWaiters(failure);
+    }
+
     /** Read reconciled durable Cursor state before the panel accepts an action. */
     async synchronizeCursorState(): Promise<void> {
         if (this.backend.runtime !== "cursor-cloud") return;

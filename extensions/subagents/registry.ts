@@ -1120,18 +1120,21 @@ export class PersistentSubagentRegistry {
     ): Promise<OpenPersistentSubagentResult> {
         const record = this.resolve(target);
         const retainedResult = this.hasRetainedCursorResult(record);
-        // An archived result is already terminal authority. Reconciliation can only
-        // replace its delivery state, so open it directly as a read-only panel.
-        if (!(retainedResult && record.stored.localLifecycle === "stopped")) {
-            await this.reconcileForAction(record);
-        }
-        if (!this.hasRetainedCursorResult(record)) this.assertAvailable(record);
+        if (!retainedResult) this.assertAvailable(record);
         const controller = this.ensureController(ctx, record);
-        // Reconciliation updates durable Cursor state outside a connected controller.
-        // Synchronize before the dialog can return an older local response.
-        if (record.stored.runtime === "cursor-cloud") await controller.synchronizeCursorState();
+        if (record.stored.runtime === "cursor-cloud") controller.beginCursorPanelReconnect();
+        const beforeStart = record.stored.runtime === "cursor-cloud"
+            ? async () => {
+                // An archived result is already terminal authority. Reconciliation can
+                // only replace its delivery state, so open it directly as read-only.
+                if (!(this.hasRetainedCursorResult(record) && record.stored.localLifecycle === "stopped")) {
+                    await this.reconcileForAction(record);
+                }
+                if (!this.hasRetainedCursorResult(record)) this.assertAvailable(record);
+            }
+            : undefined;
         const persona = record.stored.persona ? ` · ${record.stored.persona.name}` : "";
-        const result = await runSubagentDialog(ctx, controller, `Subagent · ${record.stored.name}${persona}`, initialPrompt);
+        const result = await runSubagentDialog(ctx, controller, `Subagent · ${record.stored.name}${persona}`, initialPrompt, beforeStart);
         record.stored.lastActiveAt = Date.now();
         this.captureRuntimeState(record);
         if (result?.action !== "return") {

@@ -52,19 +52,20 @@ export function getSubagentPanelWidths(width: number): { dialogWidth: number; in
 
 /** Render capability-aware panel controls with one separator between each hint. */
 export function renderSubagentPanelControls(
-    state: Pick<SubagentViewState, "busy" | "canFollowUp" | "readOnly">,
+    state: Pick<SubagentViewState, "busy" | "canFollowUp" | "connected" | "readOnly">,
     capabilities: Pick<SubagentSessionController["capabilities"], "steering" | "queuedFollowUp">,
     hint: (action: Parameters<typeof keyHint>[0], label: string) => string = keyHint,
 ): string {
     const readOnly = state.readOnly === true;
+    const connected = state.connected !== false;
     const controls = [
-        !readOnly && (!state.busy || capabilities.steering)
+        connected && !readOnly && (!state.busy || capabilities.steering)
             ? hint("tui.input.submit", state.busy ? "steer" : state.canFollowUp ? "follow-up" : "send")
             : undefined,
-        !readOnly && capabilities.queuedFollowUp ? hint("app.message.followUp", "follow-up") : undefined,
-        hint("app.interrupt", state.busy ? "abort" : "close"),
-        state.busy ? hint("app.exit", "detach") : undefined,
-        hint("app.message.copy", "return"),
+        connected && !readOnly && capabilities.queuedFollowUp ? hint("app.message.followUp", "follow-up") : undefined,
+        hint("app.interrupt", state.busy && connected ? "abort" : "close"),
+        state.busy && connected ? hint("app.exit", "detach") : undefined,
+        connected ? hint("app.message.copy", "return") : undefined,
     ].filter((control): control is string => Boolean(control));
     return controls.join(" · ");
 }
@@ -323,7 +324,7 @@ export class SubagentPanel implements Focusable {
             void this.submitInput(value);
         };
         this.input.onEscape = () => {
-            if (this.controller.state.busy) void this.controller.interrupt();
+            if (this.controller.state.busy && this.controller.state.connected) void this.controller.interrupt();
             else this.onCancel();
         };
     }
@@ -335,12 +336,13 @@ export class SubagentPanel implements Focusable {
 
     handleInput(data: string): void {
         if (this.keybindings.matches(data, "app.message.copy")) {
+            if (!this.controller.state.connected) return;
             const text = this.controller.returnText();
             if (text !== undefined) this.onReturn(text);
             return;
         }
         if (this.keybindings.matches(data, "app.interrupt")) {
-            if (this.controller.state.busy) void this.controller.interrupt();
+            if (this.controller.state.busy && this.controller.state.connected) void this.controller.interrupt();
             else this.onCancel();
             return;
         }
@@ -348,6 +350,7 @@ export class SubagentPanel implements Focusable {
             this.onCancel();
             return;
         }
+        if (!this.controller.state.connected) return;
         if (this.controller.state.readOnly) {
             this.controller.setTransientStatus("This completed result is read-only. Return it before sending another prompt.", "warning");
             return;
@@ -435,11 +438,13 @@ export class SubagentPanel implements Focusable {
 
         const previousFocus = this.input.focused;
         this.input.focused = false;
-        const inputLine = state.readOnly
-            ? this.theme.fg("dim", "Completed result retained for delivery (read-only)")
-            : state.busy && !this.controller.capabilities.steering && !this.controller.capabilities.queuedFollowUp
-                ? this.theme.fg("dim", "Subagent is working; wait for settlement")
-                : this.input.render(innerWidth)[0] ?? "";
+        const inputLine = !state.connected
+            ? this.theme.fg("dim", "Connecting to subagent; wait before sending a prompt")
+            : state.readOnly
+                ? this.theme.fg("dim", "Completed result retained for delivery (read-only)")
+                : state.busy && !this.controller.capabilities.steering && !this.controller.capabilities.queuedFollowUp
+                    ? this.theme.fg("dim", "Subagent is working; wait for settlement")
+                    : this.input.render(innerWidth)[0] ?? "";
         this.input.focused = previousFocus;
 
         const lines = [
@@ -505,6 +510,7 @@ export async function runSubagentDialog(
     controller: SubagentSessionController,
     title: string,
     initialPrompt = "",
+    beforeStart?: () => Promise<void>,
 ): Promise<SubagentDialogResult | undefined> {
     let detach: (() => void) | undefined;
     try {
@@ -529,11 +535,17 @@ export async function runSubagentDialog(
                 panel.invalidate();
             }, (text) => panel.setInput(text));
             queueMicrotask(() => {
-                void controller.start()
-                    .then(async () => {
-                        if (initialPrompt.trim()) await controller.submit(initialPrompt, "prompt", "human");
-                    })
-                    .catch(() => {});
+                void (async () => {
+                    try {
+                        await beforeStart?.();
+                        if (finished) return;
+                        await controller.start();
+                        if (finished || !initialPrompt.trim()) return;
+                        await controller.submit(initialPrompt, "prompt", "human");
+                    } catch (error) {
+                        if (!finished) controller.reportStartupFailure(error);
+                    }
+                })();
             });
             return panel;
         }, {

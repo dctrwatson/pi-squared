@@ -936,6 +936,12 @@ test("busy subagent panel controls use runtime capabilities without duplicate se
   );
   assert.equal(cursor, "app.interrupt:abort · app.exit:detach · app.message.copy:return");
   assert.doesNotMatch(cursor, /steer|follow-up|· ·/);
+  const reconnecting = renderSubagentPanelControls(
+    { connected: false, busy: false },
+    { steering: true, queuedFollowUp: true },
+    hint,
+  );
+  assert.equal(reconnecting, "app.interrupt:close");
 });
 
 test("SubagentPanel renders safely within widths from zero through narrow panels", () => {
@@ -1000,6 +1006,58 @@ test("busy subagent panels can detach without interrupting the subagent", () => 
   panel.handleInput("ctrl+d");
   assert.equal(detached, 1);
   assert.equal(interrupted, 0);
+});
+
+test("Cursor panel opens while preflight reconnects and disables input", async () => {
+  let resolvePreflight;
+  const preflight = new Promise((resolve) => { resolvePreflight = resolve; });
+  let starts = 0;
+  let panel;
+  const controller = new SubagentSessionController({ ui: {} }, {
+    args: [], cwd: "/tmp", mode: "fresh", initialPrompt: "", scopedModels: [],
+  }, () => ({
+    runtime: "cursor-cloud", displayName: "Cursor Cloud",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: true,
+      modelControls: true, thinkingControls: true, sessionHistory: false, sessionFile: false, usage: false, toolOutput: false,
+    },
+    async start() { starts++; }, async stop() {}, async disposeObservation() {}, getDiagnostics() { return ""; },
+    async prompt() { throw new Error("must not prompt while reconnecting"); }, async steer() {}, async followUp() { throw new Error("must not follow up while reconnecting"); }, async abort() {},
+    async getState() {
+      return {
+        connection: { id: "reconnecting-agent", runtime: "cursor-cloud" },
+        thinkingLevel: "low", isStreaming: false, isCompacting: false,
+      };
+    },
+    async getHistory() { return []; }, async getSessionStats() { return {}; }, async getAvailableModels() { return []; },
+    async setModel() { return { provider: "test", id: "model" }; }, async cycleModel() { return null; },
+    async setThinkingLevel() {}, async cycleThinkingLevel() { return null; }, respondToExtensionUI() {},
+  }));
+  const context = {
+    ui: {
+      custom(factory) {
+        return new Promise((resolve) => {
+          panel = factory(
+            { requestRender() {} }, { fg(_color, text) { return text; }, bold(text) { return text; } },
+            { matches(data, action) { return data === "close" && action === "app.exit"; } }, resolve,
+          );
+        });
+      },
+    },
+  };
+
+  const opening = runSubagentDialog(context, controller, "Reconnect Cursor", "", async () => await preflight);
+  await waitFor(() => panel !== undefined);
+  assert.equal(controller.state.connected, false);
+  assert.equal(starts, 0);
+  assert.match(panel.render(80).join("\n"), /Connecting to subagent/);
+  panel.handleInput("ignored prompt");
+
+  resolvePreflight();
+  await waitFor(() => controller.state.connected);
+  assert.equal(starts, 1);
+  panel.handleInput("close");
+  assert.deepEqual(await opening, { action: "cancel" });
 });
 
 test("Ctrl+D detaches an active Cursor dialog without aborting remote work", async () => {
