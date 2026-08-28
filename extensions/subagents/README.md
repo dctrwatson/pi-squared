@@ -306,7 +306,7 @@ Cursor keeps a completed parent-owned result for durable delivery. A result foun
 
 ## Panel controls and artifacts
 
-The panel status line shows the model, thinking level, activity state, and usage. Panel details show connection or agent and run IDs, duration, repository refs, warnings, and artifacts. A Cursor agent shows its Cloud Agents URL. A Cursor panel opens while the extension reconnects remote state. It disables prompts and returns until the connection is ready. Use the details control to expand bounded repository, artifact, and warning data.
+The panel status line shows the model, thinking level, activity state, and usage. Panel details show connection or agent and run IDs, duration, repository refs, warnings, and artifacts. Repository lists with a shared URL prefix show it once. A Cursor agent shows its Cloud Agents URL. A Cursor panel opens while the extension reconnects remote state. It disables prompts and returns until the connection is ready. Use the details control to expand bounded repository, artifact, and warning data.
 
 | Control | Pi | Cursor Cloud |
 | --- | --- | --- |

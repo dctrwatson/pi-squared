@@ -882,6 +882,24 @@ test("expanded panel details omit Cursor status summaries and render delivery me
   await harness.controller.stop();
 });
 
+test("expanded panel details share a repository URL prefix", () => {
+  const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
+  const lines = renderSubagentPanelDetails({
+    details: {
+      repositories: [
+        { url: "https://github.com/acme/api", startingRef: "main" },
+        { url: "https://github.com/acme/web", startingRef: "release" },
+        { url: "https://github.com/acme/worker" },
+      ],
+    },
+    usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: {} },
+  }, 240, theme);
+  assert.equal(lines[1], "Repositories: https://github.com/acme/api @ main");
+  assert.equal(lines[2], `${" ".repeat("Repositories".length + 2)}web @ release`);
+  assert.equal(lines[3], `${" ".repeat("Repositories".length + 2)}worker`);
+  assert.doesNotMatch(lines.join("\n"), /https:\/\/github\.com\/acme\/(?:web|worker)/);
+});
+
 test("expanded panel details bound Cursor metadata", async () => {
   const sha = "a".repeat(40);
   const harness = makeControllerHarness({
@@ -913,7 +931,7 @@ test("expanded panel details bound Cursor metadata", async () => {
   const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
   const lines = renderSubagentPanelDetails(harness.controller.state, 80, theme);
   const rendered = lines.join("\n");
-  assert.match(rendered, /Repository: https:\/\/github\.com\/example\/project @/);
+  assert.match(rendered, /Repositories: https:\/\/github\.com\/example\/project @/);
   assert.match(rendered, new RegExp(sha));
   assert.match(rendered, /Runtime warning: The worktree has local changes/);
   assert.match(rendered, /Policy warning: Cursor Cloud reported branch metadata/);
