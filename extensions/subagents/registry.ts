@@ -51,7 +51,10 @@ const LEGACY_REGISTRY_VERSION = 1;
 const PI_REGISTRY_VERSION = 2;
 export const SUBAGENT_REGISTRY_VERSION = 3;
 const PROMPT_ATTRIBUTION_VERSION = 1;
-export const MAX_PERSISTENT_SUBAGENTS = 4;
+export const MAX_CONCURRENT_SUBAGENTS = 4;
+export const MAX_RETAINED_SUBAGENTS = 20;
+/** @deprecated Use MAX_CONCURRENT_SUBAGENTS. */
+export const MAX_PERSISTENT_SUBAGENTS = MAX_CONCURRENT_SUBAGENTS;
 export const MAX_RETAINED_STOPPED_SUBAGENTS = 20;
 const MAX_PURPOSE_CHARS = 240;
 const MAX_CURSOR_ID_CHARS = 256;
@@ -341,6 +344,7 @@ interface RuntimePersistentSubagent {
     cursorLease?: number;
     /** A restored one-shot promotes only after reconciliation finds its result. */
     cursorOneShotRecovery?: boolean;
+    runSlotHeld?: boolean;
     operationTail?: Promise<void>;
 }
 
@@ -903,9 +907,9 @@ export class PersistentSubagentRegistry {
         if ([...this.records.values()].some((record) => record.stored.name === name)) {
             throw new Error(`A subagent named "${name}" already exists`);
         }
-        const activeCount = [...this.records.values()].filter((record) => this.usesActiveSlot(record.stored)).length;
-        if (activeCount >= MAX_PERSISTENT_SUBAGENTS) {
-            throw new Error(`Subagent limit reached (${MAX_PERSISTENT_SUBAGENTS}). List and reuse a matching purpose, or stop one before creating another`);
+        const retainedCount = [...this.records.values()].filter((record) => record.stored.localLifecycle !== "stopped").length;
+        if (retainedCount >= MAX_RETAINED_SUBAGENTS) {
+            throw new Error(`Retained subagent limit reached (${MAX_RETAINED_SUBAGENTS}). List and reuse a matching purpose, or stop one before creating another`);
         }
         if (runtime === "pi" && options.mode === "fork") {
             const parentSessionFile = options.parentSessionFile ?? ctx.sessionManager.getSessionFile();
@@ -1315,10 +1319,27 @@ export class PersistentSubagentRegistry {
         return record.stored.runtime === "cursor-cloud" && record.stored.pendingResult.state === "available";
     }
 
-    private usesActiveSlot(stored: StoredSubagent): boolean {
-        if (stored.localLifecycle === "stopped") return false;
-        return stored.runtime !== "cursor-cloud"
-            || (stored.remoteLifecycle !== "archive-started" && stored.remoteLifecycle !== "archive-pending");
+    private usesConcurrentSlot(record: RuntimePersistentSubagent): boolean {
+        if (record.runSlotHeld) return true;
+        const { stored } = record;
+        if (stored.localLifecycle === "stopped" || stored.runtime !== "cursor-cloud") return false;
+        return stored.remoteLifecycle === "running"
+            || stored.remoteLifecycle === "stopping"
+            || stored.remoteLifecycle === "remote-state-unknown"
+            || stored.pendingOperations.some((operation) => operation.kind === "start-run" || operation.kind === "follow-up");
+    }
+
+    private acquireConcurrentSlot(record: RuntimePersistentSubagent): void {
+        if (record.runSlotHeld) return;
+        const concurrentCount = [...this.records.values()].filter((candidate) => this.usesConcurrentSlot(candidate)).length;
+        if (concurrentCount >= MAX_CONCURRENT_SUBAGENTS) {
+            throw new Error(`Concurrent subagent limit reached (${MAX_CONCURRENT_SUBAGENTS}). Wait for a running subagent to settle, then retry`);
+        }
+        record.runSlotHeld = true;
+    }
+
+    private releaseConcurrentSlot(record: RuntimePersistentSubagent): void {
+        record.runSlotHeld = false;
     }
 
     private assertAvailable(record: RuntimePersistentSubagent): void {
@@ -1700,6 +1721,10 @@ export class PersistentSubagentRegistry {
             initialPrompt: "",
             scopedModels: isPi ? stored.scopedModels : [],
             promptAttributions,
+            runSlot: {
+                acquire: () => this.acquireConcurrentSlot(record),
+                release: () => this.releaseConcurrentSlot(record),
+            },
             ...(isPi ? {
                 onPromptAccepted: (attribution: SubagentPromptAttribution) => {
                     promptAttributions.push({ ...attribution });

@@ -152,6 +152,11 @@ export interface RunSubagentDialogOptions {
     promptAttributions?: readonly SubagentPromptAttribution[];
     onPromptAccepted?: (attribution: SubagentPromptAttribution) => void;
     onPromptDelivered?: (fingerprint: string) => void;
+    /** Limit concurrent work without limiting retained session continuity. */
+    runSlot?: {
+        acquire(): void;
+        release(): void;
+    };
     /** Present only when the registry selected the Cursor Cloud runtime. */
     cursor?: CursorCloudBackendConfiguration;
 }
@@ -288,6 +293,7 @@ export class SubagentSessionController {
     private controlAvailabilityRetryTimer: ReturnType<typeof setTimeout> | undefined;
     private controlAvailabilityRecoveryEpoch = 0;
     private commandPending = false;
+    private runSlotHeld = false;
     private stopping = false;
     /** Backend startup can replay durable history before this panel observes live work. */
     private startingBackend = false;
@@ -383,6 +389,7 @@ export class SubagentSessionController {
                 this.settlingRuns.clear();
                 this.state.connected = false;
                 this.state.busy = false;
+                this.releaseRunSlot();
                 this.state.lifecycle = "failed";
                 this.state.phase = `${details.description ?? "Subagent backend"} exited`;
                 const detail = details.diagnostics.trim() || `code=${details.code ?? "none"}, signal=${details.signal ?? "none"}`;
@@ -582,6 +589,7 @@ export class SubagentSessionController {
         this.startPromise = undefined;
         this.state.connected = false;
         this.state.busy = false;
+        this.releaseRunSlot();
         this.state.lifecycle = "stopped";
         this.state.phase = "Detached";
         this.state.canFollowUp = false;
@@ -657,13 +665,17 @@ export class SubagentSessionController {
         this.rejectSettledWaiters(error);
         this.settlingRuns.clear();
         this.runAccumulators.clear();
-        await this.backend.stop();
-        this.state.connected = false;
-        this.state.busy = false;
-        this.state.lifecycle = "stopped";
-        this.state.phase = "Stopped";
-        this.state.canFollowUp = false;
-        this.touch();
+        try {
+            await this.backend.stop();
+        } finally {
+            this.state.connected = false;
+            this.state.busy = false;
+            this.releaseRunSlot();
+            this.state.lifecycle = "stopped";
+            this.state.phase = "Stopped";
+            this.state.canFollowUp = false;
+            this.touch();
+        }
     }
 
     async promptAndWait(text: string, signal?: AbortSignal): Promise<SubagentPromptCompletion> {
@@ -871,6 +883,7 @@ export class SubagentSessionController {
             return { accepted: false };
         }
         const sendAsPrompt = mode === "prompt" || (mode === "steer" && !wasBusy);
+        const startsRun = sendAsPrompt || (mode === "followUp" && !wasBusy);
         if (!sendAsPrompt && mode === "steer" && !this.backend.capabilities.steering) {
             this.setTransientStatus("The subagent backend does not support steering.", "warning");
             return { accepted: false };
@@ -879,6 +892,7 @@ export class SubagentSessionController {
             this.setTransientStatus("The subagent backend does not support queued follow-ups.", "warning");
             return { accepted: false };
         }
+        if (startsRun && !this.acquireRunSlot()) return { accepted: false };
 
         this.commandPending = true;
         this.appendItem({
@@ -925,7 +939,8 @@ export class SubagentSessionController {
                 await this.discardCancelledCursorCompletionIfAborted(acceptedRun).catch(() => {});
             }
             this.lastSubmissionError = boundedError(error);
-            if (sendAsPrompt || (mode === "followUp" && !wasBusy)) {
+            if (startsRun && !this.activeRun) this.releaseRunSlot();
+            if (startsRun) {
                 if (this.activeRun) {
                     this.state.busy = true;
                     this.state.phase = signal?.aborted ? "Aborting…" : "Finishing…";
@@ -939,6 +954,25 @@ export class SubagentSessionController {
         } finally {
             this.commandPending = false;
         }
+    }
+
+    private acquireRunSlot(): boolean {
+        if (this.runSlotHeld || !this.options.runSlot) return true;
+        try {
+            this.options.runSlot.acquire();
+            this.runSlotHeld = true;
+            return true;
+        } catch (error) {
+            this.lastSubmissionError = boundedError(error);
+            this.setTransientStatus(this.lastSubmissionError.message, "error");
+            return false;
+        }
+    }
+
+    private releaseRunSlot(): void {
+        if (!this.runSlotHeld) return;
+        this.runSlotHeld = false;
+        this.options.runSlot?.release();
     }
 
     async interrupt(): Promise<void> {
@@ -1356,6 +1390,7 @@ export class SubagentSessionController {
     private completeHandledPrompt(): void {
         this.latestSettled = { text: "", responseProduced: false, handledWithoutAgent: true };
         this.state.busy = false;
+        this.releaseRunSlot();
         this.state.canFollowUp = false;
         this.state.phase = "Ready for another prompt";
         this.settledRevision++;
@@ -1490,6 +1525,7 @@ export class SubagentSessionController {
         }
         if (!this.activeRun) {
             this.state.busy = false;
+            this.releaseRunSlot();
             this.state.canFollowUp = parentOwned && !this.state.readOnly && this.backend.capabilities.settledFollowUp;
             this.state.phase = "Ready for another prompt";
             if (!parentOwned) {
@@ -1619,6 +1655,7 @@ export class SubagentSessionController {
                 this.runAccumulators.delete(this.runKey(activeRun));
                 this.activeRun = undefined;
                 this.state.run = undefined;
+                this.releaseRunSlot();
             }
         }
         if (state.model) this.state.model = state.model;

@@ -21,6 +21,7 @@ When you manage implementation through subagents:
 
 - Use one task-lifetime implementation subagent for each context-bounded task.
 - Retain that subagent until every PR from the task is merged. Do not stop it after initial validation, independent review, PR creation, or approval.
+- Keep retained implementers idle when they have no current work. Idle subagents do not use the four concurrent work slots.
 - Route accepted findings from independent reviewers and PR reviewers to the same implementation subagent. Reuse it for fixes and follow-up validation.
 - Stop it before merge only when the user explicitly ends the task, approves a replacement, or accepts a final non-merge disposition for every associated PR.
 - Keep independent reviewers separate from the implementation subagent. The manager owns feedback dispositions and directs accepted fixes.

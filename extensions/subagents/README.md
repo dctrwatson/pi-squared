@@ -115,7 +115,7 @@ An explicit `lifetime` overrides `preferred-lifetime`. A persona with no lifetim
 
 A blocked, truncated, incomplete, or response-less one-shot becomes a task. A Cursor one-shot that completes while Pi is offline also becomes a task until delivery. Prompting a dormant task or persistent instance starts it lazily.
 
-At most four active subagent slots exist in one parent session. Stopping an instance frees a slot. A Cursor `archive-pending` instance frees its slot after confirmed cancellation. The registry retains metadata for the 20 most recently stopped instances.
+One parent session can retain up to 20 non-stopped subagents. At most four subagents can work concurrently. Dormant and idle subagents do not use concurrent work slots. A new prompt fails when four other subagents are working. Stopping an instance frees retained capacity. The registry also keeps metadata for the 20 most recently stopped instances.
 
 The bundled personas use these defaults:
 
@@ -302,7 +302,7 @@ After restore, the extension uses saved IDs and authoritative Cursor run state. 
 
 Cursor keeps a completed parent-owned result for durable delivery. A result found after restore, archival, or detach opens read-only. Return that result before a new prompt. A result observed in the same live panel can continue after settlement.
 
-`stop` cancels an active Cursor run and then archives the remote agent. It does not delete the agent. If cancellation is not confirmed, status is `remote-state-unknown`. The extension does not report a successful stop or free the active slot. If cancellation succeeds and archival fails, status is `archive-pending`. Retry `stop` to retry archival. Return an undelivered result before you stop its subagent.
+`stop` cancels an active Cursor run and then archives the remote agent. It does not delete the agent. If cancellation is not confirmed, status is `remote-state-unknown`. The extension does not report a successful stop or free the concurrent work slot. If cancellation succeeds and archival fails, status is `archive-pending`. Retry `stop` to retry archival. Return an undelivered result before you stop its subagent.
 
 ## Panel controls and artifacts
 
@@ -371,6 +371,7 @@ The following limits apply:
 - Cursor repositories: 20 after deduplication, including the primary repository.
 - Cursor artifacts: 50 metadata records.
 - Cursor active runs: 1 per agent.
-- Parent-session active subagents: 4.
+- Parent-session concurrent subagent work: 4 instances.
+- Parent-session retained subagents: 20 non-stopped instances.
 
 The supported SDK sources do not document an account or Team concurrency limit. This document does not state one.
