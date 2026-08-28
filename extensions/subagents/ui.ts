@@ -118,7 +118,7 @@ export function renderSubagentPanelOptions(
     ].filter((option): option is string => Boolean(option)).join(" · ");
 }
 
-/** Render backend-neutral details with optional runtime-specific metadata. */
+/** Render details that are not shown in the panel status line. */
 export function renderSubagentPanelDetails(state: SubagentViewState, width: number, theme: Theme): string[] {
     const details = state.details;
     const safeWidth = Math.max(1, width);
@@ -126,15 +126,15 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     const add = (label: string, value: string, color: "dim" | "warning" = "dim") => {
         lines.push(...wrapPlain(theme.fg(color, `${label}: ${value}`), safeWidth));
     };
-    if (state.connection) add("Connection", `${state.connection.runtime}/${state.connection.id}`);
+    if (state.connection && !details?.agent && state.connection.runtime !== "cursor-cloud") {
+        add("Connection", `${state.connection.runtime}/${state.connection.id}`);
+    }
     if (details?.agent) add("Agent ID", details.agent.id);
     if (details?.run) add("Run ID", details.run.id);
     else if (state.run) add("Active run ID", state.run.id);
     else if (state.lastRun) add("Last run ID", state.lastRun.id);
-    add("Lifecycle", details?.lifecycle ?? state.lifecycle);
     const duration = formatDuration(state.durationMs);
     if (duration) add("Duration", duration);
-    add("Usage", formatUsageLine(state) || "not reported");
     for (const repository of details?.repositories ?? []) {
         add("Repository", `${repository.url}${repository.startingRef ? ` @ ${repository.startingRef}` : ""}`);
     }
@@ -150,7 +150,7 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     }
     for (const warning of details?.runtimeWarnings ?? []) add("Runtime warning", warning, "warning");
     for (const warning of details?.policyWarnings ?? []) add("Policy warning", warning, "warning");
-    return lines;
+    return lines.length > 1 ? lines : [];
 }
 
 function renderTranscript(

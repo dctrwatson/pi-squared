@@ -945,7 +945,6 @@ export class CursorCloudBackend implements SubagentBackend {
         return {
             ...(this.stored.agentId ? { agent: { id: this.stored.agentId } } : {}),
             ...(runId ? { run: { id: runId } } : {}),
-            lifecycle: this.stored.remoteLifecycle,
             ...(this.stored.repositories.length ? {
                 repositories: this.stored.repositories.map(({ url, startingRef }) => ({
                     url,

@@ -222,7 +222,6 @@ function boundedPanelDetails(details: SubagentBackendPanelDetails | undefined): 
     };
     const agentId = text(details.agent?.id);
     const runId = text(details.run?.id);
-    const lifecycle = text(details.lifecycle);
     const warnings = (values: readonly string[] | undefined): readonly string[] =>
         (values ?? []).slice(0, MAX_SUBAGENT_PANEL_DETAIL_ITEMS).flatMap((value) => {
             const bounded = text(value);
@@ -260,7 +259,6 @@ function boundedPanelDetails(details: SubagentBackendPanelDetails | undefined): 
     return {
         ...(agentId ? { agent: { id: agentId } } : {}),
         ...(runId ? { run: { id: runId } } : {}),
-        ...(lifecycle ? { lifecycle } : {}),
         ...(repositories.length ? { repositories } : {}),
         ...(artifacts.length ? { artifacts } : {}),
         ...(runtimeWarnings.length ? { runtimeWarnings } : {}),
@@ -1200,7 +1198,7 @@ export class SubagentSessionController {
         if (isNewRun) {
             this.state.durationMs = undefined;
             if (this.backend.runtime === "cursor-cloud") this.panelObservedCursorTerminalRunKey = undefined;
-            this.replaceCursorRunDetails(run, "running");
+            this.replaceCursorRunDetails(run);
         }
         const key = this.runKey(run);
         if (!this.runStartedAt.has(key)) this.runStartedAt.set(key, Date.now());
@@ -1211,7 +1209,6 @@ export class SubagentSessionController {
     /** Replace terminal Cursor metadata before a new run can render stale values. */
     private replaceCursorRunDetails(
         run: SubagentRun,
-        lifecycle: string,
         completion?: SubagentRunCompletion,
     ): void {
         if (this.backend.runtime !== "cursor-cloud") return;
@@ -1219,7 +1216,6 @@ export class SubagentSessionController {
         this.state.details = boundedPanelDetails({
             ...(previous?.agent ? { agent: previous.agent } : {}),
             run: { id: run.id },
-            lifecycle,
             ...(previous?.repositories?.length ? { repositories: previous.repositories } : {}),
             ...(completion?.artifacts?.length ? { artifacts: completion.artifacts } : {}),
             ...(completion?.runtimeWarnings?.length
@@ -1439,7 +1435,7 @@ export class SubagentSessionController {
         this.runStartedAt.delete(runKey);
         if (this.backend.runtime === "cursor-cloud") {
             this.state.durationMs = normalizeSubagentRunDurationMs(completion?.durationMs);
-            this.replaceCursorRunDetails(run, "idle", completion);
+            this.replaceCursorRunDetails(run, completion);
         } else if (startedAt !== undefined) {
             this.state.durationMs = Math.max(0, Date.now() - startedAt);
         } else {
@@ -1567,7 +1563,7 @@ export class SubagentSessionController {
         this.reconcileCursorReadOnly(state.pendingResult);
         if (this.backend.runtime === "cursor-cloud" && this.activeRun
             && this.state.details?.run?.id !== this.activeRun.id) {
-            this.replaceCursorRunDetails(this.activeRun, "running");
+            this.replaceCursorRunDetails(this.activeRun);
         }
         // Cursor durable reconciliation is authoritative. It can settle a run while
         // this connected controller still has a stale local observer. Do not only

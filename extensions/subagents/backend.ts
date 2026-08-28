@@ -90,7 +90,6 @@ export interface SubagentRepositoryDetails {
 export interface SubagentBackendPanelDetails {
     readonly agent?: { readonly id: string };
     readonly run?: { readonly id: string };
-    readonly lifecycle?: string;
     readonly repositories?: readonly SubagentRepositoryDetails[];
     readonly artifacts?: readonly SubagentArtifact[];
     readonly runtimeWarnings?: readonly string[];

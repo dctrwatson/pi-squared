@@ -901,7 +901,7 @@ test("Cursor details replace prior run metadata during a follow-up and after set
   const runB = { id: "details-run-b", runtime: "cursor-cloud" };
   const repository = { url: "https://github.com/example/project", startingRef: "a".repeat(40) };
   let backendDetails = {
-    agent: { id: "agent-details" }, run: { id: "previous-run" }, lifecycle: "idle",
+    agent: { id: "agent-details" }, run: { id: "previous-run" },
     repositories: [repository], artifacts: [{ id: "previous-artifact", name: "previous" }],
     runtimeWarnings: ["Safe runtime warning"], policyWarnings: ["Previous policy warning"],
   };
@@ -923,41 +923,39 @@ test("Cursor details replace prior run metadata during a follow-up and after set
   await harness.controller.start();
   harness.startRun(runA);
   assert.deepEqual(harness.controller.state.details, {
-    agent: { id: "agent-details" }, run: { id: runA.id }, lifecycle: "running",
+    agent: { id: "agent-details" }, run: { id: runA.id },
     repositories: [repository], runtimeWarnings: ["Safe runtime warning"],
   });
   assert.equal(harness.controller.state.durationMs, undefined);
 
   backendDetails = {
-    agent: { id: "agent-details" }, run: { id: runA.id }, lifecycle: "idle", repositories: [repository],
+    agent: { id: "agent-details" }, run: { id: runA.id }, repositories: [repository],
     artifacts: [{ id: `${runA.id}-artifact`, name: `${runA.id} artifact` }],
     runtimeWarnings: [`${runA.id} runtime warning`], policyWarnings: [`${runA.id} policy warning`],
   };
   harness.complete(runA, "Result for A");
   await waitFor(() => !harness.controller.state.busy);
-  assert.equal(harness.controller.state.details?.lifecycle, "idle");
   assert.deepEqual(harness.controller.state.details?.artifacts, backendDetails.artifacts);
   assert.deepEqual(harness.controller.state.details?.policyWarnings, backendDetails.policyWarnings);
 
   backendDetails = {
-    agent: { id: "agent-details" }, run: { id: runB.id }, lifecycle: "running", repositories: [repository],
+    agent: { id: "agent-details" }, run: { id: runB.id }, repositories: [repository],
     runtimeWarnings: [`${runA.id} runtime warning`],
   };
   harness.startRun(runB);
   assert.deepEqual(harness.controller.state.details, {
-    agent: { id: "agent-details" }, run: { id: runB.id }, lifecycle: "running",
+    agent: { id: "agent-details" }, run: { id: runB.id },
     repositories: [repository], runtimeWarnings: [`${runA.id} runtime warning`],
   });
   assert.equal(harness.controller.state.durationMs, undefined);
 
   backendDetails = {
-    agent: { id: "agent-details" }, run: { id: runB.id }, lifecycle: "idle", repositories: [repository],
+    agent: { id: "agent-details" }, run: { id: runB.id }, repositories: [repository],
     artifacts: [{ id: `${runB.id}-artifact`, name: `${runB.id} artifact` }],
     runtimeWarnings: [`${runB.id} runtime warning`], policyWarnings: [`${runB.id} policy warning`],
   };
   harness.complete(runB, "Result for B");
   await waitFor(() => !harness.controller.state.busy);
-  assert.equal(harness.controller.state.details?.lifecycle, "idle");
   assert.deepEqual(harness.controller.state.details?.artifacts, backendDetails.artifacts);
   assert.deepEqual(harness.controller.state.details?.policyWarnings, backendDetails.policyWarnings);
   assert.deepEqual(harness.controller.state.details?.runtimeWarnings, backendDetails.runtimeWarnings);
