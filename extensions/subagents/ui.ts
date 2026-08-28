@@ -111,6 +111,27 @@ function cursorAgentPageUrl(agentId: string): string | undefined {
     return `https://cursor.com/agents/${encodeURIComponent(agentId)}`;
 }
 
+/** Return a shared URL prefix only at a path separator. */
+function sharedRepositoryUrlPrefix(repositories: readonly { readonly url: string }[]): string | undefined {
+    const first = repositories[0]?.url;
+    if (!first || repositories.length < 2) return undefined;
+    const rest = repositories.slice(1).map((repository) => repository.url);
+    let end = first.length;
+    for (const url of rest) {
+        end = Math.min(end, url.length);
+        for (let index = 0; index < end; index++) {
+            if (first[index] !== url[index]) {
+                end = index;
+                break;
+            }
+        }
+    }
+    const separator = first.lastIndexOf("/", end - 1);
+    if (separator < "https://".length) return undefined;
+    const prefix = first.slice(0, separator + 1);
+    return repositories.every((repository) => repository.url.length > prefix.length) ? prefix : undefined;
+}
+
 /** Render dynamic model and thinking options without inspecting backend internals. */
 export function renderSubagentPanelOptions(
     state: Pick<SubagentViewState, "controls">,
@@ -133,6 +154,9 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     const add = (label: string, value: string, color: "dim" | "warning" = "dim") => {
         lines.push(...wrapPlain(theme.fg(color, `${label}: ${value}`), safeWidth));
     };
+    const addContinuation = (label: string, value: string) => {
+        lines.push(...wrapPlain(theme.fg("dim", `${" ".repeat(label.length + 2)}${value}`), safeWidth));
+    };
     if (state.connection && !details?.agent && state.connection.runtime !== "cursor-cloud") {
         add("Connection", `${state.connection.runtime}/${state.connection.id}`);
     }
@@ -146,8 +170,20 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     else if (state.lastRun) add("Last run ID", state.lastRun.id);
     const duration = formatDuration(state.durationMs);
     if (duration) add("Duration", duration);
-    for (const repository of details?.repositories ?? []) {
-        add("Repository", `${repository.url}${repository.startingRef ? ` @ ${repository.startingRef}` : ""}`);
+    const repositories = details?.repositories ?? [];
+    const sharedPrefix = sharedRepositoryUrlPrefix(repositories);
+    if (sharedPrefix) {
+        for (const [index, repository] of repositories.entries()) {
+            const path = repository.url.slice(sharedPrefix.length);
+            const ref = repository.startingRef ? ` @ ${repository.startingRef}` : "";
+            const value = `${index === 0 ? sharedPrefix : ""}${path}${ref}`;
+            if (index === 0) add("Repositories", value);
+            else addContinuation("Repositories", value);
+        }
+    } else {
+        for (const repository of repositories) {
+            add("Repository", `${repository.url}${repository.startingRef ? ` @ ${repository.startingRef}` : ""}`);
+        }
     }
     for (const artifact of details?.artifacts ?? []) {
         const metadata = [
