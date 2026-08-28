@@ -1813,6 +1813,15 @@ export class SubagentSessionController {
         item.stopReason = message.stopReason;
         item.errorMessage = message.errorMessage ? boundedError(message.errorMessage).message : undefined;
         accumulator.activeAssistant = undefined;
+        // Cursor tool telemetry can arrive after live answer chunks. Keep the
+        // authoritative completed answer after that activity in the panel.
+        if (this.backend.runtime === "cursor-cloud") {
+            const itemIndex = this.state.items.indexOf(item);
+            if (itemIndex >= 0 && itemIndex < this.state.items.length - 1) {
+                this.state.items.splice(itemIndex, 1);
+                this.state.items.push(item);
+            }
+        }
 
         this.addUsage(message.usage, true);
         accumulator.assistantText = message.text;

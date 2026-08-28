@@ -896,6 +896,22 @@ test("Cursor catalog recovery requires an attached panel instead of a registry s
   await harness.controller.stop();
 });
 
+test("Cursor completion follows its tool activity in the panel transcript", async () => {
+  const harness = makeControllerHarness({ runtime: "cursor-cloud" });
+  await harness.controller.start();
+  const run = harness.startRun();
+  harness.emit({ type: "message_delta", run, textDelta: "Final response" });
+  harness.emit({ type: "tool_started", run, toolCallId: "inspect", name: "read", args: "README.md" });
+  harness.emit({ type: "tool_completed", run, toolCallId: "inspect", output: "complete", isError: false });
+  harness.complete(run, "Final response");
+
+  assert.deepEqual(harness.controller.state.items.map((item) => item.kind), ["tool", "assistant"]);
+  assert.equal(harness.controller.state.items.at(-1)?.kind === "assistant"
+    ? harness.controller.state.items.at(-1).text
+    : undefined, "Final response");
+  await harness.controller.stop();
+});
+
 test("Cursor details replace prior run metadata during a follow-up and after settlement", async () => {
   const runA = { id: "details-run-a", runtime: "cursor-cloud" };
   const runB = { id: "details-run-b", runtime: "cursor-cloud" };
