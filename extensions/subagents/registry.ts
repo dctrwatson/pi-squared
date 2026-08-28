@@ -373,9 +373,6 @@ function clonePersona(persona: SubagentPersona | undefined): SubagentPersona | u
         ...(typeof persona.contextRequirements === "string" && persona.contextRequirements.trim()
             ? { contextRequirements: normalizePersonaContextRequirements(persona.contextRequirements) }
             : {}),
-        ...(persona.preferredLifetime && LIFETIMES.has(persona.preferredLifetime)
-            ? { preferredLifetime: persona.preferredLifetime }
-            : {}),
         ...(persona.preferredProfile && PROFILES.has(persona.preferredProfile)
             ? { preferredProfile: persona.preferredProfile }
             : {}),
@@ -473,9 +470,6 @@ function parseStoredPersona(value: unknown, runtime: SubagentRuntime): SubagentP
             ? value.skills.filter((entry): entry is string => typeof entry === "string")
             : [],
         ...(typeof value.contextRequirements === "string" ? { contextRequirements: value.contextRequirements } : {}),
-        ...(typeof value.preferredLifetime === "string" && LIFETIMES.has(value.preferredLifetime as SubagentLifetime)
-            ? { preferredLifetime: value.preferredLifetime as SubagentLifetime }
-            : {}),
         ...(typeof value.preferredProfile === "string" && PROFILES.has(value.preferredProfile as SubagentProfile)
             ? { preferredProfile: value.preferredProfile as SubagentProfile }
             : {}),

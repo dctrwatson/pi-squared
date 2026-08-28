@@ -43,7 +43,7 @@ cursor-repos:
   await writePersona(personas, "cursor-malformed-name", "name: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-description", "name: cursor-malformed-description\ndescription: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-context", "name: cursor-malformed-context\ncontext-requirements: 42\nruntime: cursor-cloud");
-  await writePersona(personas, "cursor-malformed-lifetime", "name: cursor-malformed-lifetime\npreferred-lifetime: 42\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-persona-lifetime", "name: cursor-persona-lifetime\npreferred-lifetime: task\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-profile", "name: cursor-malformed-profile\npreferred-profile: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-invalid-profile", "name: cursor-invalid-profile\npreferred-profile: slow\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-model", "name: cursor-malformed-model\nmodel: 42\nruntime: cursor-cloud");
@@ -97,7 +97,7 @@ cursor-repos:
     "name must be a non-empty string",
     "description must be a non-empty string",
     "context-requirements must be a non-empty string",
-    "preferred-lifetime must be a non-empty string",
+    "preferred-lifetime is not valid in a persona; select lifetime when you create the subagent",
     "preferred-profile must be a non-empty string",
     "invalid preferred-profile \"slow\"; use fast, balanced, or deep",
     "model is not valid in a persona; use a creation profile",
@@ -173,6 +173,9 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
   assert.equal(subagentsModule.resolveSubagentCreationProfile(cursorPersona, "deep"), "deep");
 
   const invalidInputs = [
+    ["persona-less-default-pi", { action: "create", purpose: "Inspect local evidence" }, /Persona-less Pi create is not valid.*worker/i],
+    ["persona-less-explicit-pi", { action: "create", runtime: "pi", purpose: "Inspect local evidence" }, /Persona-less Pi create is not valid.*worker/i],
+    ["persona-less-cursor-purpose", { action: "create", runtime: "cursor-cloud" }, /Persona-less Cursor Cloud create requires an explicit purpose/i],
     ["runtime-mismatch-cursor", { action: "create", runtime: "pi", persona: "cursor-scout", purpose: "Inspect evidence" }, /runtime "pi" does not match persona "cursor-scout" runtime "cursor-cloud"/],
     ["runtime-mismatch-pi", { action: "create", runtime: "cursor-cloud", persona: "pi-scout", purpose: "Inspect local code" }, /runtime "cursor-cloud" does not match persona "pi-scout" runtime "pi"/],
     ["cursor-skills", { action: "create", persona: "cursor-scout", purpose: "Inspect evidence", skills: ["local-skill"] }, /skills are not valid for runtime cursor-cloud/],
@@ -191,12 +194,25 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
     purpose: "Inspect remote evidence",
   }, signal, undefined, context);
   assert.equal(cursorDormant.details.ok, true);
+  assert.equal(cursorDormant.details.subagent.lifetime, "task");
   assert.equal(cursorDormant.details.subagent.status, "dormant");
   const dormantStored = entries.at(-1).data.upserts.find((stored) => stored.runtime === "cursor-cloud");
   assert.match(dormantStored.agentId, /^bc-/);
   assert.equal(dormantStored.pendingOperations[0].kind, "create-agent");
   assert.match(dormantStored.pendingOperations[0].idempotencyKey, /^pi-cursor-/);
   assert.equal(entries.length, 1);
+
+  const personaLessCursor = await tool.execute("persona-less-cursor", {
+    action: "create",
+    runtime: "cursor-cloud",
+    purpose: "Inspect generic Cloud evidence",
+  }, signal, undefined, context);
+  assert.equal(personaLessCursor.details.ok, true);
+  assert.equal(personaLessCursor.details.subagent.runtime, "cursor-cloud");
+  assert.equal(personaLessCursor.details.subagent.persona, undefined);
+  assert.equal(personaLessCursor.details.subagent.lifetime, "task");
+  assert.equal(personaLessCursor.details.subagent.status, "dormant");
+  assert.equal(entries.length, 2);
 
   const pi = await tool.execute("pi-runtime", {
     action: "create",
@@ -220,7 +236,7 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
   assert.equal(status.details.subagent.runtime, "pi");
   assert.doesNotMatch(status.content[0].text, /\[pi,/);
   const subagents = await tool.execute("list-subagents", { action: "list" }, signal, undefined, context);
-  assert.match(subagents.content[0].text, /\[pi, dormant, persistent\]/);
+  assert.match(subagents.content[0].text, /\[pi, dormant, task\]/);
 
   const legacyStored = structuredClone(entries.flatMap(({ data }) => data.upserts ?? [])
     .find((stored) => stored.id === pi.details.subagent.id));

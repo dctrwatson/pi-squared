@@ -1,7 +1,6 @@
 ---
 name: reviewer
 description: Review implementation changes for correctness and regressions
-preferred-lifetime: task
 preferred-profile: balanced
 context-requirements: >
   Provide the review focus or question, objective, expected behavior, constraints, relevant scope, and Git comparison scope/base if applicable.

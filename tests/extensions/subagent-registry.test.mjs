@@ -500,6 +500,31 @@ test("malformed stored persona context does not abort versioned restore", async 
   }
 });
 
+test("stored persona lifetime preferences restore as inert legacy data", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-legacy-persona-lifetime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stored = storedPi(root, "legacy-persona", "legacy-persona");
+  stored.lifetime = "task";
+  stored.persona = {
+    name: "legacy-reviewer",
+    description: "Review one change",
+    systemPrompt: "Review the requested change.",
+    runtime: "pi",
+    preferredLifetime: "one-shot",
+    preferredProfile: "fast",
+    extensions: [],
+    skills: [],
+    filePath: "/personas/legacy-reviewer.md",
+  };
+  const registry = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
+  registry.restore(registryContext(root, registryBranch([stored])));
+
+  const restored = registry.resolve(stored.id).stored;
+  assert.equal(restored.lifetime, "task");
+  assert.equal(Object.hasOwn(restored.persona, "preferredLifetime"), false);
+  assert.equal(restored.persona.preferredProfile, "fast");
+});
+
 test("registry represents each saved Cursor lifecycle without remote access", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-cursor-state-"));
   t.after(() => rm(root, { recursive: true, force: true }));

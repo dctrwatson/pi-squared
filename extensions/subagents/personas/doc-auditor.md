@@ -1,7 +1,6 @@
 ---
 name: doc-auditor
 description: Audit repository and code documentation for accuracy and completeness
-preferred-lifetime: one-shot
 preferred-profile: fast
 context-requirements: >
   Provide the objective, intended audience, repository documentation or code scope, and Git comparison scope/base if applicable.
