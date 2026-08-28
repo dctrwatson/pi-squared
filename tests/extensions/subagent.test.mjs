@@ -37,7 +37,8 @@ const {
   createActiveTurnForkSnapshot,
   loadSubagentPersonas,
   loadSubagentPersonasFromDirectories,
-  MAX_PERSISTENT_SUBAGENTS,
+  MAX_CONCURRENT_SUBAGENTS,
+  MAX_RETAINED_SUBAGENTS,
   MAX_RETAINED_STOPPED_SUBAGENTS,
   MAX_SUBAGENT_RESPONSE_BYTES,
   MAX_SUBAGENT_RESPONSE_LINES,
@@ -256,12 +257,12 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.context.description, "Concise background");
   assert.deepEqual(tools[0].promptGuidelines, [
     "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-    "Use a one-shot subagent for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+    "Use subagent one-shot for one response, task for validation, persistent for related work. Run at most 4 at once; idle subagents do not count. Satisfy NEEDS; stop complete subagents.",
     "Give subagent objective, scope, and output; avoid adjacent work.",
     "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
     "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",
   ]);
-  assert.equal(tools[0].description, "Up to 4 subagents isolate context. Pi subagents share the local worktree and host authority; Cursor Cloud subagents inspect pushed repositories with configured Cloud MCPs.");
+  assert.equal(tools[0].description, "Retain up to 20; run up to 4 subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.");
   assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
   assert.ok(tools[0].promptGuidelines.every((guideline) => guideline.includes("subagent")));
   const modelFacingDefinition = JSON.stringify({
@@ -528,7 +529,7 @@ Inspect only the requested target area.
   }]);
 
   const stopTargets = await command.getArgumentCompletions("--stop ");
-  assert.equal(stopTargets.length, MAX_PERSISTENT_SUBAGENTS);
+  assert.equal(stopTargets.length, active.length);
   assert.ok(stopTargets.every((item) => item.value.startsWith("--stop active-")));
   assert.ok(stopTargets.every((item) => item.description?.startsWith("dormant: Inspect")));
   assert.deepEqual(await values("--stop active-auth"), ["--stop active-auth"]);
@@ -2741,7 +2742,7 @@ NEEDS: The expected behavior from the parent`;
   await events.get("session_shutdown")({}, context);
 });
 
-test("four-subagent limit is enforced and human stop frees a slot", async (t) => {
+test("retained-subagent limit is enforced and human stop frees capacity", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-limit-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personaDirectory = join(root, "personas");
@@ -2827,7 +2828,7 @@ Inspect the project without changing it.
 
   const profileNames = ["fast", "balanced", "deep"];
   const createdWithProfiles = [];
-  for (let index = 1; index <= MAX_PERSISTENT_SUBAGENTS; index++) {
+  for (let index = 1; index <= MAX_CONCURRENT_SUBAGENTS; index++) {
     createdWithProfiles.push(await subagentTool.execute(`create-${index}`, {
       action: "create",
       name: `agent-${index}`,
@@ -2857,15 +2858,24 @@ Inspect the project without changing it.
   assert.equal(duplicate.details.ok, false);
   assert.equal(duplicate.details.error.code, "SUBAGENT_FAILED");
   assert.match(duplicate.details.error.message, /agent-1 .*already retains context.*action "prompt"/i);
+  for (let index = MAX_CONCURRENT_SUBAGENTS + 1; index <= MAX_RETAINED_SUBAGENTS; index++) {
+    const retained = await subagentTool.execute(`create-${index}`, {
+      action: "create",
+      name: `agent-${index}`,
+      persona: "test-scout",
+      purpose: `Retain context for project area ${index}`,
+    }, signal, undefined, context);
+    assert.equal(retained.details.ok, true);
+  }
   const overLimit = await subagentTool.execute("create-over-limit", {
     action: "create",
     name: "agent-over-limit",
     persona: "test-scout",
-    purpose: "This purpose should be rejected by the limit",
+    purpose: "This purpose should be rejected by the retained limit",
   }, signal, undefined, context);
   assert.equal(overLimit.details.ok, false);
   assert.equal(overLimit.details.error.code, "SUBAGENT_FAILED");
-  assert.match(overLimit.details.error.message, /limit reached \(4\)/i);
+  assert.match(overLimit.details.error.message, /Retained subagent limit reached \(20\)/i);
 
   await commands.get("subagents").handler("--stop agent-1", context);
   assert.equal(confirmations.length, 1);
@@ -2881,19 +2891,19 @@ Inspect the project without changing it.
 
   const replacement = await subagentTool.execute("create-replacement", {
     action: "create",
-    name: "agent-9",
+    name: "agent-replacement",
     persona: "test-scout",
     purpose: "Retain context for the replacement project area",
   }, signal, undefined, context);
   assert.equal(replacement.details.subagent.status, "dormant");
   assert.equal(replacement.details.subagent.purpose, "Retain context for the replacement project area");
-  assert.equal(replacement.content[0].text, "Created agent-9.");
+  assert.equal(replacement.content[0].text, "Created agent-replacement.");
   assert.doesNotMatch(replacement.content[0].text, /sa_[a-f0-9]+/);
   const listed = await subagentTool.execute("list-with-purposes", {
     action: "list",
   }, signal, undefined, context);
-  assert.match(listed.content[0].text, /agent-9 \[pi, dormant, persistent\]: Retain context for the replacement project area/);
-  assert.doesNotMatch(listed.content[0].text, /agent-1|sa_[a-f0-9]+|thinking|\/gpt|\/claude/);
+  assert.match(listed.content[0].text, /agent-replacement \[pi, dormant, persistent\]: Retain context for the replacement project area/);
+  assert.doesNotMatch(listed.content[0].text, /(?:^|\n)agent-1 \[|sa_[a-f0-9]+|thinking|\/gpt|\/claude/);
   await events.get("session_shutdown")({}, context);
 });
 

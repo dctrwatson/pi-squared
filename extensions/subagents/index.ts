@@ -36,7 +36,8 @@ import {
 } from "./personas.ts";
 import {
     formatSubagentSummary,
-    MAX_PERSISTENT_SUBAGENTS,
+    MAX_CONCURRENT_SUBAGENTS,
+    MAX_RETAINED_SUBAGENTS,
     normalizeSubagentPurpose,
     PersistentSubagentRegistry,
     registryErrorMessage,
@@ -165,7 +166,9 @@ export {
 } from "./fork.ts";
 export {
     formatSubagentSummary,
+    MAX_CONCURRENT_SUBAGENTS,
     MAX_PERSISTENT_SUBAGENTS,
+    MAX_RETAINED_SUBAGENTS,
     MAX_RETAINED_STOPPED_SUBAGENTS,
     CURSOR_DELIVERY_RECEIPT_VERSION,
     SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY,
@@ -643,7 +646,7 @@ function subagentTargetCompletions(
 ): AutocompleteItem[] {
     return subagents
         .filter((subagent) => subagent.status !== "stopped")
-        .slice(0, MAX_PERSISTENT_SUBAGENTS)
+        .slice(0, MAX_RETAINED_SUBAGENTS)
         .flatMap((subagent) => {
             const target = subagent.name.startsWith(targetPrefix)
                 ? subagent.name
@@ -1031,11 +1034,11 @@ export default function (
     pi.registerTool({
         name: "subagent",
         label: "Subagent",
-        description: "Up to 4 subagents isolate context. Pi subagents share the local worktree and host authority; Cursor Cloud subagents inspect pushed repositories with configured Cloud MCPs.",
+        description: `Retain up to ${MAX_RETAINED_SUBAGENTS}; run up to ${MAX_CONCURRENT_SUBAGENTS} subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.`,
         promptSnippet: "Delegate isolated work",
         promptGuidelines: [
             "Before subagent create, list unknown options and provide context. Keep persona defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-            "Use a one-shot subagent for one response, task for validation, and persistent for related work. Satisfy NEEDS; stop complete subagents.",
+            `Use subagent one-shot for one response, task for validation, persistent for related work. Run at most ${MAX_CONCURRENT_SUBAGENTS} at once; idle subagents do not count. Satisfy NEEDS; stop complete subagents.`,
             "Give subagent objective, scope, and output; avoid adjacent work.",
             "Create a subagent only when isolation or continuity helps; do not delegate simple work.",
             "Prefer fresh context. Fork only when material. Reuse one task subagent for the objective.",

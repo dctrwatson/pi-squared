@@ -8,7 +8,11 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
-const { PersistentSubagentRegistry, SubagentCursorPromptFailure } = await import("../../extensions/subagents/registry.ts");
+const {
+  MAX_CONCURRENT_SUBAGENTS,
+  PersistentSubagentRegistry,
+  SubagentCursorPromptFailure,
+} = await import("../../extensions/subagents/registry.ts");
 const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("../../extensions/subagents/cursor-backend.ts");
 
 test("registry creates controllers with its injected backend factory", async (t) => {
@@ -110,6 +114,73 @@ function registryContext(root, branch = []) {
   };
 }
 
+function controlledPiBackendFactory({ rejectPrompt } = {}) {
+  const pendingRuns = [];
+  let nextRun = 0;
+  const backendFactory = (options) => ({
+    runtime: "pi",
+    displayName: "Controlled Pi",
+    capabilities: {
+      extensionUi: false,
+      steering: false,
+      queuedFollowUp: false,
+      settledFollowUp: false,
+      modelControls: false,
+      thinkingControls: false,
+      sessionHistory: false,
+      sessionFile: false,
+      usage: false,
+      toolOutput: false,
+    },
+    async start() {},
+    async stop() {},
+    getDiagnostics() { return ""; },
+    async prompt() {
+      if (rejectPrompt) throw new Error(rejectPrompt);
+      const run = { id: `controlled-${++nextRun}`, runtime: "pi" };
+      options.onEvent({ type: "run_started", run });
+      pendingRuns.push({
+        settle(text = `Result ${run.id}`) {
+          options.onEvent({
+            type: "message_completed",
+            run,
+            message: { role: "assistant", text, thinking: "", stopReason: "stop" },
+          });
+          options.onEvent({ type: "run_settled", run });
+        },
+      });
+      return { run };
+    },
+    async steer() {},
+    async followUp() { throw new Error("Unsupported"); },
+    async abort() {},
+    async getState() {
+      return {
+        connection: { id: "controlled-connection", runtime: "pi" },
+        thinkingLevel: "off",
+        isStreaming: false,
+        isCompacting: false,
+      };
+    },
+    async getHistory() { return []; },
+    async getSessionStats() { return {}; },
+    async getAvailableModels() { return []; },
+    async setModel() { throw new Error("Unsupported"); },
+    async cycleModel() { return null; },
+    async setThinkingLevel() {},
+    async cycleThinkingLevel() { return null; },
+    respondToExtensionUI() {},
+  });
+  return { backendFactory, pendingRuns };
+}
+
+async function waitForPendingRuns(pendingRuns, expected) {
+  for (let attempt = 0; attempt < 100 && pendingRuns.length < expected; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal(pendingRuns.length, expected);
+}
+
 function storedPi(root, id, name) {
   return {
     id,
@@ -179,6 +250,89 @@ function registryBranch(subagents, version = 3) {
   }];
 }
 
+test("registry limits concurrent work without limiting dormant continuity", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-concurrency-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { backendFactory, pendingRuns } = controlledPiBackendFactory();
+  const registry = new PersistentSubagentRegistry({
+    getThinkingLevel: () => "low",
+    appendEntry() {},
+  }, backendFactory);
+  const context = registryContext(root);
+  registry.restore(context);
+  const retained = Array.from({ length: MAX_CONCURRENT_SUBAGENTS + 1 }, (_, index) => registry.create(context, {
+    name: `worker-${index + 1}`,
+    purpose: `Retain worker context ${index + 1}`,
+    lifetime: "task",
+    mode: "fresh",
+  }));
+  assert.ok(retained.every(({ status }) => status === "dormant"));
+
+  const active = retained.slice(0, MAX_CONCURRENT_SUBAGENTS)
+    .map((summary) => registry.prompt(context, summary.id, "Wait for controlled settlement"));
+  await waitForPendingRuns(pendingRuns, MAX_CONCURRENT_SUBAGENTS);
+  await assert.rejects(
+    registry.prompt(context, retained.at(-1).id, "Do not exceed the concurrent limit"),
+    /Concurrent subagent limit reached \(4\)/i,
+  );
+
+  pendingRuns[0].settle("First worker settled");
+  await active[0];
+  const resumed = registry.prompt(context, retained.at(-1).id, "Use the released concurrent slot");
+  await waitForPendingRuns(pendingRuns, MAX_CONCURRENT_SUBAGENTS + 1);
+  for (const pending of pendingRuns.slice(1)) pending.settle();
+  await Promise.all([...active.slice(1), resumed]);
+  assert.equal(registry.list().filter(({ status }) => status !== "stopped").length, MAX_CONCURRENT_SUBAGENTS + 1);
+  await registry.shutdown();
+});
+
+test("restored uncertain Cursor work consumes concurrent slots", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-restored-concurrency-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const pendingFirstSend = storedCursor(root, "pending-first", "pending-first", "local");
+  pendingFirstSend.pendingOperations = [{ kind: "start-run", idempotencyKey: "start-pending", createdAt: 1 }];
+  const pendingFollowUp = storedCursor(root, "pending-follow-up", "pending-follow-up", "idle");
+  pendingFollowUp.pendingOperations = [{
+    kind: "follow-up",
+    idempotencyKey: "follow-up-pending",
+    nonce: "follow-up-nonce",
+    createdAt: 1,
+  }];
+  const uncertain = [
+    storedCursor(root, "stopping", "stopping", "stopping", "unavailable"),
+    storedCursor(root, "unknown", "unknown", "remote-state-unknown", "unavailable"),
+    pendingFirstSend,
+    pendingFollowUp,
+  ];
+
+  for (const candidate of uncertain) {
+    const { backendFactory } = controlledPiBackendFactory({ rejectPrompt: "Concurrent work escaped its limit" });
+    const registry = new PersistentSubagentRegistry({
+      getThinkingLevel: () => "low",
+      appendEntry() {},
+    }, backendFactory);
+    const context = registryContext(root, registryBranch([
+      storedCursor(root, `${candidate.id}-running-1`, "running-1", "running"),
+      storedCursor(root, `${candidate.id}-running-2`, "running-2", "running"),
+      storedCursor(root, `${candidate.id}-running-3`, "running-3", "running"),
+      candidate,
+    ]));
+    registry.restore(context);
+    const retained = registry.create(context, {
+      name: `waiting-${candidate.id}`,
+      purpose: `Wait for restored ${candidate.id} work`,
+      lifetime: "task",
+      mode: "fresh",
+    });
+    await assert.rejects(
+      registry.prompt(context, retained.id, "Do not exceed restored work"),
+      /Concurrent subagent limit reached \(4\)/i,
+      candidate.id,
+    );
+    await registry.shutdown();
+  }
+});
+
 test("registry migrates stopped version 1 and explicit Pi version 2 records", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-legacy-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -216,18 +370,13 @@ test("registry migrates stopped version 1 and explicit Pi version 2 records", as
   assert.equal(entries[0].data.version, 3);
   assert.ok(entries[0].data.upserts.every((stored) => stored.runtime === "pi"));
   assert.ok(entries[0].data.upserts.every((stored) => stored.localLifecycle === "stopped"));
-  for (let index = 1; index <= 4; index++) {
+  for (let index = 1; index <= 5; index++) {
     assert.equal(registry.create(registryContext(root), {
-      name: `slot-${index}`,
-      purpose: `Use free slot ${index}`,
+      name: `retained-${index}`,
+      purpose: `Retain dormant context ${index}`,
       mode: "fresh",
     }).status, "dormant");
   }
-  assert.throws(() => registry.create(registryContext(root), {
-    name: "slot-five",
-    purpose: "Verify that the active slot limit remains four",
-    mode: "fresh",
-  }), /limit reached \(4\)/i);
 });
 
 test("registry persists tombstones when migration prunes stopped legacy records", async (t) => {
@@ -491,7 +640,7 @@ test("malformed Cursor identity and cleanup combinations do not restore", async 
   ]);
 });
 
-test("Cursor archive-pending frees a slot but uncertain remote state does not", async (t) => {
+test("Cursor cleanup states do not block dormant retention", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-slots-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const archivePending = storedCursor(root, "archive", "archive", "archive-pending", "unavailable");
@@ -504,20 +653,18 @@ test("Cursor archive-pending frees a slot but uncertain remote state does not", 
     storedPi(root, "pi-two", "pi-two"),
   ])));
 
-  const fourth = registry.create(registryContext(root), {
-    name: "pi-three",
-    purpose: "Inspect the third Pi record",
-    mode: "fresh",
-  });
-  assert.equal(fourth.status, "dormant");
-  assert.throws(() => registry.create(registryContext(root), {
-    name: "pi-four",
-    purpose: "Inspect the fourth Pi record",
-    mode: "fresh",
-  }), /limit reached \(4\)/i);
+  assert.equal(registry.summaryFor("archive").status, "archive-pending");
+  assert.equal(registry.summaryFor("unknown").status, "remote-state-unknown");
+  for (const name of ["pi-three", "pi-four"]) {
+    assert.equal(registry.create(registryContext(root), {
+      name,
+      purpose: `Retain ${name}`,
+      mode: "fresh",
+    }).status, "dormant");
+  }
 });
 
-test("Cursor stop preserves failure, archive retry, and cleanup slot states", async (t) => {
+test("Cursor stop preserves failure and archive retry states", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-stop-lifecycle-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const occupiedBranch = (record) => registryBranch([
@@ -541,11 +688,11 @@ test("Cursor stop preserves failure, archive retry, and cleanup slot states", as
   const failed = failureEntries.flatMap(({ data }) => data.upserts ?? [])
     .filter((entry) => entry.id === "failure").at(-1);
   assert.equal(failed.pendingOperations[0].kind, "cancel-run");
-  assert.throws(() => failure.create(registryContext(root), {
+  assert.equal(failure.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Verify that uncertain cleanup keeps its slot",
+    purpose: "Retain work while cleanup is uncertain",
     mode: "fresh",
-  }), /limit reached \(4\)/i);
+  }).status, "dormant");
 
   const archiveStarted = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
   archiveStarted.restore(registryContext(root, occupiedBranch(
@@ -553,7 +700,7 @@ test("Cursor stop preserves failure, archive retry, and cleanup slot states", as
   )));
   assert.equal(archiveStarted.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Use the slot released when archive starts",
+    purpose: "Retain work while archival starts",
     mode: "fresh",
   }).status, "dormant");
 
@@ -583,14 +730,14 @@ test("Cursor stop preserves failure, archive retry, and cleanup slot states", as
   assert.ok(archiveKey);
   assert.equal(retry.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Use the slot released while archival is pending",
+    purpose: "Retain work while archival is pending",
     mode: "fresh",
   }).status, "dormant");
   assert.equal((await retry.stop("retry")).status, "stopped");
   assert.equal(retriedArchiveKey, archiveKey);
 });
 
-test("pre-send lazy Cursor handles stop locally, persist terminal state, and free a slot", async (t) => {
+test("pre-send lazy Cursor handles stop locally and persists terminal state", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-local-stop-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const entries = [];
@@ -607,11 +754,6 @@ test("pre-send lazy Cursor handles stop locally, persist terminal state, and fre
     storedPi(root, "pi-three", "pi-three"),
   ])));
 
-  assert.throws(() => registry.create(registryContext(root), {
-    name: "pi-four",
-    purpose: "Verify the active slot limit",
-    mode: "fresh",
-  }), /limit reached \(4\)/i);
   const stopped = await registry.stop("local");
   assert.equal(stopped.status, "stopped");
   const persisted = entries.at(-1).data.upserts.find((entry) => entry.id === "local");
@@ -621,17 +763,12 @@ test("pre-send lazy Cursor handles stop locally, persist terminal state, and fre
   assert.equal(persisted.agentId, undefined);
   assert.deepEqual(persisted.pendingOperations, []);
 
-  const fourth = registry.create(registryContext(root), {
+  const retained = registry.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Use the slot freed by the local Cursor record",
+    purpose: "Retain work after local Cursor cleanup",
     mode: "fresh",
   });
-  assert.equal(fourth.status, "dormant");
-  assert.throws(() => registry.create(registryContext(root), {
-    name: "pi-five",
-    purpose: "Verify the active slot limit again",
-    mode: "fresh",
-  }), /limit reached \(4\)/i);
+  assert.equal(retained.status, "dormant");
 
   const restored = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
   restored.restore(registryContext(root, registryBranch([persisted])));
@@ -771,7 +908,7 @@ test("pending first sends stop locally after authoritative local reconciliation"
   assert.deepEqual(persisted.pendingOperations, []);
   assert.equal(registry.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Use the slot freed by the stopped first send",
+    purpose: "Retain work after the stopped first send",
     mode: "fresh",
   }).status, "dormant");
 });
@@ -809,11 +946,11 @@ test("pending first sends remain unknown when reconciliation returns no result",
     idempotencyKey: "start-none",
     createdAt: 1,
   }]);
-  assert.throws(() => registry.create(registryContext(root), {
+  assert.equal(registry.create(registryContext(root), {
     name: "pi-four",
-    purpose: "Verify that uncertain first sends keep their slots",
+    purpose: "Retain work while the first send is uncertain",
     mode: "fresh",
-  }), /limit reached \(4\)/i);
+  }).status, "dormant");
 });
 
 test("Cursor operations persist identity before later work and retain uncertain cleanup", async (t) => {
@@ -2169,7 +2306,7 @@ test("Cursor direct panel open synchronizes an external observation before Retur
   await registry.shutdown();
 });
 
-test("Cursor archive retry frees a slot and panel detach or shutdown does no remote cleanup", async (t) => {
+test("Cursor archive retry and panel detach or shutdown do no extra remote cleanup", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-cursor-archive-retry-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = storedCursor(root, "archive-retry", "archive-retry", "running");
@@ -2215,8 +2352,8 @@ test("Cursor archive retry frees a slot and panel detach or shutdown does no rem
   assert.equal((await registry.stop(target.id)).status, "archive-pending");
   assert.equal(cancels, 1, "stop confirms terminal cancellation before archival");
   assert.equal(archives, 1);
-  const replacement = registry.create(context, { name: "replacement", purpose: "Use the archive-pending slot", mode: "fresh" });
-  assert.equal(replacement.name, "replacement", "archive-pending Cursor cleanup frees its active slot");
+  const replacement = registry.create(context, { name: "replacement", purpose: "Retain work during archive retry", mode: "fresh" });
+  assert.equal(replacement.name, "replacement", "archive-pending Cursor cleanup does not block dormant retention");
   assert.equal((await registry.stop(target.id)).status, "stopped");
   assert.equal(cancels, 1, "archive retry does not repeat cancellation");
   assert.equal(archives, 2);
