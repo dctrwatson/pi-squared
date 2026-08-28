@@ -1,8 +1,15 @@
 # Named Subagents
 
-Run named Pi subagents with one-shot, task-scoped, or persistent lifetimes without adding their full conversations to the parent model context. Subagents use Pi's normal configured tools and the bundled `codex-tools` and `prevent-idle` extensions.
+Run named subagents without placing their full conversations in the parent model context. A persona is reusable configuration for a stable role. Each instance has its own name, purpose, lifetime, and state.
 
-A persona is reusable configuration for a stable role. Multiple subagents can use the same persona while retaining separate processes, sessions, and conversation histories. Every instance has a stable purpose that defines its work or retained context. A model can also create a subagent without a persona when it supplies a purpose and lifetime. It can select skills when they help. Subagents do not load this delegation extension by default.
+The extension supports macOS and Linux. It has two runtimes:
+
+| Runtime | Execution and authority |
+| --- | --- |
+| `pi` | Runs an isolated Pi RPC process. The process shares the local worktree, host authority, and Pi tool configuration. |
+| `cursor-cloud` | Runs a remote Cursor Cloud agent through `@cursor/sdk`. The agent inspects a pushed repository commit and configured Cloud MCPs. It does not use local Cursor ACP. |
+
+Pi is the default runtime for persona-less model-tool creation. A persona selects its runtime. An explicit model-tool `runtime` must match the persona runtime.
 
 ## Commands
 
@@ -22,21 +29,18 @@ The subagent list is also available with `Ctrl+Shift+A`.
 /subagents --help
 ```
 
-All listed commands accept exact `--help` or `-h`. Help does not run the normal command.
+All commands accept exact `--help` or `-h`. Help does not run the command. Argument completion offers `--fork` before a prompt. It also offers `--stop`, `--enable`, `--disable`, and active names or IDs for `/subagents`. A creation command does not offer options after prompt text starts.
 
-Argument completion offers `--fork` before a creation prompt. It offers `--stop`, `--enable`, `--disable`, and active names or IDs for `/subagents`. Creation commands do not offer options after prompt text starts.
-
-- `/subagent` creates and opens a persistent subagent.
+- `/subagent` creates and opens a persistent Pi subagent.
+- `/subagent:<persona>` uses the persona runtime.
 - `/subagents` lists existing subagents and opens the selected one.
-- `/subagents --stop` selects and permanently stops a subagent after confirmation; its session file is retained.
-- `/subagents --disable` removes the `subagent` tool from the parent model; `/subagents --enable` restores it. Toggling affects future model calls and does not interrupt a request already running.
-- Closing an idle panel with `app.interrupt` (default `Esc`), or detaching at any time with `app.exit` (default `Ctrl+D`) while its input is empty, leaves the subagent running.
-- At most four non-stopped subagents can exist at once. Stopping one frees a slot. The registry keeps metadata for the 20 most recently stopped instances; all subagent session files remain on disk.
-- `/subagents` and fresh `/subagent` commands can be used while the parent agent is running.
-- Human `/subagent --fork` creation requires an idle, persisted parent session so the fork never captures an incomplete tool call.
-- Fresh subagents have no parent conversation. Forked subagents begin from the parent session branch.
+- `/subagents --stop` stops a subagent after confirmation. A stopped Pi session file remains on disk.
+- `/subagents --disable` removes the parent `subagent` tool. `/subagents --enable` restores it. The change affects future model calls only.
+- `/subagents` and a new `/subagent` command can run while the parent agent works.
 
-The panel remains interactive after a response settles. Its configured Return binding places the newest normally completed response in the parent editor without submitting it. Prompts are labeled as coming from you, the parent agent, inherited fork context, or an unattributed older session.
+A human slash-command fork requires an idle and persisted parent session for both runtimes. The command rejects a fork that can capture an incomplete parent tool call. This rule does not apply to a model-tool fork during an active parent turn. The model tool creates a bounded active-turn handoff. It excludes the in-progress assistant message and subagent tool call.
+
+Use `app.message.copy`, shown as `return` in the panel, to place the newest normally completed visible response in the parent editor. This action does not submit the editor. It does not return an active, aborted, failed, or response-less result.
 
 ## Parent-agent tool
 
@@ -54,85 +58,283 @@ subagent({
   context: "Goal: create a pull request for the current branch",
   prompt: "Execute the requested PR workflow.",
 })
+subagent({
+  action: "create",
+  runtime: "cursor-cloud",
+  lifetime: "task",
+  name: "incident-investigator",
+  purpose: "Investigate the reported production incident",
+  prompt: "Inspect the evidence and recommend a local fix.",
+})
 subagent({ action: "list" })
-subagent({ action: "prompt", id: "auth-explorer", prompt: "Now inspect token refresh" })
-subagent({ action: "status", id: "auth-explorer" })
-subagent({ action: "stop", id: "auth-explorer" })
+subagent({ action: "prompt", id: "incident-investigator", prompt: "Check the latest error pattern." })
+subagent({ action: "status", id: "incident-investigator" })
+subagent({ action: "stop", id: "incident-investigator" })
 ```
 
-Use `subagent({ action: "list", kind: "personas" })` to discover up to 20 persona templates and their context requirements without putting all persona definitions in the parent system prompt. If more personas exist, the result gives the next `offset`; `limit` can select 1–50 entries. A persona name must match exactly.
+Use `subagent({ action: "list", kind: "personas" })` to find up to 20 persona templates. The result includes each persona runtime. If more personas exist, use the returned `offset`. `limit` selects 1 through 50 entries. A persona name must match exactly.
 
-Model-facing `create` can omit `persona` only with an explicit `purpose` and explicit `lifetime`. It can select skills. A persona-based create keeps its current defaults. Selected skills are additive to persona skills. A selected skill that has the same name as a different persona skill is rejected. Skill names must match skills that Pi already discovered in the parent session. Unknown or ambiguous names fail with retry guidance. Paths are not accepted from the model.
+A model-tool `create` without `persona` needs an explicit `purpose` and `lifetime`. Persona-based creation uses persona defaults. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
 
-`mode` is `fresh` by default. A fresh subagent can receive concise `context`. A model can use `mode: "fork"` during an active parent turn. The extension writes a retained fork source through the current user request, then excludes the in-progress assistant message and tool call. It does not move the parent leaf. The child uses normal fork attribution and can resume from its own session. If the parent session is ephemeral, fork falls back to fresh context. The tool result reports this fallback.
+Selected Pi skills add to persona skills. The extension rejects a selected skill with the same name as a different persona skill. Each skill name must match a skill that Pi discovered in the parent session. The model tool accepts skill names, not paths.
 
-When options are unknown, the parent agent lists reusable instances or personas before creation. It matches work to a purpose, chooses a lifetime and profile, and provides required context. For each delegation, it gives the subagent the exact objective, scope, and requested output. `list` and `status` include each instance's purpose and lifetime. Model-facing creation rejects an exact purpose match and points the parent to the existing instance. A persona-based create can omit `purpose`; it then uses the initial prompt or persona description.
+`mode` is `fresh` by default. A fresh subagent can receive concise `context`.
 
-A parent-initiated prompt remains open until the subagent settles. Human steering or follow-ups sent through that subagent's panel become part of the same run, and the newest final response returns as the parent tool result. Normal steering in the parent editor does not route to a subagent.
+- A Pi fork starts from a parent-session branch.
+- A Cursor Cloud fork sends a bounded, sanitized summary of the effective parent branch.
+- A fork does not move or change the parent branch.
+- A Cursor registry record does not contain the raw fork source.
 
-Human-initiated conversations remain private to the subagent unless explicitly returned to the parent editor or later requested through the tool.
+A Pi model-tool fork can fall back to fresh context when the parent session is ephemeral. The tool reports that fallback. A Cursor fork summary failure returns an error. It does not change the request to fresh mode.
 
-- Create a subagent only when isolation from large intermediate context or retained continuity materially helps; do not delegate simple work.
-- Prefer fresh context. Fork only when parent history is material and a concise handoff is insufficient. Use one task subagent for the complete objective and reuse it.
+Give each subagent an exact objective, scope, and requested output. Use `list` and `status` before you create a new instance. Model-facing creation rejects an exact active purpose match in the same runtime. It directs the parent to the retained instance. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
+
+A parent `create` with an initial prompt and a parent `prompt` wait for the subagent result. A human can steer or continue Pi work from the subagent panel. A human can continue Cursor work after settlement.
+
+Subagent conversation stays private from the parent model context. `app.message.copy` places a response in the parent editor. A parent-tool result returns a response to the parent. Cursor runtime prompts are sent to Cursor Cloud.
+
+- Create a subagent only when isolation or retained continuity helps.
+- Prefer fresh context when a concise handoff is sufficient.
+- Reuse one task subagent for one complete objective.
+
+## Context requirements and forks
+
+A persona can declare `context-requirements`. The first parent-owned model-tool prompt for that persona must include `context`. The extension allows dormant creation without context. It rejects the first later parent-owned prompt without context. The error includes the requirement as retry guidance.
+
+A successful fork satisfies the requirement because it has parent context. A Pi fork that falls back to fresh context does not satisfy it. Later prompts can include context updates when the goal, constraints, or Git base changes. The registry records only that required context was delivered. It does not record the context text.
+
+The model-tool `context` field is limited to 8,000 characters. The Cursor runtime formats parent context and request as one input. The extension redacts recognized credential fields in this input. It caps the combined value at 6 KiB. Redaction is mitigation. It is not a complete data-loss boundary. Give semantic intent. Do not give repository source or patch text that Cursor can inspect.
 
 ## Lifetimes
 
-Persona-based model-created subagents may select an optional `lifetime`; an explicit selection overrides the persona's `preferred-lifetime`, and an instance with neither defaults to `persistent`. Persona-less model creation requires an explicit lifetime.
+An explicit `lifetime` overrides `preferred-lifetime`. A persona with no lifetime preference defaults to `persistent`. A persona-less model-tool create requires an explicit lifetime. Human `/subagent` sessions are always persistent and ignore persona lifetime preferences.
 
-- `one-shot` is for bounded independent work expected to fit one response. It requires an initial prompt, asks the subagent for a complete concise answer, and stops automatically after success, cancellation, or failure. If its response reaches either the model or parent tool-output limit, or produces no visible agent response, the instance is retained as `task` so the parent can continue it.
-- `task` retains context through follow-up and validation prompts. The parent stops it when the objective is complete.
-- `persistent` retains context across related objectives and remains available until explicitly stopped.
+- `one-shot` is for bounded independent work. A model-tool one-shot requires an initial prompt. A Pi one-shot stops after success, cancellation, or failure. A Cursor one-shot archives only after result delivery.
+- `task` retains context for follow-up and validation.
+- `persistent` retains context for related work until you stop it.
 
-Prompting a dormant task or persistent instance restarts it lazily. All non-stopped instances count toward the four-subagent limit; stopping is permanent, retains the session file for history, and frees a slot. Human `/subagent` sessions are always persistent and ignore persona lifetime preferences.
+A blocked, truncated, incomplete, or response-less one-shot becomes a task. A Cursor one-shot that completes while Pi is offline also becomes a task until delivery. Prompting a dormant task or persistent instance starts it lazily.
 
-Bundled preferences are `persistent` for `codebase-explorer`, `task` for `reviewer`, and `one-shot` for `test-analyst` and `doc-auditor`. These are defaults rather than constraints.
+At most four active subagent slots exist in one parent session. Stopping an instance frees a slot. A Cursor `archive-pending` instance frees its slot after confirmed cancellation. The registry retains metadata for the 20 most recently stopped instances.
+
+The bundled personas use these defaults:
+
+| Persona | Lifetime | Profile |
+| --- | --- | --- |
+| `codebase-explorer` | `persistent` | `fast` |
+| `reviewer` | `task` | `balanced` |
+| `test-analyst` | `one-shot` | `balanced` |
+| `doc-auditor` | `one-shot` | `fast` |
 
 ## Blocked subagents
 
-Every subagent is instructed to stop retrying when missing context, capability, access, or data prevents completion and lead its response with:
+Each subagent receives this blocker protocol:
 
 ```text
 BLOCKED: <reason>
 NEEDS: <minimum requirement>
 ```
 
-The extension recognizes only this explicit protocol. It does not infer a blocker from prose. A blocked instance has status `blocked`. Model-visible `list` and `status` text includes its normalized reason and need. Each field is limited to 240 characters. `list` tool details expose them as `details.subagents[].blocker.reason` and `details.subagents[].blocker.need`. Other actions use `details.subagent.blocker.reason` and `details.subagent.blocker.need`. Its next non-blocked response clears the state. Stopping the instance also clears the state.
+The labels are case-insensitive. The first nonblank line must start with `BLOCKED:`. The next nonblank line must start with `NEEDS:`. The extension does not infer a blocker from other prose. It limits each normalized blocker field to 240 characters.
 
-The parent is instructed to supply missing semantic context or results, clarify constraints, and then reprompt the same task. A blocked one-shot is retained as a task instead of being discarded. The parent can then unblock it and continue validation.
+A blocked instance has status `blocked`. `list` and `status` include its reason and need. Tool-result details include the same blocker data. A non-blocked response clears the status. Stopping the instance also clears it.
 
-The blocker is part of the parent session registry. The extension does not write or analyze a separate blocker history.
+Supply the missing context or capability. Then prompt the same task again. A blocked one-shot remains available as a task.
 
-## Execution profiles
+## Execution profiles and settings
 
-Model-created subagents may select an optional creation profile. Profiles choose the initial model and thinking level:
+A creation profile selects the initial model and thinking target:
 
-- `fast`: Luna with `high` thinking.
-- `balanced`: Terra with `xhigh` thinking.
-- `deep`: Sol with `xhigh` thinking.
+| Profile | Target model | Target thinking | Cursor context | Cursor speed |
+| --- | --- | --- | --- | --- |
+| `fast` | GPT-5.6 Luna | `high` | `272k` | Standard |
+| `balanced` | GPT-5.6 Terra | `xhigh` | `272k` | Standard |
+| `deep` | GPT-5.6 Sol | `xhigh` | `272k` | Standard |
 
-Persona-less creation defaults to `balanced`. The parent uses `fast` for bounded lookup and uses `deep` only after a cheaper attempt fails or unresolved ambiguity makes that attempt unsafe. Bundled `codebase-explorer` and `doc-auditor` personas default to `fast`; `reviewer` and `test-analyst` default to `balanced`. Supplying `profile` overrides that persona default for the new instance. Model selection remains fixed across ordinary follow-ups and is restored from the subagent session.
+For Pi, a profile selects the configured Pi model and thinking level. For Cursor Cloud, the extension resolves the complete standard-speed (`fast=false`) variant through the account model catalog. It accepts a model catalog that exposes only the target thinking parameter. It refreshes the catalog once after a miss. It returns an error when no exact model and supported parameter set exist. It does not substitute another model.
 
-## Persona context handoffs
+Personas do not select models or thinking values. They can select a preferred profile. An explicit model-tool profile overrides this preference. A create with neither value uses `balanced`. Exact Cursor model IDs and thinking parameters depend on the account catalog.
 
-A persona may declare a concise `context-requirements` contract. Its first parent-owned prompt must then include the tool's `context` field. Dormant creation remains allowed, but the first later `prompt` is rejected without context and returns the persona's requirement as retry guidance. Once accepted, the persistent subagent transcript retains that handoff, so follow-ups do not repeat it; later prompts may provide context updates when goals, constraints, or a Git base change.
+The `profile` input is valid only for creation.
 
-Context is delivered in the same subagent user turn under separate `Parent-provided context` and `Request` headings. It is capped at 8,000 characters and should contain semantic intent—not source files or patch text the subagent can inspect from the shared worktree. The registry persists only whether required parent context has been provided, never the context text itself. Forked personas already inherit parent-session context.
+The Pi panel can change a model or thinking setting only while Pi is idle. The change applies to the Pi session.
 
-## Progressive disclosure
+The Cursor panel can change a model or thinking setting only while Cursor is idle. Cursor saves the setting for the next run. It cannot change an active run.
 
-Each subagent receives its stable name, purpose, and resolved lifetime in its system prompt. It treats the current request as a hard scope boundary. It can inspect supporting context as needed, but it must not add adjacent objectives, analysis, or findings. Task and persistent instances make each response decision-complete for the current request with concise conclusions and required deliverables. They can index and defer only long supplemental sections. One-shot instances return a complete bounded answer without deferred sections. File paths and line ranges let the parent inspect source material directly instead of copying it through the subagent response.
+Cursor thinking controls appear only when the selected model has at least two usable thinking choices. Cursor mode selection is unavailable. Every Cursor initial prompt and follow-up uses Plan mode.
 
-If a response reaches the parent-response limit, the result names the subagent and tells the parent to use another `prompt` action for a numbered section or continuation. No pagination action or additional tool definition is needed.
+## Personas
 
-## Persistence
+The extension bundles `reviewer`, `codebase-explorer`, `test-analyst`, and `doc-auditor` in `extensions/subagents/personas/`. Additional Markdown personas in `~/.pi/agent/personas/` load after bundled personas. A user persona with the same name overrides a bundled persona. Run `/reload` after you change a persona file.
 
-Each subagent writes a normal Pi session file. Its RPC process stays alive while the parent runtime is active. On parent shutdown or reload, processes stop but session files remain. Resumed parent sessions restore their subagent registry as dormant instances and restart a subagent lazily when it is opened or prompted. Registry persistence uses per-instance mutations rather than repeatedly appending the full registry.
+### Pi persona example
 
-Subagents belong to the exact parent session. Starting or forking a different parent session does not silently share them.
+```markdown
+---
+name: product-manager
+description: Explore product requirements and tradeoffs
+runtime: pi
+context-requirements: >
+  Provide the desired outcome, users, constraints, and relevant product scope.
+preferred-lifetime: task
+preferred-profile: balanced
+extensions:
+  - ../extensions/product-context.ts
+skills:
+  - ../skills/product-research/SKILL.md
+---
 
-## Tools and shared authority
+You are a product manager. Clarify outcomes, users, constraints, risks, and tradeoffs.
+```
 
-Every subagent starts with:
+### Cursor Cloud persona example
+
+```markdown
+---
+name: incident-investigator
+description: Investigate production incidents
+runtime: cursor-cloud
+context-requirements: Provide the incident impact, time range, and affected service.
+preferred-lifetime: task
+cursor-mcps:
+  - datadog
+  - sentry
+cursor-repos:
+  - url: https://github.com/example/runbooks
+    starting-ref: main
+---
+
+Inspect the incident evidence. Return causes, evidence, and safe local next steps.
+```
+
+### Runtime-specific frontmatter
+
+Both runtimes support these fields:
+
+- `name`: Command suffix. It defaults to the file name.
+- `description`: Persona list description. The extension normalizes it to one line and limits it to 240 characters.
+- `runtime`: `pi` is the default. Use `cursor-cloud` for a Cursor Cloud persona.
+- `context-requirements`: Optional first-parent-prompt contract. The extension normalizes it to one line and limits it to 240 characters.
+- `preferred-lifetime`: Optional `one-shot`, `task`, or `persistent` default.
+- `preferred-profile`: Optional `fast`, `balanced`, or `deep` default. An explicit model-tool profile overrides it.
+
+Persona frontmatter rejects `model` and `thinking`. Use the model-tool `profile` input for initial model selection.
+
+Pi-only fields are:
+
+- `extensions` or `extension`: Trusted extension files or directories. Paths are relative to the persona file. Lists and comma-separated strings are supported.
+- `skills` or `skill`: Skill files or directories. Paths are relative to the persona file. Lists and comma-separated strings are supported.
+
+Cursor-only fields are:
+
+- `cursor-mcps`: A list of logical expected MCP server names. The list can contain at most eight names after deduplication.
+- `cursor-repos`: A list of supporting GitHub repositories. Each item has `url` and optional `starting-ref`.
+
+A Cursor persona rejects `extensions`, `extension`, `skills`, `skill`, and unknown frontmatter fields. A Pi persona rejects Cursor-only fields.
+
+A Cursor repository URL must be credential-free GitHub SSH or HTTPS. It cannot contain a query or fragment. The extension normalizes and deduplicates URLs. It rejects duplicate entries with different refs.
+
+A supporting repository `starting-ref` is optional. It accepts a syntactically safe Git ref. This can be a branch, tag-style ref, or commit SHA. If it is omitted, Cursor and the deployment determine the default behavior.
+
+The primary repository always uses the exact current `HEAD` SHA. The final list includes the primary repository. It can contain at most 20 repositories after deduplication.
+
+Pi uses progressive disclosure for skills. Pi adds a skill description to the subagent context. Pi loads full `SKILL.md` instructions on demand.
+
+## Cursor Cloud repositories, MCPs, and policy
+
+### Local creation and repository visibility
+
+A Cursor model-tool create without a prompt is local and `dormant`. The registry stores a client-generated agent ID. This action does not create a remote agent. It does not require `CURSOR_API_KEY`. It does not inspect Git provenance.
+
+The first Cursor Cloud setup checks `CURSOR_API_KEY`. It resolves model and repository data. Opening or prompting a dormant Cursor panel can start this setup. Opening can also call `Agent.create` to set up a lazy local SDK handle. `Agent.create` does not create a remote agent. The first Cursor `send()` creates the remote agent and its initial run. Git preconditions can block Cloud setup or a run. They do not block local dormant creation.
+
+For Cloud setup, the extension derives the primary repository from the current working directory. It requires a Git repository, a supported credential-free GitHub remote, and an exact local `HEAD` commit SHA. It uses the current branch remote when configured. Otherwise, it uses `origin`.
+
+The extension sends the primary repository first. It uses the exact `HEAD` SHA as `startingRef`. Cursor must be able to see that pushed commit. The extension checks local upstream or remote-tracking data when available. If it finds commits ahead of that reference, Cloud setup fails. The error asks you to push `HEAD`. Cursor run creation remains authoritative for repository access and commit visibility.
+
+A dirty worktree does not block local creation or Cloud setup. The panel warns that Cursor repository access sees only committed `HEAD` state. The parent result includes the same warning. Repository access does not automatically expose uncommitted or local-only worktree state to Cursor. Prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes.
+
+The extension does not fetch, push, check out, merge, or create a local branch. It does not download Cursor repository changes. It does not apply repository changes to the local worktree. An unpushed-`HEAD` error does not cause the extension to push. Push with your own Git workflow, then retry. A repository-access error asks you to confirm access. The extension does not change repository access or apply work.
+
+### MCP servers and OAuth
+
+`cursor-mcps` is metadata only. It tells the Cloud agent which configured capabilities it expects. It does not configure, enable, validate, restrict, or authorize an MCP server.
+
+The extension does not pass this field to the SDK `mcpServers` option. Inline MCP definitions and MCP credentials are not supported.
+
+Cursor documentation states that Team MCP servers configured in **Dashboard → Integrations & MCP** are available to Team Cloud agents. Persona metadata does not control this availability. This environment did not validate this account-dependent behavior.
+
+Cursor documentation states that an OAuth MCP server authenticates for the principal associated with the supplied Cursor credential. OAuth availability depends on the account and service. This environment did not validate OAuth behavior. The extension bootstrap tells the agent to return `BLOCKED` and `NEEDS` when an expected capability prevents completion.
+
+Cursor documentation describes agent ownership in terms of the principal authenticated by the supplied `CURSOR_API_KEY`. If the credential is a user key, that principal is its Cursor user. The extension does not classify key types. It does not share agents automatically. This environment did not validate account ownership.
+
+Cursor Cloud uses Plan mode as a best-effort no-change policy. The extension sets `workOnCurrentBranch: false` and `autoCreatePR: false`. It sends `mode: "plan"` for every run. It does not expose a mode change. It does not create a pull request automatically.
+
+The initial prompt and each follow-up tell the agent not to edit, commit, push, create branches or pull requests, or use mutating MCP operations.
+
+Plan mode and prompt instructions are not a strict read-only boundary. Effective authority comes from Cursor repository access, Team configuration, and OAuth permissions. Use read-only repository and MCP permissions when you need strict no-change behavior. If Cursor reports branch or pull-request metadata, the extension shows a policy warning. It does not apply those changes locally.
+
+### Authentication
+
+A remote Cursor operation requires an explicit `CURSOR_API_KEY` environment variable. Pi-only use does not require this variable. Local dormant Cursor creation does not require it.
+
+The extension passes the environment key explicitly. It does not use stored browser-login credentials. It does not identify or distinguish key type. Service-account use is outside product validation.
+
+The extension does not store the key in prompts, results, logs, panel details, or registry entries.
+
+If the variable is absent, the error is:
+
+```text
+Cursor Cloud requires CURSOR_API_KEY for remote operations.
+```
+
+If Cursor rejects the key, the error tells you to set a valid `CURSOR_API_KEY` and retry. The error does not display the key.
+
+## Cursor Cloud lifecycle and recovery
+
+Cursor permits one active run per agent. A second prompt during an active run returns a busy error. Cursor does not queue the prompt. Cursor rejects active-run steering and active-run follow-up queueing.
+
+The registry persists Cursor runtime state and agent and run IDs. It also persists idempotency state, lifetime, model selection, repository refs, status, and delivery state.
+
+The registry does not persist API keys, MCP credentials, MCP definitions, raw fork input, or full Cloud transcripts.
+
+After restore, the extension uses saved IDs and authoritative Cursor run state. The final run result is the normal recovery result. When that result has no text and `Run.conversation()` is supported, the extension reads only the latest assistant response. It does not restore full conversation history. It does not replay streaming telemetry. The supported SDK has no public event replay cursor.
+
+Cursor keeps a completed parent-owned result for durable delivery. A result found after restore, archival, or detach opens read-only. Return that result before a new prompt. A result observed in the same live panel can continue after settlement.
+
+`stop` cancels an active Cursor run and then archives the remote agent. It does not delete the agent. If cancellation is not confirmed, status is `remote-state-unknown`. The extension does not report a successful stop or free the active slot. If cancellation succeeds and archival fails, status is `archive-pending`. Retry `stop` to retry archival. Return an undelivered result before you stop its subagent.
+
+## Panel controls and artifacts
+
+The panel shows connection, runtime, agent and run IDs, lifecycle, assistant output, optional thinking, tool activity, errors, usage, duration, repository refs, warnings, and artifacts. Use the details control to expand bounded repository, artifact, warning, and usage data.
+
+| Control | Pi | Cursor Cloud |
+| --- | --- | --- |
+| `Esc` while busy | Interrupts active work. | Requests cancellation of the active remote run. |
+| `Esc` while idle | Closes the panel. | Closes the panel. |
+| `Ctrl+D` with empty input or panel close | Detaches the panel. | Detaches the local observer. It does not cancel the Cloud run. |
+| Active-run steering and queued follow-up | Available. | Unavailable. Wait for settlement. |
+| Normal prompt after settlement | Available. | Available after the same live panel observes settlement. A restored or detached retained result must be returned first. |
+| Model and thinking controls | Available only while idle. | Available only while idle. The selected setting applies to the next run. |
+| Mode control | Not applicable. | Unavailable. Plan mode stays fixed. |
+
+The Cursor panel hides model and thinking controls when the catalog is unavailable. An open idle panel retries the catalog lookup at a bounded interval. Detach stops this retry. Pi extension UI appears only for the Pi runtime.
+
+Panel close and `Ctrl+D` remove the local Cursor observer only after the last attached panel closes. Pi shutdown also removes the local observer. These actions do not cancel or archive remote Cloud work. Use `Esc` to request cancellation. Use `stop` to cancel and archive.
+
+Cursor can report agent-scoped artifact metadata. The extension lists bounded metadata in panel and tool-result details. It lists at most 50 artifacts. It does not download artifact content. It does not treat an artifact as a repository change. It does not apply an artifact locally.
+
+Artifact availability is account-dependent. It was not validated in this environment.
+
+## Pi continuity, tools, and shared authority
+
+A Pi subagent writes a normal Pi session file after it starts. A dormant registry record can have no session file. Its RPC process stays alive while the parent runtime stays active.
+
+On parent shutdown or reload, Pi stops the process and keeps the session file. A resumed parent session restores registry records as dormant. Pi starts a dormant process only when the user opens it or the parent prompts it.
+
+A subagent belongs to one exact parent session. Starting or forking another parent session does not share the subagent. Pi captures persona extensions, persona skills, and selected parent skill paths at creation. A dormant Pi subagent uses these captured resources when it restarts.
+
+A Pi subagent starts with:
 
 ```text
 --no-extensions --no-skills --no-prompt-templates --no-themes
@@ -140,57 +342,35 @@ Every subagent starts with:
 --extension <bundled-prevent-idle-path>
 ```
 
-The subagent always loads `codex-tools` and `prevent-idle` explicitly. For an `openai-codex` model, `codex-tools` overrides `read`, `find`, `grep`, `bash`, `git`, and `gh`, and corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the subagent works.
+Pi loads `codex-tools` and `prevent-idle` explicitly. For an `openai-codex` model, `codex-tools` overrides `read`, `find`, `grep`, `bash`, `git`, and `gh`. It also corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the Pi subagent works.
 
-The extension intentionally leaves `--tools` unset. Each subagent therefore receives Pi's normal configured tool set instead of a subagent-specific allowlist; Pi's built-in default is `read`, `bash`, `edit`, and `write`. Persona extensions may register additional active tools normally. There is no separate read-only Git or dependency-source tool chest to maintain.
+The Pi runtime leaves `--tools` unset. A Pi subagent receives Pi's normal configured tool set. Pi's built-in default is `read`, `bash`, `edit`, and `write`. A Pi persona extension can register additional active tools.
 
-Ambient extension, skill, prompt-template, and theme discovery remain disabled so a subagent does not recursively load the subagent extension or unrelated startup code. The two bundled extensions, persona resources, and selected parent skills are added explicitly with repeatable `--extension <path>` and `--skill <path>` arguments. The extension resolves selected skills to canonical parent-discovered paths before it starts the child. Context files remain enabled.
+Pi disables ambient extension, skill, prompt-template, and theme discovery. Pi adds the bundled extensions, persona resources, and selected skills explicitly. This prevents recursive subagent loading and unrelated startup code.
 
-> **Trust boundary:** Separate conversation context and subagent processes do not sandbox tools or the filesystem. Subagents share the parent worktree and host authority, so they can run commands and change the same files as the parent or another subagent. Explicit persona extensions also run arbitrary code at subagent startup. Attach only trusted resources, avoid recursive delegation, and coordinate concurrent edits when multiple agents are active.
+> **Trust boundary:** Separate Pi processes and conversation context do not sandbox tools or the filesystem. Pi subagents share the parent worktree and host authority. Coordinate concurrent edits. Attach only trusted Pi persona extensions. Cursor Cloud uses remote repository and configured MCP permissions. Cursor does not receive Pi extensions or Pi skills. Repository access does not automatically expose uncommitted or local-only worktree state. Parent prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes. Credential redaction is a mitigation, not a complete data-loss boundary.
 
-## Personas
+## Context, results, and limits
 
-The extension bundles `reviewer`, `codebase-explorer`, `test-analyst`, and `doc-auditor` personas under `extensions/subagents/personas/`. Additional Markdown personas in `~/.pi/agent/personas/` load after the bundled defaults and override a bundled persona with the same name. Run `/reload` after changing persona files.
+Full subagent conversations, thinking, and tool activity stay outside the parent model context. The parent receives the newest useful response.
 
-```markdown
----
-name: product-manager
-description: Explore product requirements and tradeoffs
-context-requirements: >
-  Provide the desired outcome, users, constraints, and relevant product scope.
-preferred-lifetime: task
-extensions:
-  - ../extensions/product-context.ts
-skills:
-  - ../skills/product-research/SKILL.md
-model: anthropic/claude-sonnet-4-6
-thinking: medium
----
+Parent `list` and `status` text includes reusable names, runtimes, statuses, lifetimes, purposes, and active blocker data. Tool-result details can include IDs, model settings, repository refs, timestamps, warnings, artifacts, and runtime metadata.
 
-You are a product manager. Clarify outcomes, users, constraints, risks, and tradeoffs.
-```
+The following limits apply:
 
-Supported frontmatter:
+- Parent `context` input: 8,000 characters.
+- Cursor formatted context and request: 6 KiB after redaction, as one input.
+- Cursor initial bootstrap: 24 KiB.
+- Cursor follow-up: 6 KiB.
+- Panel transcript item: 100,000 characters.
+- Panel transcript: 200 items and 500,000 aggregate characters.
+- Panel details: 24,000 characters.
+- Parent-visible subagent response: 400 lines or 16 KiB.
+- Parent-visible subagent error: 2,000 bytes.
+- Cursor expected MCP names: 8 after deduplication.
+- Cursor repositories: 20 after deduplication, including the primary repository.
+- Cursor artifacts: 50 metadata records.
+- Cursor active runs: 1 per agent.
+- Parent-session active subagents: 4.
 
-- `name`: command suffix; defaults to the filename.
-- `description`: command and tool-list description, normalized to one line and limited to 240 characters.
-- `context-requirements`: optional parent-facing handoff contract, normalized to one line and limited to 240 characters; when present, context is required for the first parent prompt.
-- `preferred-lifetime`: optional `one-shot`, `task`, or `persistent` default for model-created instances; an explicit tool choice overrides it, and human `/subagent` sessions ignore it.
-- `extensions` (or `extension`): trusted extension files or directories, resolved relative to the persona file; lists and comma-separated strings are supported.
-- `skills` (or `skill`): skill files or directories, resolved relative to the persona file; lists and comma-separated strings are supported.
-- `model`: initial model for new sessions.
-- `thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
-
-Skills use Pi's normal progressive disclosure: descriptions enter only the subagent context and full `SKILL.md` instructions load on demand. Persona resources and selected skill paths are captured when a subagent is created, so they persist when a task or persistent subagent becomes dormant and resumes.
-
-## Context discipline
-
-- The parent receives one compact `subagent` tool rather than persona- or action-specific tools.
-- Full subagent transcripts, thinking, and tool activity remain outside parent context. The interactive panel keeps a bounded tail of at most 200 transcript items in memory; omitted history remains in the subagent session file.
-- Supplied context appears only in the parent's own tool call and the subagent transcript; it is not echoed in results or registry snapshots.
-- Only the newest useful response is returned to the parent model. It is limited to 400 lines or 16 KiB.
-- Subagent process and provider errors exposed to the parent are capped at 2,000 characters.
-- Model-visible `list` output contains only reusable names, statuses, lifetimes, purposes, and concise active blocker metadata; stopped instances are omitted.
-- Model-visible `status` output contains only the requested name, status, lifetime, purpose, and concise active blocker metadata. Selected skill paths and metadata stay out of these outputs.
-- IDs, model settings, session paths, timestamps, and other runtime metadata stay in tool result details.
-- Registry snapshots use custom session entries, which do not participate in model context.
+The supported SDK sources do not document an account or Team concurrency limit. This document does not state one.
