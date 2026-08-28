@@ -152,9 +152,15 @@ test("repository normalization pins primary SHAs and resolves duplicate support 
       { url: support, startingRef: "main" },
     ]);
   }
-  assert.deepEqual(repositoriesModule.buildCursorRepositoryList(primary, [
+  for (const duplicatePrimary of [
     { url: "git@github.com:Example/Main.git" },
-  ]), [{ url: "https://github.com/example/main", startingRef: "a".repeat(40) }]);
+    { url: "https://github.com/example/main", startingRef: "main" },
+    { url: "https://github.com/example/main", startingRef: "b".repeat(40) },
+  ]) {
+    assert.deepEqual(repositoriesModule.buildCursorRepositoryList(primary, [duplicatePrimary]), [
+      { url: "https://github.com/example/main", startingRef: "a".repeat(40) },
+    ]);
+  }
   assert.throws(() => repositoriesModule.buildCursorRepositoryList(primary, [
     { url: support, startingRef: "main" },
     { url: support, startingRef: "release" },

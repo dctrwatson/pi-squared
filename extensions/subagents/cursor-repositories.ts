@@ -162,8 +162,9 @@ function requireExactCommitSha(value: string, field: string): string {
 }
 
 /**
- * Put the local primary repository first. Supporting explicit refs win over an
- * omitted ref. Two different explicit refs are ambiguous.
+ * Put the local primary repository first. Its exact HEAD ref wins when a
+ * supporting repository repeats the primary URL. Supporting explicit refs win
+ * over omitted refs. Two different supporting refs are ambiguous.
  */
 export function buildCursorRepositoryList(
     primary: CursorRepository,
@@ -191,9 +192,7 @@ export function buildCursorRepositoryList(
         if (existing) {
             const primaryDuplicate = key === repositoryKey(primaryUrl);
             if (primaryDuplicate) {
-                if (startingRef !== undefined && existing.startingRef !== startingRef) {
-                    throw gitPrecondition(`Supporting repository ${index + 1} has a conflicting startingRef for ${url}.`);
-                }
+                // The local primary repository must retain its exact HEAD SHA.
                 continue;
             }
             if (existing.startingRef && startingRef && existing.startingRef !== startingRef) {

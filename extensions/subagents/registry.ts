@@ -596,6 +596,9 @@ function parseStoredCursorRepositories(value: unknown): CursorStoredRepository[]
                 ? undefined
                 : normalizeCursorStartingRef(repository.startingRef, `saved repository ${index + 1} startingRef`);
             if (index === 0 && (!startingRef || !isCursorCommitSha(startingRef))) return undefined;
+            const primary = repositories[0];
+            if (primary && url.toLowerCase() === primary.url.toLowerCase()
+                && startingRef !== undefined && startingRef !== primary.startingRef) return undefined;
             repositories.push({ url, ...(startingRef ? { startingRef } : {}) });
         } catch {
             return undefined;

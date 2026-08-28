@@ -236,7 +236,7 @@ A Cursor repository URL must be credential-free GitHub SSH or HTTPS. It cannot c
 
 A supporting repository `starting-ref` is optional. It accepts a syntactically safe Git ref. This can be a branch, tag-style ref, or commit SHA. If it is omitted, Cursor and the deployment determine the default behavior.
 
-The primary repository always uses the exact current `HEAD` SHA. The final list includes the primary repository. It can contain at most 20 repositories after deduplication.
+The primary repository always uses the exact current `HEAD` SHA. If `cursor-repos` repeats the primary URL, the extension removes that entry and retains the primary `HEAD` SHA. The final list includes the primary repository. It can contain at most 20 repositories after deduplication.
 
 Pi uses progressive disclosure for skills. Pi adds a skill description to the subagent context. Pi loads full `SKILL.md` instructions on demand.
 
