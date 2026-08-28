@@ -871,7 +871,7 @@ test("expanded panel details omit Cursor status summaries and render delivery me
   const theme = { fg(_color, text) { return text; }, bold(text) { return text; } };
   const rendered = renderSubagentPanelDetails(harness.controller.state, 240, theme).join("\n");
   assert.doesNotMatch(rendered, /(?:Connection|Lifecycle|Usage):/);
-  assert.match(rendered, /Agent ID: .*bc-agent-complete/);
+  assert.match(rendered, /Cursor: .*https:\/\/cursor\.com\/agents\/bc-agent-complete/);
   assert.ok(rendered.includes("\u001b]8;;https://cursor.com/agents/bc-agent-complete\u001b\\"));
   assert.match(rendered, /Run ID: run-complete/);
   assert.match(rendered, /Duration: 1\.2 s/);
