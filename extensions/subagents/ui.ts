@@ -137,7 +137,8 @@ export function renderSubagentPanelDetails(state: SubagentViewState, width: numb
     }
     if (details?.agent) {
         const url = cursorAgentPageUrl(details.agent.id);
-        add("Agent ID", url ? hyperlink(details.agent.id, url) : details.agent.id);
+        if (url) add("Cursor", hyperlink(url, url));
+        else add("Agent ID", details.agent.id);
     }
     if (details?.run) add("Run ID", details.run.id);
     else if (state.run) add("Active run ID", state.run.id);
