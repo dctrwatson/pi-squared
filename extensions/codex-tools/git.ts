@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { delimiter, resolve } from "node:path";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type {
   AgentToolUpdateCallback,
   ExtensionContext,
@@ -32,6 +33,7 @@ const DEFAULT_TIMEOUT_SECONDS = 120;
 const MIN_TIMEOUT_SECONDS = 0.1;
 const MAX_TIMEOUT_SECONDS = 3_600;
 const GIT_OUTPUT_CONFIGURATION = ["-c", "color.ui=false", "-c", "column.ui=never"];
+const GIT_ERROR_DIAGNOSTIC = /(?:^|\n)(?:fatal|error):|(?:^|\n)usage: git(?:\s|$)/im;
 
 const gitParameters = Type.Object({
   args: Type.Array(Type.String(), { description: "Arguments after git" }),
@@ -77,6 +79,27 @@ class GitToolError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/** Report whether Git status 1 is a normal boolean result. */
+export function gitExitIsExpected(details: unknown, content: readonly (TextContent | ImageContent)[]): boolean {
+  if (
+    !isRecord(details)
+    || details.ok !== true
+    || details.exit_code !== 1
+    || details.signal !== null
+    || details.timed_out !== false
+  ) {
+    return false;
+  }
+  const output = content
+    .filter((item): item is TextContent => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
+  const stderrHeader = output.lastIndexOf("\n[stderr:");
+  if (stderrHeader < 0) return true;
+  const stderrStart = output.indexOf("\n", stderrHeader) + 1;
+  return !GIT_ERROR_DIAGNOSTIC.test(output.slice(stderrStart));
 }
 
 function prepareGitArguments(rawInput: unknown): CodexGitInput {
@@ -251,7 +274,10 @@ export function createCodexGitTool(options: CodexGitToolOptions = {}): ToolDefin
     },
     renderResult(toolResult, renderOptions, theme, context) {
       const rawText = textContent(toolResult);
-      const color = context.isError || hasUnsuccessfulProcessStatus(toolResult.details) ? "error" : "toolOutput";
+      const color = context.isError
+        || (hasUnsuccessfulProcessStatus(toolResult.details) && !gitExitIsExpected(toolResult.details, toolResult.content))
+        ? "error"
+        : "toolOutput";
       return new Text(theme.fg(color, renderPreview(rawText, renderOptions.expanded)), 0, 0);
     },
   };

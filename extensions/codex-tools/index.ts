@@ -2,7 +2,7 @@ import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createCodexBashTool } from "./bash.ts";
 import { createCodexGhTool } from "./gh.ts";
-import { createCodexGitTool } from "./git.ts";
+import { createCodexGitTool, gitExitIsExpected } from "./git.ts";
 import { registerCodexReadTool } from "./read.ts";
 import { createCodexWebSearchTool } from "./web-search.ts";
 import { createCodexFindTool, createCodexGrepTool } from "./search.ts";
@@ -11,32 +11,6 @@ import { hasUnsuccessfulProcessStatus } from "./tool-render.ts";
 
 export const CODEX_PROVIDER = "openai-codex";
 const CODEX_TOOL_NAMES = ["read", "find", "grep", "bash", "git", "gh", "web_search"] as const;
-const GIT_ERROR_DIAGNOSTIC = /(?:^|\n)(?:fatal|error):|(?:^|\n)usage: git(?:\s|$)/im;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function gitExitIsExpected(details: unknown, content: readonly (TextContent | ImageContent)[]): boolean {
-  if (
-    !isRecord(details)
-    || details.ok !== true
-    || details.exit_code !== 1
-    || details.signal !== null
-    || details.timed_out !== false
-  ) {
-    return false;
-  }
-  const output = content
-    .filter((item): item is TextContent => item.type === "text")
-    .map((item) => item.text)
-    .join("\n");
-  const stderrHeader = output.lastIndexOf("\n[stderr:");
-  if (stderrHeader < 0) return true;
-  const stderrStart = output.indexOf("\n", stderrHeader) + 1;
-  return !GIT_ERROR_DIAGNOSTIC.test(output.slice(stderrStart));
-}
-
 function correctWriteByteCount(
   content: readonly (TextContent | ImageContent)[],
   input: Record<string, unknown>,
