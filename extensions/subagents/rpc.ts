@@ -159,7 +159,9 @@ export class SubagentRpcClient {
     }
 
     async followUp(message: string, signal?: AbortSignal): Promise<void> {
-        this.data<void>(await this.send({ type: "follow_up", message }, REQUEST_TIMEOUT_MS, signal));
+        // A queued follow-up can wait for the current turn to settle. Use process
+        // exit, not a fixed timer, as its cancellation boundary.
+        this.data<void>(await this.send({ type: "follow_up", message }, 0, signal));
     }
 
     async abort(): Promise<void> {
