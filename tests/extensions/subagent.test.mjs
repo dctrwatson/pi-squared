@@ -1573,6 +1573,25 @@ process.stdin.on("data", (chunk) => {
   await client.stop();
 });
 
+test("subagent RPC follow-up acceptance has no fixed timeout", async () => {
+  const client = new SubagentRpcClient({
+    cwd: "/tmp",
+    args: [],
+    onOutput() {},
+    onExit() {},
+  });
+  let sent;
+  client.send = async (command, timeoutMs) => {
+    sent = { command, timeoutMs };
+    return { success: true };
+  };
+
+  await client.followUp("Wait for the current turn");
+
+  assert.equal(sent.command.type, "follow_up");
+  assert.equal(sent.timeoutMs, 0);
+});
+
 test("subagent RPC prompt acceptance rejects promptly on cancellation", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-rpc-cancel-"));
   t.after(() => rm(root, { recursive: true, force: true }));
