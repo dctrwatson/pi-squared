@@ -47,8 +47,8 @@ for (const [name, createTool] of [
 
     const failure = tool.renderResult(
       {
-        content: [{ type: "text", text: `[${name}: exit_code=1; signal=none; timed_out=false; duration_ms=1]` }],
-        details: { ok: true, exit_code: 1, signal: null, timed_out: false },
+        content: [{ type: "text", text: `[${name}: exit_code=7; signal=none; timed_out=false; duration_ms=1]` }],
+        details: { ok: true, exit_code: 7, signal: null, timed_out: false },
       },
       { expanded: true, isPartial: false },
       { fg: (color, text) => `${color}:${text}`, bold: (text) => text },
@@ -66,3 +66,24 @@ for (const [name, createTool] of [
     assert.match(result, /\\u001b/);
   });
 }
+
+test("git renders status 1 without an error color only for normal boolean results", () => {
+  const tool = gitModule.createCodexGitTool();
+  const renderResult = (content) => tool.renderResult(
+    {
+      content,
+      details: { ok: true, exit_code: 1, signal: null, timed_out: false },
+    },
+    { expanded: true, isPartial: false },
+    { fg: (color, text) => `${color}:${text}`, bold: (text) => text },
+    { isError: false },
+  ).render(200).join("\n");
+
+  assert.match(renderResult([
+    { type: "text", text: "[git: exit_code=1; signal=none; timed_out=false; duration_ms=1]" },
+  ]), /^toolOutput:/);
+  assert.match(renderResult([
+    { type: "text", text: "[git: exit_code=1; signal=none; timed_out=false; duration_ms=1]" },
+    { type: "text", text: "[stderr: capture=complete; preview=complete]\nfatal: bad revision" },
+  ]), /^error:/);
+});
