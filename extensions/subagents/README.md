@@ -77,7 +77,7 @@ A model-tool `create` defaults to a `task` lifetime. Pi creation requires a pers
 
 Selected Pi skills add to persona skills. The extension rejects a selected skill with the same name as a different persona skill. Each skill name must match a skill that Pi discovered in the parent session. The model tool accepts skill names, not paths.
 
-`mode` is `fresh` by default. A fresh subagent can receive concise `context`.
+`mode` is `fresh` by default. A fresh subagent can receive concise `context`. `context` is not a standalone input. A model-tool call that includes `context` must include a non-empty `prompt` in the same call. To create a dormant task or persistent subagent, omit both fields.
 
 - A Pi fork starts from a parent-session branch.
 - A Cursor Cloud fork sends a bounded, sanitized summary of the effective parent branch.
