@@ -124,20 +124,27 @@ remaining_pi=$(git log "$merge_base..HEAD" --format='%s' | grep '^pi:' || true)
 [ -z "$remaining_pi" ] || pr_die "Outgoing pi: commits remain. Apply and validate a logical commit plan before publishing"
 
 existing_number=$(jq -r '.existing_pr.number // empty' "$state_file")
+prepared_pr_head=""
 if [ "$action" = "update" ]; then
   [ -n "$existing_number" ] || pr_die "Prepared state does not contain an existing PR"
   [ "$existing_number" = "$update_number" ] || pr_die "Update PR #$update_number does not match prepared PR #$existing_number"
+  prepared_pr_head=$(jq -r '.existing_pr.headRefOid // empty' "$state_file")
+  [ -n "$prepared_pr_head" ] && [ "$prepared_pr_head" = "$expected_remote_sha" ] || pr_die "Prepared PR head does not match the captured remote branch"
 fi
 
 push_args=(-u origin "HEAD:refs/heads/$branch")
 if [ -n "$expected_remote_sha" ] && ! git merge-base --is-ancestor "$expected_remote_sha" HEAD; then
-  history_rewritten=$(jq -r '.history_rewritten // false' "$state_file")
-  prepared_head=$(jq -r '.prepared_head // empty' "$state_file")
-  backup_ref=$(jq -r '.backup_ref // empty' "$state_file")
-  [ "$history_rewritten" = true ] && [ -n "$prepared_head" ] && [ -n "$backup_ref" ] || pr_die "Branch is not a fast-forward and prepared state does not authorize published-history cleanup"
-  [ "$(git rev-parse "$backup_ref" 2>/dev/null || true)" = "$prepared_head" ] || pr_die "Commit-plan backup ref is missing or does not match prepared history"
-  git merge-base --is-ancestor "$expected_remote_sha" "$prepared_head" || pr_die "Remote branch was not an ancestor before commit-plan cleanup"
-  push_args=("--force-with-lease=refs/heads/$branch:$expected_remote_sha" -u origin "HEAD:refs/heads/$branch")
+  if [ "$action" = "update" ]; then
+    push_args=("--force-with-lease=refs/heads/$branch:$expected_remote_sha" -u origin "HEAD:refs/heads/$branch")
+  else
+    history_rewritten=$(jq -r '.history_rewritten // false' "$state_file")
+    prepared_head=$(jq -r '.prepared_head // empty' "$state_file")
+    backup_ref=$(jq -r '.backup_ref // empty' "$state_file")
+    [ "$history_rewritten" = true ] && [ -n "$prepared_head" ] && [ -n "$backup_ref" ] || pr_die "Branch is not a fast-forward and prepared state does not authorize published-history cleanup"
+    [ "$(git rev-parse "$backup_ref" 2>/dev/null || true)" = "$prepared_head" ] || pr_die "Commit-plan backup ref is missing or does not match prepared history"
+    git merge-base --is-ancestor "$expected_remote_sha" "$prepared_head" || pr_die "Remote branch was not an ancestor before commit-plan cleanup"
+    push_args=("--force-with-lease=refs/heads/$branch:$expected_remote_sha" -u origin "HEAD:refs/heads/$branch")
+  fi
 fi
 
 git push "${push_args[@]}"

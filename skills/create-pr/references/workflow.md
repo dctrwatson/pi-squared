@@ -17,7 +17,13 @@ The command prints paths to `context.md`, `state.json`, and on-demand artifacts.
 
 `draft` permits a dirty worktree because it does not authorize mutation. Its committed branch diff excludes worktree changes. `publish` requires a clean worktree and captures the local head, remote base, and remote branch state used by later safety checks.
 
-An existing open PR supplies its actual base. Its GitHub head must match `origin/<branch>`. A conflicting `--base` is rejected. Multiple open PRs for one branch require `--pr-number`.
+An existing open PR supplies its actual base. Its GitHub head must be in the same repository and must match `origin/<branch>`. Fork PR layouts stop with an error. A conflicting `--base` is rejected. Multiple open PRs for one branch require `--pr-number`.
+
+## Manual rebases and stacked pull requests
+
+An authorized existing-PR update can include an intentional manual rebase or other history rewrite. If you rebase after preparation, use the prepared base and complete the rebase. If it stops for conflicts, inspect each conflict. When the intended result is clear, edit the files, run `git add <resolved-path>...`, and run `git rebase --continue`. Otherwise, run `git rebase --abort` and ask the user. Run the relevant validation, then prepare again before commit planning or publication.
+
+For a stacked PR, use the existing PR's actual base. It is usually the parent branch. When the parent PR is squash merged, its commits are replaced by a new squash commit. Do not assume a rebase of the child onto `main` is clean or correct. Inspect the child diff and rebase or recreate only the required child commits. Resolve conflicts manually, then prepare again after the branch is complete.
 
 ## External writing
 
@@ -97,7 +103,7 @@ bash <skill_dir>/scripts/publish-pr.sh \
   --update <number>
 ```
 
-`--reviewer`, `--label`, and `--assignee` are repeatable. The helper rechecks the worktree, branch, head, merge base, remote base, remote branch, and outgoing subjects before it pushes. It uses a normal push for a new or fast-forward branch. It uses an explicit force-with-lease only when the captured remote branch was an ancestor before the approved commit-plan rewrite.
+`--reviewer`, `--label`, and `--assignee` are repeatable. The helper rechecks the worktree, branch, head, merge base, remote base, remote branch, and outgoing subjects before it pushes. It uses a normal push for a new or fast-forward branch. For a non-fast-forward existing-PR update, it uses exactly `--force-with-lease=refs/heads/<branch>:<captured-remote-PR-head>` only when preparation captured that exact PR head. It rejects a remote branch change and never uses plain `--force`. When no prepared existing-PR update is available, approved commit-plan cleanup requires its matching backup ref and remote-ancestor check before it uses the same lease.
 
 The result contains ready-to-use PR and commit Markdown links. If `gh pr create` succeeds but returns no URL, the helper reports successful mutation with unavailable metadata instead of issuing a second mutation or reporting that creation failed.
 

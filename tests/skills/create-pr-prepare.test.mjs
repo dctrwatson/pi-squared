@@ -76,6 +76,34 @@ test("preparation rejects an existing PR whose GitHub head differs from origin",
   assert.match(result.stderr, /Existing PR head does not match origin\/feature/);
 });
 
+test("preparation rejects an existing PR from a fork head repository", async (t) => {
+  const fixture = await createFixture(t);
+  git(fixture.work, "checkout", "-b", "feature");
+  commitFile(fixture.work, "feature.txt", "feature\n", "feat: add feature");
+  git(fixture.work, "push", "-u", "origin", "feature");
+  const head = git(fixture.work, "rev-parse", "HEAD");
+  await writeJson(join(fixture.ghData, "pr-list.json"), [{
+    number: 21,
+    title: "Feature",
+    url: "https://github.com/octo/example/pull/21",
+    state: "OPEN",
+    baseRefName: "main",
+    headRefName: "feature",
+    headRefOid: head,
+    headRepository: { nameWithOwner: "contributor/example" },
+    isCrossRepository: true,
+    isDraft: false,
+  }]);
+
+  const result = run("bash", [join(skillDir, "prepare-pr.sh"), "--mode", "publish"], {
+    cwd: fixture.work,
+    env: fixture.env,
+    allowFailure: true,
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Fork PR layouts are not supported/);
+});
+
 test("logical plans support multiple groups and preserve clean commits", async (t) => {
   const fixture = await createFixture(t);
   git(fixture.work, "checkout", "-b", "feature");

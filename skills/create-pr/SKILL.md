@@ -29,6 +29,8 @@ Read the returned `context.md` first. Read bounded artifacts only as needed. Do 
 
 Use an existing PR's prepared base. If preparation finds an existing PR and the request does not clearly choose update or new creation, ask before continuing. If preparation reports multiple templates, ask the user to select one and rerun with `--template`.
 
+An authorized update can include an intentional rebase or other history rewrite. Complete it before commit planning. Resolve conflicts when the intended result is clear. Abort and ask the user when it is ambiguous. Validate the rewritten `HEAD`, then prepare again.
+
 ## 3. Draft GitHub text
 
 Before writing external GitHub text, load and follow the `writing-style` skill when it is available.
@@ -63,6 +65,6 @@ bash <skill_dir>/scripts/publish-pr.sh --state <publish-state.json> --title-file
 bash <skill_dir>/scripts/publish-pr.sh --state <publish-state.json> --title-file <file> --body-file <file> --update <number>
 ```
 
-The helper refuses stale or unsafe state, verifies that no outgoing subject starts with `pi:`, pushes with the required lease protection, and creates or updates the PR. Do not bypass a refusal. If state changed, prepare again.
+The helper refuses stale or unsafe state, verifies that no outgoing subject starts with `pi:`, pushes with the required lease protection, and creates or updates the PR. For a non-fast-forward existing-PR update, it uses exactly `--force-with-lease=refs/heads/<branch>:<captured-remote-PR-head>`, never plain `--force`. Do not bypass a refusal. If state changed, prepare again.
 
 Return the PR and commit Markdown links with full GitHub URL targets. Mention validation only when it failed, was not run, or creates a material risk. Do not list routine validation. Keep the response concise.

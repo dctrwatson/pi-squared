@@ -88,10 +88,17 @@ printf '%s\\n' "$*" >> "$FAKE_GH_DIR/gh.log"
 if [[ "$1 $2" == "auth status" ]]; then exit 0; fi
 if [[ "$1 $2" == "repo view" ]]; then cat "$FAKE_GH_DIR/repo.json"; exit 0; fi
 if [[ "$1 $2" == "pr list" ]]; then
-  if [[ " $* " == *" --state merged "* ]]; then cat "$FAKE_GH_DIR/recent.json"; else cat "$FAKE_GH_DIR/pr-list.json"; fi
+  if [[ " $* " == *" --state merged "* ]]; then
+    cat "$FAKE_GH_DIR/recent.json"
+  else
+    jq 'map(.headRepository //= {"nameWithOwner":"octo/example"} | .isCrossRepository //= false)' "$FAKE_GH_DIR/pr-list.json"
+  fi
   exit 0
 fi
-if [[ "$1 $2" == "pr view" ]]; then cat "$FAKE_GH_DIR/pr-view.json"; exit 0; fi
+if [[ "$1 $2" == "pr view" ]]; then
+  jq '.headRepository //= {"nameWithOwner":"octo/example"} | .isCrossRepository //= false' "$FAKE_GH_DIR/pr-view.json"
+  exit 0
+fi
 if [[ "$1 $2" == "issue view" ]]; then cat "$FAKE_GH_DIR/issue-view.json"; exit 0; fi
 if [[ "$1 $2" == "pr create" ]]; then cat "$FAKE_GH_DIR/create-output.txt"; exit 0; fi
 if [[ "$1 $2" == "pr edit" ]]; then exit 0; fi
