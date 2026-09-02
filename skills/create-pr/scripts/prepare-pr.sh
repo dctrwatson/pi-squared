@@ -101,7 +101,7 @@ default_branch=$(jq -er '.defaultBranchRef.name' <<<"$repo_json")
 repo_url=$(jq -r '.url // empty' <<<"$repo_json")
 [ -n "$repo_url" ] || repo_url="https://github.com/$repo"
 
-pr_fields='number,title,url,state,baseRefName,headRefName,headRefOid,isDraft'
+pr_fields='number,title,url,state,baseRefName,headRefName,headRefOid,headRepository,isCrossRepository,isDraft'
 existing_pr='null'
 if [ -n "$pr_number" ]; then
   existing_pr=$(gh pr view "$pr_number" --repo "$repo" --json "$pr_fields")
@@ -117,6 +117,9 @@ else
 fi
 
 if [ "$existing_pr" != "null" ]; then
+  existing_head_repo=$(jq -r '.headRepository.nameWithOwner // empty' <<<"$existing_pr")
+  existing_is_cross=$(jq -r '.isCrossRepository // false' <<<"$existing_pr")
+  [ "$existing_is_cross" = "false" ] && [ "$existing_head_repo" = "$repo" ] || pr_die "Existing PR uses a fork head repository. Fork PR layouts are not supported"
   existing_head=$(jq -r '.headRefName' <<<"$existing_pr")
   [ "$existing_head" = "$branch" ] || pr_die "Existing PR head '$existing_head' does not match current branch '$branch'"
   existing_base=$(jq -r '.baseRefName' <<<"$existing_pr")

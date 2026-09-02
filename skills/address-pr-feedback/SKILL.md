@@ -12,7 +12,7 @@ Use this skill to execute or preview a complete feedback response. Follow [the w
 
 The default is execution: inspect feedback, make approved changes, push new commits, and post replies. Analysis-only, preview, and dry-run requests authorize no push or GitHub mutation.
 
-Do not treat an existing PR as standing permission for later pushes or replies. Never invoke `git push` directly. Never force-push in this workflow.
+Do not treat an existing PR as standing permission for later pushes or replies. Never invoke `git push` directly. The publication helper can use an exact force-with-lease for an intentional PR branch rewrite. Never use plain `--force`.
 
 ## 2. Prepare once
 
@@ -46,6 +46,8 @@ For each logical code-change group:
 
 Related comments can share one commit. Independent changes must not be squashed together.
 
+An execute request can include a needed PR branch rebase. For a stacked PR after its parent is squash merged, inspect the commit and patch boundaries. Do not assume that the child rebases cleanly onto `main`. Resolve conflicts when the intended result is clear. Ask the user only when the correct result is ambiguous. Validate the final rebased `HEAD` before publication.
+
 ## 5. Clean and publish commits
 
 After all code validation passes, run:
@@ -54,9 +56,9 @@ After all code validation passes, run:
 bash <skill_dir>/scripts/publish-feedback-commits.sh --state <state.json>
 ```
 
-The helper removes `pi:` only from new, unpushed commits. It preserves commit count, order, bodies, patches, and logical boundaries, then uses a normal push. It never rewrites published history or force-pushes.
+The helper removes `pi:` from the publication range. It preserves commit count, order, bodies, patches, and logical boundaries. It uses a normal push for new commits. For an intentional rebased PR branch, pass `--validated-head <HEAD>`; the helper then uses an exact force-with-lease against the prepared PR head.
 
-If the remote advanced safely, the helper rebases only the new local commits and exits without pushing. Run validation again, then retry with the returned state and `--validated-head <HEAD>`. Never auto-resolve rebase conflicts.
+If the remote advanced safely, the helper rebases only the new local commits and exits without pushing. Resolve clear conflicts and continue, or abort the rebase when the result is ambiguous. Run validation again, then retry with the returned state and `--validated-head <HEAD>`.
 
 ## 6. Draft and post replies
 

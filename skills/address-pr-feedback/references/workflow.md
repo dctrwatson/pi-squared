@@ -33,16 +33,23 @@ Treat bot comments as findings, not automatic requirements. Inspect outdated com
 
 ## Commit publication
 
-New feedback changes must be descendants of the prepared PR head. Make one local commit per logical unit. The publication helper:
+Make one local commit per logical unit. An execute request authorizes a needed rebase of the PR branch. For a stacked PR, first inspect the existing PR base and child-only commit range. After a parent squash merge, the old parent commits are not ancestors of the new squash commit. Do not replay duplicate parent changes. Rebase with the correct `--onto` boundary or reconstruct the child-only commits when that is safer.
 
-1. verifies the prepared repository, branch, PR, and remote head
-2. rejects merge commits and any local history that no longer descends from the published head
-3. strips `pi:` from each new commit subject without changing commit count or final tree
-4. pushes with a normal fast-forward
-5. verifies `origin` and the GitHub PR head
-6. writes `published-state.json` with Markdown commit links
+If a rebase stops, inspect each conflict. Resolve and continue when the intended result is clear. Abort and ask the user when resolution needs a product or design decision. Run the relevant validation after every completed rebase.
 
-It never uses force push. If the remote advances on a separate line from the new local commits, it rebases those local commits and writes `rebased-state.json`. It does not push. Validate the rebased `HEAD`, then run:
+The publication helper:
+
+1. verifies the prepared repository, branch, PR, base, and remote head
+2. rejects merge commits in the publication range
+3. strips `pi:` from commit subjects without changing commit count or the final tree
+4. uses a normal fast-forward push for new commits
+5. uses an exact force-with-lease against the prepared PR head for a validated branch rewrite
+6. verifies `origin` and the GitHub PR head
+7. writes `published-state.json` with Markdown commit links and recovery refs
+
+The helper never uses plain `--force`. A rewritten branch requires `--validated-head <HEAD>`. The helper rejects the rewrite if the remote PR head changed after preparation.
+
+If the remote advances on a separate line from new local commits, the helper rebases those local commits and writes `rebased-state.json`. It does not push. If the rebase stops, resolve clear conflicts and continue or abort. Rerun the helper after continuation. Validate the rebased `HEAD`, then run:
 
 ```bash
 bash <skill_dir>/scripts/publish-feedback-commits.sh \
@@ -50,7 +57,7 @@ bash <skill_dir>/scripts/publish-feedback-commits.sh \
   --validated-head <current-HEAD>
 ```
 
-If some local commits are already published, or remote history diverges from the prepared head, the helper refuses to rewrite them. Reprepare or ask the user how to proceed.
+If some local commits are already published, or the remote history changed in an unsafe way, the helper refuses the update. Reprepare when the local branch still matches the PR head. Otherwise, inspect and incorporate the remote change before you retry.
 
 ## Reply manifest
 
