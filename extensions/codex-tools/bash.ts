@@ -3,6 +3,7 @@ import { constants, type WriteStream } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { finished } from "node:stream/promises";
+import { stripVTControlCharacters } from "node:util";
 import type {
   AgentToolUpdateCallback,
   ExtensionContext,
@@ -43,6 +44,27 @@ const STOP_FORCE_WAIT_MS = 2_000;
 const FORCED_CLOSE_RESERVE_MS = 250;
 const UPDATE_THROTTLE_MS = 100;
 const PROGRESS_UPDATE_MS = 1_000;
+const OSC_SEQUENCE_PATTERN =
+  /(?:\u001b\u005d|\u009d)[\s\S]*?(?:\u0007|\u001b\\|\u009c|$)/g;
+const ST_TERMINATED_SEQUENCE_PATTERN =
+  /(?:\u001b[\u0050\u0058\u005e\u005f]|[\u0090\u0098\u009e\u009f])[\s\S]*?(?:\u001b\\|\u009c|$)/g;
+
+function sanitizeDisplayText(text: string): string {
+  const withoutTerminalSequences = stripVTControlCharacters(
+    text
+      .replace(OSC_SEQUENCE_PATTERN, "")
+      .replace(ST_TERMINATED_SEQUENCE_PATTERN, ""),
+  );
+  return Array.from(withoutTerminalSequences)
+    .filter((character) => {
+      const code = character.codePointAt(0);
+      if (code === undefined) return false;
+      if (code === 0x09 || code === 0x0a) return true;
+      if (code <= 0x1f) return false;
+      return code < 0xfff9 || code > 0xfffb;
+    })
+    .join("");
+}
 
 export const codexBashParameters = Type.Object({
   command: Type.String({ description: "Bash source text to execute" }),
@@ -725,8 +747,9 @@ export function createCodexBashTool(options: CodexBashToolOptions = {}): ToolDef
     },
     renderResult(toolResult, options, theme, context) {
       const rawText = textContent(toolResult);
+      const displayText = sanitizeDisplayText(rawText);
       const color = context.isError ? "error" : "toolOutput";
-      return new Text(theme.fg(color, renderPreview(rawText, options.expanded)), 0, 0);
+      return new Text(theme.fg(color, renderPreview(displayText, options.expanded)), 0, 0);
     },
   };
 }

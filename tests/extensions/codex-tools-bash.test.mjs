@@ -69,7 +69,7 @@ test("bash normalizes timeout boundaries", () => {
   );
 });
 
-test("bash renderer escapes terminal control characters", () => {
+test("bash renderer strips terminal sequences", () => {
   const tool = bashModule.createCodexBashTool();
   const plainTheme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
   const call = tool.renderCall(
@@ -81,13 +81,36 @@ test("bash renderer escapes terminal control characters", () => {
   assert.match(call, /\\u009d/);
 
   const rendered = tool.renderResult(
-    { content: [{ type: "text", text: "safe\u001b]52;clipboard\u0007\u009b31m" }], details: undefined },
+    {
+      content: [{
+        type: "text",
+        text: [
+          "safe\u0000\u0001\r\ufff9\ufffa\ufffb",
+          "\u001b]52;clipboard\u0007",
+          "\u001b[31mred\u001b[0m",
+          "\u001b[?25lmessage\u001b[?25h",
+          "\u001b]8;;https://example.com/(x)\u001b\\link\u001b]8;;\u001b\\",
+          "\u001b_hidden\u001b\\",
+          "\u001bXsos\u0007data\u001b\\",
+          " partial \u001b[",
+        ].join(""),
+      }],
+      details: undefined,
+    },
     { expanded: true, isPartial: false },
     plainTheme,
     { isError: false },
   ).render(200).join("\n");
   assert.doesNotMatch(rendered, /[\u0007\u001b\u009b]/);
-  assert.match(rendered, /\\u001b/);
+  assert.equal(rendered.trimEnd(), "saferedmessagelink partial [");
+
+  const incompleteString = tool.renderResult(
+    { content: [{ type: "text", text: "safe\u001b]0;unfinished" }], details: undefined },
+    { expanded: true, isPartial: true },
+    plainTheme,
+    { isError: false },
+  ).render(200).join("\n");
+  assert.equal(incompleteString.trimEnd(), "safe");
 });
 
 test("bash renderer leaves nonzero result text to the tool-error shell", () => {
@@ -156,6 +179,21 @@ test("bash formats empty and separate streams", async () => {
       assert.ok(Buffer.byteLength(both.text) < 48 * 1024);
     } finally {
       await Promise.all([empty, stdout, stderr, both].map(removeArtifact));
+    }
+  });
+});
+
+test("bash keeps terminal sequences in the tool result", async () => {
+  await withDirectory(async (directory) => {
+    const result = await execute(
+      bashModule.createCodexBashTool(),
+      { command: "printf '\\033[31mred\\033[0m\\n'" },
+      directory,
+    );
+    try {
+      assert.match(result.text, /\u001b\[31mred\u001b\[0m\n$/);
+    } finally {
+      await removeArtifact(result);
     }
   });
 });
