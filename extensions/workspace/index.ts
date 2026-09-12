@@ -18,6 +18,7 @@ export const WORKSPACE_PM_SKILL_PATH = join(
     "SKILL.md",
 );
 
+
 export interface WorkspaceExtensionOptions {
     createService?: (cwd: string) => WorkspaceService;
     completionCwd?: () => string;
@@ -41,6 +42,25 @@ async function managedWorkspacePmPath(service: WorkspaceService, cwd: string): P
     } catch {
         return undefined;
     }
+}
+
+function hasWorkspaceMetadata(entries: unknown): boolean {
+    return Array.isArray(entries) && entries.some((entry) => entry
+        && typeof entry === "object"
+        && !Array.isArray(entry)
+        && (entry as { type?: unknown }).type === "custom"
+        && (entry as { customType?: unknown }).customType === WORKSPACE_SESSION_TYPE);
+}
+
+    if (!Array.isArray(entries)) return false;
+    let mode: unknown;
+    for (const entry of entries) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+        const custom = entry as { type?: unknown; customType?: unknown; data?: unknown };
+        const data = custom.data as { sessionId?: unknown; source?: unknown; mode?: unknown };
+        if (data.sessionId === sessionId && data.source === "workspace") mode = data.mode;
+    }
+    return mode === "active";
 }
 
 function recency(timestamp: number | undefined): string {
@@ -671,7 +691,12 @@ export default function workspaceExtension(
             if (!session) return;
             const state = await service.state();
             const lease = await state.readLease(session);
-            if (!lease || lease.pid !== process.pid || lease.hostname !== hostname() || lease.session !== session) return;
+            if (!lease || lease.pid !== process.pid || lease.hostname !== hostname() || lease.session !== session) {
+                if (hasWorkspaceMetadata(ctx.sessionManager.getEntries?.())) {
+                    ctx.ui.notify("Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.", "warning");
+                }
+                return;
+            }
             const metadata = await service.currentMetadata(session);
             const name = ctx.sessionManager.getSessionName();
             if (!name || sessionHasAutomaticWorkspaceName(ctx.sessionManager.getEntries(), name)) {
@@ -682,6 +707,8 @@ export default function workspaceExtension(
             const record = await service.registerCurrent(session, true);
             if (!record) return;
             owned = { branch: record.branch, session: record.session };
+            const sessionId = ctx.sessionManager.getSessionId?.();
+            }
             if (await service.git.isManagedWorktree(record.cwd)) {
                 pmPath = await managedWorkspacePmPath(service, record.cwd);
                 if (!pmPath) ctx.ui.notify("Workspace PM repository is unavailable; PM guidance is disabled.", "warning");

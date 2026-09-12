@@ -1,6 +1,7 @@
 import { WorkspaceService, parseNewWorkspace, parseWorkspaceTarget } from "./core.ts";
+import type { ActivationOptions } from "./core.ts";
 import { WorkspaceError } from "./process.ts";
-import type { NewWorkspaceOptions, WorkspaceStatus } from "./types.ts";
+import type { NewWorkspaceOptions, WorkspaceLaunchCandidate, WorkspaceStatus } from "./types.ts";
 
 interface WorkspaceLaunchPlan {
     action: "launch";
@@ -22,8 +23,18 @@ interface ListPlan {
 
 type LaunchPlan = WorkspaceLaunchPlan | PrunePlan | ListPlan;
 
+export type LaunchCandidate = Readonly<WorkspaceLaunchCandidate>;
+
+export const WORKSPACE_LAUNCH_CAPABILITIES = { beforeActivate: true } as const;
+
+/** Options for programmatic workspace launch resolution. */
+export interface ResolveLaunchOptions {
+    /** Validate an explicit prepared branch binding before activation can change workspace state. */
+    beforeActivate?: (candidate: LaunchCandidate) => Promise<void>;
+}
+
 function usage(): string {
-    return "Usage: piw [--worktree] [branch|PR] [-- pi arguments] | piw new <branch> [--from <ref>] [--worktree] [-- pi arguments] | piw prune | piw --list";
+    return "Usage: piw [--profile <name>] [--expect-session <path>] [--worktree] [branch|PR] [-- pi arguments] | piw [--profile <name>] new <branch> [--from <ref>] [--worktree] [-- pi arguments] | piw prune | piw --list";
 }
 
 function recency(timestamp: number | undefined): string {
@@ -68,7 +79,7 @@ export function formatWorkspaceList(statuses: WorkspaceStatus[]): string {
         .join("\n") + "\n";
 }
 
-const PROTECTED_PI_OPTIONS = new Set([
+const PROTECTED_SESSION_OPTIONS = new Set([
     "--session",
     "--session-id",
     "--fork",
@@ -77,14 +88,14 @@ const PROTECTED_PI_OPTIONS = new Set([
     "--resume",
     "-r",
     "--no-session",
-    "--no-extensions",
-    "-ne",
 ]);
 
-export function validateForwardedPiArguments(args: string[]): void {
+const EXTENSION_DISCOVERY_OPTIONS = new Set(["--no-extensions", "-ne"]);
+
+export function validateForwardedPiArguments(args: string[], profile?: string): void {
     for (const argument of args) {
         const option = argument.split("=", 1)[0] ?? argument;
-        if (PROTECTED_PI_OPTIONS.has(option)) {
+        if (PROTECTED_SESSION_OPTIONS.has(option) || (!profile && EXTENSION_DISCOVERY_OPTIONS.has(option))) {
             throw new WorkspaceError(`piw manages ${option}; remove it from forwarded Pi arguments`);
         }
     }
@@ -92,6 +103,8 @@ export function validateForwardedPiArguments(args: string[]): void {
 
 export interface LauncherArguments {
     parallel: boolean;
+    profile?: string;
+    expectedSession?: string;
     prune?: true;
     list?: true;
     target?: string;
@@ -101,6 +114,8 @@ export interface LauncherArguments {
 
 export function parseLauncherArguments(args: string[]): LauncherArguments {
     let parallel = false;
+    let profile: string | undefined;
+    let expectedSession: string | undefined;
     let prune = false;
     let list = false;
     let target: string | undefined;
@@ -111,6 +126,20 @@ export function parseLauncherArguments(args: string[]): LauncherArguments {
         if (arg === "--") {
             piArgs = args.slice(index + 1);
             break;
+        }
+        if (arg === "--profile") {
+            const name = args[++index];
+            if (!name || name === "--") throw new WorkspaceError("--profile requires a name");
+            if (profile) throw new WorkspaceError("piw accepts one profile");
+            profile = name;
+            continue;
+        }
+        if (arg === "--expect-session") {
+            const session = args[++index];
+            if (!session || session === "--") throw new WorkspaceError("--expect-session requires a path");
+            if (expectedSession) throw new WorkspaceError("piw accepts one expected session");
+            expectedSession = session;
+            continue;
         }
         if (arg === "new") {
             if (prune) throw new WorkspaceError("piw prune accepts no arguments");
@@ -141,18 +170,44 @@ export function parseLauncherArguments(args: string[]): LauncherArguments {
         if (target) throw new WorkspaceError("piw accepts one workspace target");
         target = arg;
     }
-    if (prune && (parallel || list || target || createWords || piArgs.length > 0)) throw new WorkspaceError("piw prune accepts no arguments");
-    if (list && (parallel || target || createWords || piArgs.length > 0)) throw new WorkspaceError("piw --list accepts no arguments");
-    if (createWords) {
-        const create = parseNewWorkspace([...(parallel ? ["--worktree"] : []), ...createWords], "piw new");
-        return { parallel: create.parallel, create, piArgs };
+    if (prune && (parallel || profile || expectedSession || list || target || createWords || piArgs.length > 0)) {
+        throw new WorkspaceError("piw prune accepts no arguments");
     }
-    return { parallel, ...(prune ? { prune: true as const } : {}), ...(list ? { list: true as const } : {}), ...(target ? { target } : {}), piArgs };
+    if (list && (parallel || profile || expectedSession || target || createWords || piArgs.length > 0)) {
+        throw new WorkspaceError("piw --list accepts no arguments");
+    }
+    if (createWords) {
+        if (expectedSession) throw new WorkspaceError("--expect-session cannot be used with piw new");
+        const create = parseNewWorkspace([...(parallel ? ["--worktree"] : []), ...createWords], "piw new");
+        return { parallel: create.parallel, ...(profile ? { profile } : {}), create, piArgs };
+    }
+    if (expectedSession && !target) throw new WorkspaceError("--expect-session requires an explicit local branch target");
+    return {
+        parallel,
+        ...(profile ? { profile } : {}),
+        ...(expectedSession ? { expectedSession } : {}),
+        ...(prune ? { prune: true as const } : {}),
+        ...(list ? { list: true as const } : {}),
+        ...(target ? { target } : {}),
+        piArgs,
+    };
 }
 
-export async function resolveLaunch(args: string[], cwd = process.cwd()): Promise<LaunchPlan> {
+/**
+ * Resolve a Pi workspace launch. beforeActivate is limited to an explicit local
+ * branch that is already checked out at cwd. It receives the exact binding,
+ * waits for validation, and then permits activation.
+ */
+export async function resolveLaunch(
+    args: string[],
+    cwd = process.cwd(),
+    options: ResolveLaunchOptions = {},
+): Promise<LaunchPlan> {
     const parsed = parseLauncherArguments(args);
-    validateForwardedPiArguments(parsed.piArgs);
+    validateForwardedPiArguments(parsed.piArgs, parsed.profile);
+    if (options.beforeActivate && (parsed.list || parsed.prune || parsed.create)) {
+        throw new WorkspaceError("beforeActivate requires an explicit existing local branch target");
+    }
     const service = new WorkspaceService(cwd);
     if (parsed.list) {
         return { action: "list", output: formatWorkspaceList(await service.list()) };
@@ -163,10 +218,11 @@ export async function resolveLaunch(args: string[], cwd = process.cwd()): Promis
     }
     const requestedLeasePid = Number(process.env.PIW_LEASE_PID);
     const leasePid = Number.isSafeInteger(requestedLeasePid) && requestedLeasePid > 0 ? requestedLeasePid : undefined;
-    const activationOptions = {
+    const activationOptions: ActivationOptions = {
         parallel: parsed.parallel,
         switchSession: async () => ({ cancelled: false }),
         ...(leasePid ? { leasePid } : {}),
+        ...(parsed.expectedSession ? { expectedSession: parsed.expectedSession } : {}),
     };
     if (parsed.create) {
         const activation = await service.create(parsed.create, activationOptions);
@@ -176,6 +232,17 @@ export async function resolveLaunch(args: string[], cwd = process.cwd()): Promis
         ? parseWorkspaceTarget(parsed.target)
         : { type: "branch" as const, branch: await service.git.branch(cwd) };
     if (!target) throw new WorkspaceError("A workspace target is required");
+    if (parsed.expectedSession && target.type !== "branch") {
+        throw new WorkspaceError("--expect-session requires an explicit local branch target");
+    }
+    if (options.beforeActivate) {
+        if (!parsed.target || target.type !== "branch") {
+            throw new WorkspaceError("beforeActivate requires an explicit existing local branch target");
+        }
+        const candidate = await service.preparedLaunchCandidate(target.branch, cwd);
+        await options.beforeActivate({ ...candidate });
+        activationOptions.preparedCandidate = candidate;
+    }
     const activation = await service.activate(target, activationOptions);
     return { action: "launch", cwd: activation.record.cwd, session: activation.record.session, args: parsed.piArgs };
 }

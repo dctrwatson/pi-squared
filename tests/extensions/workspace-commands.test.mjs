@@ -74,6 +74,16 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     target: "feature/test",
     piArgs: [],
   });
+  assert.deepEqual(parseLauncherArguments([
+    "--profile", "hari", "--expect-session", "/tmp/hari.jsonl", "feature/test", "--",
+    "--no-extensions", "-e", "/tmp/hari-extension", "--no-skills",
+  ]), {
+    parallel: false,
+    profile: "hari",
+    expectedSession: "/tmp/hari.jsonl",
+    target: "feature/test",
+    piArgs: ["--no-extensions", "-e", "/tmp/hari-extension", "--no-skills"],
+  });
   assert.deepEqual(parseLauncherArguments(["new", "feature/test", "--from", "current", "--worktree"]), {
     parallel: true,
     create: { branch: "feature/test", from: "current", parallel: true },
@@ -98,6 +108,8 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
   assert.throws(() => parseLauncherArguments(["--list", "feature/test"]), /piw --list accepts no arguments/);
   assert.throws(() => parseLauncherArguments(["--list", "--worktree"]), /piw --list accepts no arguments/);
   assert.throws(() => parseLauncherArguments(["new"]), /piw new requires a branch name/);
+  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/hari.jsonl"]), /requires an explicit local branch target/);
+  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/hari.jsonl", "new", "feature/test"]), /cannot be used with piw new/);
   assert.throws(() => parseNewWorkspace(["feature/test", "--parallel"]), /Unknown workspace option/);
   assert.throws(() => parseLauncherArguments(["--parallel"]), /Unknown piw option/);
   assert.throws(() => parseLauncherArguments(["--here"]), /Unknown piw option/);

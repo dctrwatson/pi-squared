@@ -16,7 +16,7 @@ import { GitRepository } from "../../extensions/workspace/git.ts";
 import { NodeProcessRunner } from "../../extensions/workspace/process.ts";
 import { stableHash } from "../../extensions/workspace/state.ts";
 import { PiSessionStore, workspaceMetadata } from "../../extensions/workspace/sessions.ts";
-import { formatWorkspaceList, parseLauncherArguments, resolveLaunch, validateForwardedPiArguments } from "../../extensions/workspace/launcher.ts";
+import { WORKSPACE_LAUNCH_CAPABILITIES, formatWorkspaceList, parseLauncherArguments, resolveLaunch, validateForwardedPiArguments } from "../../extensions/workspace/launcher.ts";
 import workspaceExtension, { CREATE_WORKSPACE_TOOL, WORKSPACE_MERGE_FINALIZE_TOOL, WORKSPACE_PM_SKILL_PATH, handleWorkspace, picker, staleWorkspaceTarget } from "../../extensions/workspace/index.ts";
 
 const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
@@ -170,6 +170,7 @@ export {
   join,
   resolve,
   WorkspaceService,
+  WORKSPACE_LAUNCH_CAPABILITIES,
   GitRepository,
   NodeProcessRunner,
   workspaceMetadata,

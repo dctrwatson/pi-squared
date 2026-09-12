@@ -25,6 +25,7 @@ import type {
     WorkspaceRecord,
     WorkspaceStatus,
     WorkspaceTarget,
+    WorkspaceLaunchCandidate,
 } from "./types.ts";
 
 export interface WorkspaceServiceOptions {
@@ -37,6 +38,8 @@ export interface ActivationOptions {
     switchSession: (session: string) => Promise<{ cancelled: boolean }>;
     resolvePullRequestDivergence?: (divergence: PullRequestDivergence) => Promise<PullRequestDivergenceChoice>;
     leasePid?: number;
+    expectedSession?: string;
+    preparedCandidate?: WorkspaceLaunchCandidate;
 }
 
 interface BranchMutation {
@@ -322,6 +325,17 @@ export class WorkspaceService {
         return this.sessions.bind(record.session, metadata);
     }
 
+    private async assertExpectedSession(state: WorkspaceState, branch: string, expectedSession: string): Promise<void> {
+        const record = await state.getWorkspace(branch);
+        if (!record || !await this.recordMatchesRepository(record, state) || resolve(record.session) !== resolve(expectedSession)) {
+            throw new WorkspaceError(`Expected session does not match the local ${branch} workspace binding`);
+        }
+        const metadata = workspaceMetadata(record.repository, record.branch, record.cwd, record.pr);
+        if (!await this.sessions.validate(record.session, metadata)) {
+            throw new WorkspaceError(`Expected session is not valid for the local ${branch} workspace binding`);
+        }
+    }
+
     private async liveWorkspaceAt(state: WorkspaceState, cwd: string, ownerPid: number): Promise<{ record: WorkspaceRecord; lease: LeaseRecord } | undefined> {
         for (const record of await state.listWorkspaces()) {
             if (!await samePath(record.cwd, cwd)) continue;
@@ -359,6 +373,62 @@ export class WorkspaceService {
         const state = await this.state();
         const cwd = await this.mutableCheckoutForActivation(branch, parallel);
         return cwd ? this.liveWorkspaceAt(state, cwd, ownerPid) : undefined;
+    }
+
+    /**
+     * Resolve a stable local branch binding without changing workspace state.
+     * Callers use this before a pre-activation validation callback.
+     */
+    async preparedLaunchCandidate(branch: string, cwd: string): Promise<WorkspaceLaunchCandidate> {
+        const state = await this.state();
+        const preparedCwd = await canonicalPath(cwd);
+        if (!await this.git.localBranchOid(branch)) throw new WorkspaceError(`Local branch does not exist: ${branch}`);
+        if (await this.git.branch(preparedCwd) !== branch) {
+            throw new WorkspaceError(`Prepared checkout is not on local branch ${branch}`);
+        }
+        const existing = await this.strictPreparedWorkspace(state, branch, preparedCwd);
+        return {
+            branch,
+            cwd: preparedCwd,
+            ...(existing ? { session: resolve(existing.session) } : {}),
+        };
+    }
+
+    private async strictPreparedWorkspace(
+        state: WorkspaceState,
+        branch: string,
+        cwd: string,
+    ): Promise<WorkspaceRecord | undefined> {
+        const stored = await state.getWorkspace(branch);
+        if (!stored) return undefined;
+        const metadata = workspaceMetadata(stored.repository, stored.branch, stored.cwd, stored.pr);
+        if (!await this.recordMatchesRepository(stored, state) || !await samePath(stored.cwd, cwd)
+            || !await this.sessions.validate(stored.session, metadata)) {
+            throw new WorkspaceError(`Prepared workspace binding is not valid for local branch ${branch}`);
+        }
+        return stored;
+    }
+
+    private async preparedWorkspaceForActivation(
+        state: WorkspaceState,
+        candidate: WorkspaceLaunchCandidate,
+        currentCwd: string,
+    ): Promise<WorkspaceRecord | undefined> {
+        const candidateCwd = await canonicalPath(candidate.cwd);
+        if (!await this.git.localBranchOid(candidate.branch)
+            || !await samePath(currentCwd, candidateCwd)
+            || await this.git.branch(candidateCwd) !== candidate.branch) {
+            throw new WorkspaceError(`Prepared checkout changed before activation for local branch ${candidate.branch}`);
+        }
+        const existing = await this.strictPreparedWorkspace(state, candidate.branch, candidateCwd);
+        if (!candidate.session) {
+            if (existing) throw new WorkspaceError(`Prepared workspace binding changed before activation for local branch ${candidate.branch}`);
+            return undefined;
+        }
+        if (!existing || resolve(existing.session) !== resolve(candidate.session)) {
+            throw new WorkspaceError(`Prepared workspace binding changed before activation for local branch ${candidate.branch}`);
+        }
+        return existing;
     }
 
     async placement(record: WorkspaceRecord): Promise<Placement> {
@@ -905,12 +975,25 @@ export class WorkspaceService {
     async activate(target: WorkspaceTarget, options: ActivationOptions): Promise<Activation> {
         const state = await this.state();
         return state.withMutationLock(async () => {
+            if (options.expectedSession) {
+                if (target.type !== "branch") throw new WorkspaceError("Expected session requires an explicit local branch target");
+                await this.assertExpectedSession(state, target.branch, options.expectedSession);
+            }
             const detail = target.type === "pr" ? await this.pullRequest(target) : undefined;
             const branch = detail?.branch ?? (target.type === "branch" ? target.branch : undefined);
             if (!branch) throw new WorkspaceError("Pull request has no branch");
+            if (options.preparedCandidate && (target.type !== "branch" || options.preparedCandidate.branch !== branch)) {
+                throw new WorkspaceError("Prepared activation requires its explicit local branch target");
+            }
             const pr = detail ? this.pullRequestIdentity(detail) : undefined;
-            const stored = await state.getWorkspace(branch);
-            const existing = stored?.branch === branch && await this.recordMatchesRepository(stored, state) ? stored : undefined;
+            const paths = await this.git.paths();
+            const preparedExisting = options.preparedCandidate
+                ? await this.preparedWorkspaceForActivation(state, options.preparedCandidate, paths.currentCwd)
+                : undefined;
+            const stored = options.preparedCandidate ? undefined : await state.getWorkspace(branch);
+            const existing = options.preparedCandidate
+                ? preparedExisting
+                : stored?.branch === branch && await this.recordMatchesRepository(stored, state) ? stored : undefined;
             if (pr && existing && (!existing.prUrl || !sameUrl(existing.prUrl, pr.url)
                 || !isPullRequest(existing.pr) || !samePullRequest(existing.pr, pr))) {
                 throw new WorkspaceError(`Branch ${branch} is already bound to a different pull request`);
@@ -923,7 +1006,6 @@ export class WorkspaceService {
             if (lease && await state.processIsLive(lease) && !ownLease) {
                 throw new WorkspaceError(`Workspace ${branch} is active in another Pi session`);
             }
-            const paths = await this.git.paths();
             const mutableCheckout = await this.mutableCheckoutForActivation(branch, options.parallel);
             if (mutableCheckout) await this.assertCheckoutAvailable(state, mutableCheckout, ownerPid);
             const rollback: Rollback = { primary: paths.primaryCwd, previousPrimaryBranch: await this.git.branch(paths.primaryCwd) };

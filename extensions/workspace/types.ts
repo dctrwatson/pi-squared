@@ -71,6 +71,12 @@ export interface Activation {
     previousPrimaryBranch?: string;
 }
 
+export interface WorkspaceLaunchCandidate {
+    branch: string;
+    cwd: string;
+    session?: string;
+}
+
 export interface PruneResult {
     pruned: string[];
     skipped: Array<{ branch: string; reason: string }>;

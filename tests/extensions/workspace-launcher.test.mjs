@@ -7,10 +7,13 @@ import {
   mkdir,
   utimes,
   writeFile,
+  realpath,
+  rm,
   hostname,
   join,
   resolve,
   WorkspaceService,
+  WORKSPACE_LAUNCH_CAPABILITIES,
   GitRepository,
   NodeProcessRunner,
   resolveLaunch,
@@ -23,6 +26,10 @@ import {
   switcher,
   mapWorkspace,
 } from "./workspace-test-support.mjs";
+
+test("launcher advertises prepared-launch validation support", () => {
+  assert.deepEqual(WORKSPACE_LAUNCH_CAPABILITIES, { beforeActivate: true });
+});
 
 test("bare piw uses the current branch without gh", async () => {
   const root = await repository();
@@ -119,6 +126,111 @@ test("an explicit piw branch opens a dormant serial mapping", async () => {
     const plan = await resolveLaunch(["a"], root);
     assert.equal(plan.session, record.session);
     assert.equal(git(root, "branch", "--show-current"), "a");
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("a profile forwards explicit Pi resources with the workspace session", async () => {
+  const root = await repository();
+  try {
+    git(root, "branch", "feature");
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const { state, record } = await mapWorkspace(service, sessions, "feature", root);
+
+    const plan = await resolveLaunch([
+      "--profile", "hari", "feature", "--", "--no-extensions", "-e", "/opt/hari/extension",
+      "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
+    ], root);
+
+    assert.equal(plan.action, "launch");
+    assert.equal(plan.session, record.session);
+    assert.deepEqual(plan.args, [
+      "--no-extensions", "-e", "/opt/hari/extension", "--no-skills",
+      "--no-prompt-templates", "--no-themes", "--no-context-files",
+    ]);
+    assert.equal((await state.readLease(record.session))?.pid, process.pid);
+    await state.releaseLease(record);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("beforeActivate receives the prepared binding and rejects before workspace mutation", async () => {
+  const root = await repository();
+  try {
+    const prepared = join(root, "prepared");
+    git(root, "branch", "feature");
+    git(root, "worktree", "add", prepared, "feature");
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(prepared, { sessions });
+    const { state, record } = await mapWorkspace(service, sessions, "feature", prepared);
+    const preparedCwd = await realpath(prepared);
+
+    await assert.rejects(resolveLaunch(["--profile", "hari", "feature"], prepared, {
+      beforeActivate: async (candidate) => {
+        assert.deepEqual(candidate, { branch: "feature", cwd: preparedCwd, session: record.session });
+        throw new Error("Hari rejected the candidate");
+      },
+    }), /Hari rejected the candidate/);
+
+    assert.equal(git(root, "branch", "--show-current"), "main");
+    assert.equal(git(prepared, "branch", "--show-current"), "feature");
+    assert.equal(git(root, "config", "--local", "--get", state.sessionKey("feature")), record.session);
+    assert.equal(await state.readLease(record.session), undefined);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("beforeActivate rejects an unbound prepared branch without creating workspace state", async () => {
+  const root = await repository();
+  try {
+    git(root, "checkout", "-b", "feature");
+    const service = new WorkspaceService(root, { sessions: new FakeSessions(root) });
+    const state = await service.state();
+    const preparedCwd = await realpath(root);
+
+    await assert.rejects(resolveLaunch(["feature"], root, {
+      beforeActivate: async (candidate) => {
+        assert.deepEqual(candidate, { branch: "feature", cwd: preparedCwd });
+        throw new Error("Hari rejected an unbound candidate");
+      },
+    }), /Hari rejected an unbound candidate/);
+
+    assert.equal(await state.getWorkspace("feature"), undefined);
+    assert.equal(gitSucceeds(root, "config", "--local", "--get", state.sessionKey("feature")), false);
+    await assert.rejects(resolveLaunch([], root, { beforeActivate: async () => {} }), /explicit existing local branch target/);
+
+    git(root, "checkout", "main");
+    let called = false;
+    await assert.rejects(resolveLaunch(["feature"], root, {
+      beforeActivate: async () => { called = true; },
+    }), /Prepared checkout is not on local branch feature/);
+    assert.equal(called, false);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("beforeActivate refuses an uncertain binding without repairing it", async () => {
+  const root = await repository();
+  try {
+    git(root, "checkout", "-b", "feature");
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const { state, record } = await mapWorkspace(service, sessions, "feature", root);
+    await rm(record.session, { force: true });
+    let called = false;
+
+    await assert.rejects(resolveLaunch(["feature"], root, {
+      beforeActivate: async () => { called = true; },
+    }), /Prepared workspace binding is not valid/);
+
+    assert.equal(called, false);
+    assert.equal(git(root, "config", "--local", "--get", state.sessionKey("feature")), record.session);
+    assert.equal(await state.readLease(record.session), undefined);
   } finally {
     await removeRepository(root);
   }

@@ -54,8 +54,30 @@ piw new feature/example --from current --worktree
 piw prune                   # Remove workspaces for deleted remote branches
 piw --list                  # Show local workspace status
 piw -- --model anthropic/claude-sonnet-4-5
+piw --profile hari feature/example -- --no-extensions -e /path/to/hari
+piw --expect-session /absolute/path/to/session.jsonl feature/example
 ```
 
+
+### Profile forwarding
+
+Use `piw --profile <name> [workspace options] -- [Pi arguments]` for an explicit resource profile. The name is a label only. It does not load configuration, add Pi arguments, or pass the name to Pi.
+
+The profile lane accepts all normal forwarded Pi arguments. It also accepts `--no-extensions` and `-ne`, so a caller can combine extension discovery disablement with explicit `-e` or `--extension` resources. Use Pi resource controls after `--`, for example `--no-skills`, `--no-prompt-templates`, `--no-themes`, and `--no-context-files`. Ordinary `piw` continues to reject forwarded `--no-extensions` and `-ne`.
+
+`piw` always selects the session. Both lanes reject forwarded `--session`, `--session-id`, `--fork`, `--continue` or `-c`, `--resume` or `-r`, and `--no-session`.
+
+### Strict session resume
+
+Use `--expect-session <path>` only with an explicit local branch target, for example `piw --expect-session /absolute/path/to/session.jsonl feature/example`. It rejects a bare target, a pull request target, and `piw new`.
+
+Before checkout changes, session repair or replacement, and lease acquisition, `piw` resolves the expected path. It requires it to match the local branch workspace binding and validates that session's workspace metadata. It does not bind or rebind the session. Use this option when resumption must not repair or replace a branch binding.
+
+### Programmatic pre-activation validation
+
+`resolveLaunch(args, cwd, { beforeActivate })` provides an optional validation hook. Before it supplies this callback, a caller MUST check `WORKSPACE_LAUNCH_CAPABILITIES.beforeActivate === true`. Do not infer support from the existence of `resolveLaunch`. The hook is available only for an explicit existing local branch that is already checked out at `cwd`. Pi waits for the hook before it changes checkout state, repairs a binding, acquires a lease, or activates a session.
+
+The hook receives `{ branch, cwd, session? }`. `branch` and `cwd` are the explicit prepared binding. `session` is the existing native session only when its local workspace binding and metadata are valid. An absent `session` means that no workspace binding exists. An invalid or uncertain binding fails instead of being repaired. A new candidate creates a new native session after validation. It does not adopt or fork another session.
 
 An explicit PR command can contact GitHub. If its trusted local branch differs from the current PR head, use `/ws #N` in Pi to choose one of these actions:
 

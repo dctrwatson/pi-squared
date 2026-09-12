@@ -10,6 +10,7 @@ import {
   writeFile,
   hostname,
   join,
+  resolve,
   WorkspaceService,
   GitRepository,
   NodeProcessRunner,
@@ -162,6 +163,52 @@ test("session start leaves plain Pi sessions unbound", async () => {
   }
 });
 
+test("session start warns when a known workspace session does not own its lease", async () => {
+  const root = await repository();
+  try {
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const { record } = await mapWorkspace(service, sessions, "main", root);
+    let sessionStart;
+    const modeEvents = [];
+    const notifications = [];
+    workspaceExtension({
+      registerCommand() {},
+      on(event, handler) {
+        if (event === "session_start") sessionStart = handler;
+      },
+      events: {
+        emit(name, payload) {
+          modeEvents.push({ name, payload });
+        },
+      },
+      appendEntry() {},
+      setSessionName() {},
+    });
+    const ctx = {
+      cwd: root,
+      sessionManager: {
+        getSessionFile: () => record.session,
+        getEntries: () => [{ type: "custom", customType: "pi-workspace", data: { branch: "main" } }],
+      },
+      ui: { notify: (...args) => notifications.push(args) },
+      shutdown() {
+        throw new Error("a missing workspace lease must not shut down Pi");
+      },
+    };
+
+    await sessionStart({}, ctx);
+
+    assert.deepEqual(modeEvents, []);
+    assert.deepEqual(notifications, [[
+      "Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.",
+      "warning",
+    ]]);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
 test("an active managed workspace exposes concise PM guidance", async () => {
   const root = await repository();
   try {
@@ -197,6 +244,10 @@ test("an active managed workspace exposes concise PM guidance", async () => {
       cwd: created.record.cwd,
       sessionManager: {
         getSessionFile: () => created.record.session,
+        getSessionId: () => "workspace-session",
+        getEntries: () => appended.map((entry) => entry.type === "session_info"
+          ? { type: "session_info", name: entry.data }
+          : { type: "custom", customType: entry.type, data: entry.data }),
         getSessionName: () => undefined,
       },
       ui: {
@@ -213,7 +264,7 @@ test("an active managed workspace exposes concise PM guidance", async () => {
     assert.deepEqual(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), {
       systemPrompt: "Base prompt\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
     });
-    assert.equal(appended.at(-1)?.type, "pi-workspace");
+    assert.deepEqual(appended.at(-1)?.data, { sessionId: "workspace-session", source: "workspace", mode: "active" });
     assert.deepEqual(modeEvents, [{
       payload: { mode: "active", source: "workspace" },
     }]);
@@ -273,7 +324,15 @@ test("an active managed workspace exposes concise PM guidance", async () => {
     const statuses = [];
     const ctx = {
       cwd: root,
-      sessionManager: { getCwd: () => root, getSessionFile: () => session, getSessionName: () => undefined },
+      sessionManager: {
+        getCwd: () => root,
+        getSessionFile: () => session,
+        getSessionId: () => "workspace-session",
+        getEntries: () => appended.map((entry) => entry.type === "session_info"
+          ? { type: "session_info", name: entry.data }
+          : { type: "custom", customType: entry.type, data: entry.data }),
+        getSessionName: () => undefined,
+      },
       ui: {
         theme: { fg: (_color, text) => text },
         setStatus: (...args) => statuses.push(args),
@@ -286,7 +345,7 @@ test("an active managed workspace exposes concise PM guidance", async () => {
 
     await sessionStart({}, ctx);
 
-    assert.equal(appended.length, 3);
+    assert.equal(appended.length, 4);
     assert.deepEqual(appended[0], { type: "session_info", data: "main" });
     assert.deepEqual(appended[1], { type: "pi-workspace-session-name", data: { branch: "main" } });
     assert.equal(appended[2].type, "pi-workspace");
@@ -464,6 +523,13 @@ test("piw rejects forwarded session and extension bypass options before leasing"
     for (const option of ["--session", "--session=value", "--session-id=value", "--fork=value", "--continue", "-c", "--resume", "-r", "--no-session", "--no-extensions", "-ne", "--no-extensions=true"]) {
       assert.throws(() => validateForwardedPiArguments([option]), /piw manages/);
     }
+    assert.doesNotThrow(() => validateForwardedPiArguments([
+      "--no-extensions", "-e", "/opt/hari/extension", "--no-skills",
+      "--no-prompt-templates", "--no-themes", "--no-context-files",
+    ], "hari"));
+    for (const option of ["--session=value", "--fork=value", "--continue", "--resume", "--no-session"]) {
+      assert.throws(() => validateForwardedPiArguments([option], "hari"), /piw manages/);
+    }
     git(root, "branch", "feature");
     const sessions = new FakeSessions(root);
     const service = new WorkspaceService(root, { sessions });
@@ -471,6 +537,70 @@ test("piw rejects forwarded session and extension bypass options before leasing"
 
     await assert.rejects(resolveLaunch(["feature", "--", "--session", "other"], root), /piw manages --session/);
     assert.equal(await state.readLease(record.session), undefined);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("expected session validates the explicit local binding before activation", async () => {
+  const root = await repository();
+  try {
+    git(root, "branch", "feature");
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const { state, record } = await mapWorkspace(service, sessions, "feature", root);
+    const equivalentPath = resolve(record.session, "..", "1.jsonl");
+
+    await assert.rejects(
+      resolveLaunch(["--expect-session", record.session, "new", "new-manager"], root),
+      /cannot be used with piw new/,
+    );
+    assert.equal(gitSucceeds(root, "rev-parse", "--verify", "new-manager"), false);
+    await assert.rejects(
+      service.activate({ type: "pr", number: 42 }, {
+        parallel: false,
+        expectedSession: record.session,
+        switchSession: switcher([]),
+      }),
+      /explicit local branch target/,
+    );
+    assert.equal(git(root, "branch", "--show-current"), "main");
+
+    const plan = await resolveLaunch(["--expect-session", equivalentPath, "feature"], root);
+    assert.equal(plan.action, "launch");
+    assert.equal(plan.session, record.session);
+    await state.releaseLease(record);
+    git(root, "checkout", "main");
+
+    const unexpected = await sessions.create({ repository: record.repository, branch: "feature", cwd: record.cwd });
+    await assert.rejects(
+      service.activate({ type: "branch", branch: "feature" }, {
+        parallel: false,
+        expectedSession: unexpected,
+        switchSession: switcher([]),
+      }),
+      /does not match the local feature workspace binding/,
+    );
+    assert.equal(git(root, "branch", "--show-current"), "main");
+    assert.equal((await state.getWorkspace("feature"))?.session, record.session);
+    assert.equal(await state.readLease(record.session), undefined);
+    assert.equal(sessions.binds.length, 0);
+    assert.equal(sessions.forks.length, 0);
+
+    sessions.entries.delete(record.session);
+    await assert.rejects(
+      service.activate({ type: "branch", branch: "feature" }, {
+        parallel: false,
+        expectedSession: record.session,
+        switchSession: switcher([]),
+      }),
+      /is not valid for the local feature workspace binding/,
+    );
+    assert.equal(git(root, "branch", "--show-current"), "main");
+    assert.equal((await state.getWorkspace("feature"))?.session, record.session);
+    assert.equal(await state.readLease(record.session), undefined);
+    assert.equal(sessions.binds.length, 0);
+    assert.equal(sessions.forks.length, 0);
   } finally {
     await removeRepository(root);
   }
