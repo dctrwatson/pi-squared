@@ -229,9 +229,11 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     const { tool, context, events } = await createTool(t, runtime, log, (prompt) =>
       prompt.includes("BLOCK")
         ? "BLOCKED: Missing test evidence\nNEEDS: Targeted test output"
-        : prompt.includes("LONG")
-          ? "result\n".repeat(8_000)
-          : `Complete ${prompt}`,
+        : prompt.includes("OUTLINE")
+          ? "DETAILS_AVAILABLE: 1. Evidence\n2. Validation\n\nOverview remains decision-complete."
+          : prompt.includes("LONG")
+            ? "result\n".repeat(8_000)
+            : `Complete ${prompt}`,
     );
 
     const oneShot = await tool.execute(`${runtime}-one-shot`, {
@@ -318,18 +320,44 @@ test("shared lifetime contract keeps Pi and Cursor results, promotions, and foll
     assert.equal(blocked.details.subagent.status, "blocked", runtime);
     await endToolResult(events, blocked, context);
 
-    const truncated = await tool.execute(`${runtime}-truncated`, {
+    const archivesBeforeOutline = log.filter((entry) => entry === `${runtime}:archive`).length;
+    const outline = await tool.execute(`${runtime}-outline`, {
       action: "create",
       runtime,
       ...persona,
-      name: `${runtime}-truncated`,
-      purpose: "Keep a truncated answer",
+      name: `${runtime}-outline`,
+      purpose: "Retain an explicit section outline",
+      lifetime: "one-shot",
+      prompt: "OUTLINE",
+    }, undefined, undefined, context);
+    assert.equal(outline.details.subagent.lifetime, "task", runtime);
+    assert.notEqual(outline.details.subagent.status, "stopped", runtime);
+    assert.match(outline.content[0].text, new RegExp(`^Retained ${runtime}-outline as a task because it offers further sections\\.\\n\\nDETAILS_AVAILABLE: 1\\. Evidence`));
+    await endToolResult(events, outline, context);
+    assert.equal(log.filter((entry) => entry === `${runtime}:archive`).length, archivesBeforeOutline, "the details marker retains the one-shot before cleanup");
+    const outlineFollowUp = await tool.execute(`${runtime}-outline-follow-up`, {
+      action: "prompt",
+      id: outline.details.subagent.id,
+      prompt: "Provide section 1",
+    }, undefined, undefined, context);
+    assert.equal(outlineFollowUp.details.subagent.status, "idle", runtime);
+    assert.match(outlineFollowUp.content[0].text, /Complete Provide section 1/, runtime);
+    await endToolResult(events, outlineFollowUp, context);
+
+    const oversized = await tool.execute(`${runtime}-oversized`, {
+      action: "create",
+      runtime,
+      ...persona,
+      name: `${runtime}-oversized`,
+      purpose: "Keep a response that needs progressive discovery",
       lifetime: "one-shot",
       prompt: "LONG",
     }, undefined, undefined, context);
-    assert.equal(truncated.details.subagent.lifetime, "task", runtime);
-    assert.match(truncated.content[0].text, /^Retained .* as a task because its response was truncated\./, runtime);
-    await endToolResult(events, truncated, context);
+    assert.equal(oversized.details.subagent.lifetime, "task", runtime);
+    assert.match(oversized.content[0].text, /^Retained .* as a task because its response needs progressive discovery\./, runtime);
+    assert.match(oversized.content[0].text, /Response from .* requires progressive discovery/, runtime);
+    assert.doesNotMatch(oversized.content[0].text, /^result|\nresult\n/, runtime);
+    await endToolResult(events, oversized, context);
   }
 });
 

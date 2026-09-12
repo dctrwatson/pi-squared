@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 const backendModule = await import("../../extensions/subagents/cursor-backend.ts");
 const { SubagentSessionController } = await import("../../extensions/subagents/controller.ts");
 const { SubagentPanel } = await import("../../extensions/subagents/ui.ts");
+const { buildCursorCloudFollowUp } = await import("../../extensions/subagents/cursor-context.ts");
 
 function storedCursor(overrides = {}) {
   return {
@@ -195,7 +196,9 @@ test("controller routes only the first Cursor parent prompt through bootstrap an
   assert.equal(bootstrapCalls, 1);
   assert.equal(forkSummaryCalls, 1, "fork summary is generated only for the first accepted run");
   assert.match(sends[0].message, /^BOOTSTRAP-1:Inspect the fork\n\n\[Pi request correlation: pi-correlation-[a-f0-9]{32}\]$/);
-  assert.match(sends[1].message, /^## Current operating constraints\nLifetime: task\nInspect and plan only\. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations\.\n## Follow-up request\nContinue the inspection\n\n\[Pi request correlation: pi-correlation-[a-f0-9]{32}\]$/);
+  const correlationSuffix = /\n\n\[Pi request correlation: pi-correlation-[a-f0-9]{32}\]$/;
+  assert.match(sends[1].message, correlationSuffix);
+  assert.equal(sends[1].message.replace(correlationSuffix, ""), buildCursorCloudFollowUp("Continue the inspection", "task"));
   assert.equal(sends[0].options.mode, "plan");
   assert.equal(sends[1].options.mode, "plan");
   assert.notEqual(sends[0].options.idempotencyKey, sends[1].options.idempotencyKey, "new start and follow-up requests use distinct durable keys");

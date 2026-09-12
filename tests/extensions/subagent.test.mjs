@@ -24,6 +24,7 @@ const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("
 const { PiRpcBackend } = await import("../../extensions/subagents/pi-backend.ts");
 const { CursorModelCatalog } = await import("../../extensions/subagents/cursor-models.ts");
 const { normalizePersonaDescription } = await import("../../extensions/subagents/personas.ts");
+const { SUBAGENT_COMPLETION_GUIDANCE } = await import("../../extensions/subagents/completion.ts");
 const {
   BUNDLED_PERSONA_DIRECTORY,
   boundedSubagentResponse,
@@ -264,6 +265,7 @@ test("extension exposes one concise subagent tool and persistent-session command
     "Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most 4; idle agents use no work slots. Satisfy NEEDS.",
     "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
     "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
+    "For DETAILS_AVAILABLE or a progressive-discovery notice, use subagent action prompt for an overview/index or named sections from the same instance. Do not repeat the underlying task.",
     "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
   ]);
   assert.equal(tools[0].description, "Retain up to 20; run up to 4 subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.");
@@ -277,7 +279,7 @@ test("extension exposes one concise subagent tool and persistent-session command
   });
   const modelFacingBytes = Buffer.byteLength(modelFacingDefinition, "utf8");
   assert.doesNotMatch(modelFacingDefinition, /profile|escalat|Luna|Terra|Sol/);
-  assert.ok(modelFacingBytes <= 3_000, `model-facing subagent definition is ${modelFacingBytes} bytes`);
+  assert.ok(modelFacingBytes <= 3_200, `model-facing subagent definition is ${modelFacingBytes} bytes`);
   const personaPage = await tools[0].execute(
     "list-personas",
     { action: "list", kind: "personas", offset: 0, limit: 1 },
@@ -628,15 +630,23 @@ test("panel handoff acknowledges Cursor results only after editor delivery and r
   PersistentSubagentRegistry.prototype.open = async function () {
     const truncated = phase === "incomplete";
     const limited = phase === "length";
+    const detailsAvailable = phase === "details-available";
+    const text = truncated
+      ? "Capped result"
+      : limited
+        ? "Output-limited result"
+        : detailsAvailable
+          ? "DETAILS_AVAILABLE: 1. Deferred evidence\n2. Validation"
+          : "Complete result";
     return {
       action: "return",
-      text: truncated ? "Capped result" : limited ? "Output-limited result" : "Complete result",
+      text,
       summary,
       delivery: {
         runId: "run-panel-delivery",
         archiveAfterDelivery: true,
         completion: {
-          text: truncated ? "Capped result" : limited ? "Output-limited result" : "Complete result",
+          text,
           responseProduced: true,
           stopReason: limited ? "length" : "stop",
           ...(truncated ? { truncated: true } : {}),
@@ -685,6 +695,11 @@ test("panel handoff acknowledges Cursor results only after editor delivery and r
   await command.handler(summary.id, context);
   assert.deepEqual(order, ["editor", "lifetime", "acknowledge"], "a non-stop panel result is retained before acknowledgement and never archived");
 
+  phase = "details-available";
+  order.length = 0;
+  await command.handler(summary.id, context);
+  assert.deepEqual(order, ["editor", "lifetime", "acknowledge"], "a leading details marker retains the Cursor panel result before acknowledgement and never archives");
+
   phase = "complete";
   order.length = 0;
   await command.handler(summary.id, context);
@@ -713,6 +728,7 @@ test("fresh subagent args load bundled extensions, disable ambient resources, an
     "--name", "auth-scout",
     "--model", "anthropic/claude-sonnet-4-6",
     "--thinking", "high",
+    "--append-system-prompt", SUBAGENT_COMPLETION_GUIDANCE,
   ]);
   assert.deepEqual(SUBAGENT_EXTENSION_PATHS, [
     join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "agent-tools", "index.ts"),
@@ -730,18 +746,8 @@ test("subagents receive purpose-aware progressive-disclosure guidance", () => {
   );
   assert.match(guidance, /persistent subagent "auth-scout"/);
   assert.match(guidance, /Purpose: Authentication architecture and token lifecycle/);
-  assert.match(guidance, /each response decision-complete/i);
-  assert.match(guidance, /all required findings or deliverables/i);
-  assert.match(guidance, /numbered section index and provide those sections on follow-up/i);
-  assert.match(guidance, /file paths and line ranges/i);
-  assert.match(guidance, /BLOCKED: <reason>/);
-  assert.match(guidance, /NEEDS: <minimum requirement>/);
-  assert.doesNotMatch(guidance, /PROGRESS:|BLOCKED\[/);
-  assert.match(guidance, /Do not bypass explicit task, project, or user constraints/i);
-  assert.match(
-    guidance,
-    /hard scope boundary.*supporting context as needed.*do not add adjacent objectives, analysis, or findings/i,
-  );
+  assert.match(guidance, /Retain context for related requests within this purpose\./);
+  assert.ok(guidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const oneShotGuidance = formatSubagentContinuityPrompt(
     "bounded-review",
@@ -749,15 +755,13 @@ test("subagents receive purpose-aware progressive-disclosure guidance", () => {
     "one-shot",
   );
   assert.match(oneShotGuidance, /one-shot subagent/);
-  assert.match(oneShotGuidance, /complete, concise answer in this response/i);
-  assert.match(oneShotGuidance, /do not defer details to a follow-up/i);
-  assert.match(oneShotGuidance, /hard scope boundary/i);
-  assert.doesNotMatch(oneShotGuidance, /progressive disclosure/i);
+  assert.match(oneShotGuidance, /This instance normally stops after this response; use DETAILS_AVAILABLE when further sections are needed\./);
+  assert.ok(oneShotGuidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const taskGuidance = formatSubagentContinuityPrompt("reviewer", "Review and validate fixes", "task");
   assert.match(taskGuidance, /task-scoped subagent/);
-  assert.match(taskGuidance, /follow-up and validation prompts/i);
-  assert.match(taskGuidance, /hard scope boundary/i);
+  assert.match(taskGuidance, /Retain context for follow-up and validation of this objective\./);
+  assert.ok(taskGuidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const args = buildSubagentProcessArgs({
     mode: "fresh",
@@ -828,24 +832,26 @@ test("selected subagent skills use exact parent names and canonical paths", () =
   );
 });
 
-test("truncated responses direct the parent back to the persistent subagent", () => {
-  assert.equal(boundedSubagentResponse("Short answer", "auth-scout"), "Short answer");
-  const longAnswer = Array.from({ length: 3_000 }, (_, index) => `section line ${index + 1}`).join("\n");
+test("oversized responses use a progressive-discovery notice without a report prefix or tail", () => {
+  const shortReport = "Status: SUCCESS\nResult: Short report remains whole.";
+  assert.equal(boundedSubagentResponse(shortReport, "auth-scout"), shortReport);
+
+  const longAnswer = `REPORT_HEAD_DO_NOT_INLINE\n${Array.from({ length: 3_000 }, (_, index) => `section line ${index + 1}`).join("\n")}\nREPORT_TAIL_DO_NOT_INLINE`;
   const bounded = boundedSubagentResponse(longAnswer, "auth-scout");
   assert.ok(Buffer.byteLength(bounded, "utf8") <= MAX_SUBAGENT_RESPONSE_BYTES);
   assert.ok(bounded.split("\n").length <= MAX_SUBAGENT_RESPONSE_LINES);
-  assert.match(bounded, /^section line 1\n/);
-  assert.match(
-    bounded,
-    /Full response retained by auth-scout; use action "prompt" to request a numbered section or continuation\.\]$/,
-  );
+  assert.match(bounded, /^Response from auth-scout requires progressive discovery;/);
+  assert.match(bounded, /Use action "prompt" with id "auth-scout"/);
+  assert.doesNotMatch(bounded, /REPORT_HEAD_DO_NOT_INLINE|section line 1|REPORT_TAIL_DO_NOT_INLINE/);
 
-  const oneLine = boundedSubagentResponse("a".repeat(MAX_SUBAGENT_RESPONSE_BYTES * 2), "auth-scout");
-  assert.match(oneLine, /^a+/);
+  const oneLine = boundedSubagentResponse(`ONE_LINE_HEAD_${"a".repeat(MAX_SUBAGENT_RESPONSE_BYTES * 2)}_ONE_LINE_TAIL`, "auth-scout");
+  assert.match(oneLine, /^Response from auth-scout requires progressive discovery;/);
+  assert.doesNotMatch(oneLine, /ONE_LINE_HEAD|ONE_LINE_TAIL/);
   assert.ok(Buffer.byteLength(oneLine, "utf8") <= MAX_SUBAGENT_RESPONSE_BYTES);
-  const multibyte = boundedSubagentResponse("😀".repeat(MAX_SUBAGENT_RESPONSE_BYTES), "auth-scout");
-  assert.match(multibyte, /^😀/u);
-  assert.doesNotMatch(multibyte, /�/u);
+
+  const multibyte = boundedSubagentResponse(`UNICODE_HEAD_${"😀".repeat(MAX_SUBAGENT_RESPONSE_BYTES)}_UNICODE_TAIL`, "auth-scout");
+  assert.match(multibyte, /^Response from auth-scout requires progressive discovery;/);
+  assert.doesNotMatch(multibyte, /UNICODE_HEAD|😀|UNICODE_TAIL|�/u);
   assert.ok(Buffer.byteLength(multibyte, "utf8") <= MAX_SUBAGENT_RESPONSE_BYTES);
 });
 
@@ -2561,10 +2567,13 @@ Execute the assigned work.
     id: "workflow-persona",
   }, signal, undefined, context);
   const originalPrompt = PersistentSubagentRegistry.prototype.prompt;
-  PersistentSubagentRegistry.prototype.prompt = async function (_ctx, target) {
+  const promptedTargets = [];
+  let responseForPrompt = () => "Inherited context accepted";
+  PersistentSubagentRegistry.prototype.prompt = async function (_ctx, target, prompt) {
+    promptedTargets.push({ target, prompt });
     return {
       summary: this.summaryFor(target),
-      text: "Inherited context accepted",
+      text: responseForPrompt(prompt),
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       responseProduced: true,
       handledWithoutAgent: false,
@@ -2586,6 +2595,111 @@ Execute the assigned work.
   assert.match(personaFork.content[0].text, /^Saved as workflow-persona-fork\./);
   assert.equal(personaFork.details.subagent.persona, "implementer");
   assert.equal(personaFork.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts[0].parentContextProvided, true);
+
+  const fallbackNotice = "Parent session was not persisted; created with fresh context.";
+  const fallbackForkDetails = {
+    requested: "fork",
+    mode: "fresh",
+    fallback: "parent-session-not-persisted",
+  };
+  const byteName = "fork-fallback-byte-boundary";
+  const byteHead = "BYTE_REPORT_HEAD_DO_NOT_INLINE_";
+  const byteTail = "_BYTE_REPORT_TAIL_DO_NOT_INLINE";
+  const normalBytePrefix = `Completed one-shot ${byteName}.\n\n`;
+  const normalByteCleanup = `\n\nStop for ${byteName} is not confirmed because remote state is unknown. Use action "status", then retry action "stop".`;
+  const byteFillBytes = MAX_SUBAGENT_RESPONSE_BYTES - Buffer.byteLength(`${normalBytePrefix}${byteHead}${byteTail}${normalByteCleanup}`, "utf8");
+  assert.ok(byteFillBytes > 0);
+  const byteReport = `${byteHead}${"x".repeat(byteFillBytes)}${byteTail}`;
+  assert.equal(Buffer.byteLength(`${normalBytePrefix}${byteReport}${normalByteCleanup}`, "utf8"), MAX_SUBAGENT_RESPONSE_BYTES, "the report fits the normal one-shot cleanup budget");
+
+  const lineName = "fork-fallback-line-boundary";
+  const normalLinePrefix = `Completed one-shot ${lineName}.\n\n`;
+  const normalLineCleanup = `\n\nStop for ${lineName} is not confirmed because remote state is unknown. Use action "status", then retry action "stop".`;
+  const lineReport = [
+    "LINE_REPORT_HEAD_DO_NOT_INLINE",
+    ...Array.from({ length: MAX_SUBAGENT_RESPONSE_LINES - 6 }, (_, index) => `line ${index + 1}`),
+    "LINE_REPORT_TAIL_DO_NOT_INLINE",
+  ].join("\n");
+  assert.equal(`${normalLinePrefix}${lineReport}${normalLineCleanup}`.split("\n").length, MAX_SUBAGENT_RESPONSE_LINES, "the report fits the normal one-shot line budget");
+
+  responseForPrompt = (prompt) => {
+    if (prompt === "FALLBACK-SMALL") return "Small fallback report.";
+    if (prompt === "FALLBACK-BYTE") return byteReport;
+    if (prompt === "FALLBACK-BYTE-FOLLOW-UP") return "Follow-up from the retained fallback subagent.";
+    if (prompt === "FALLBACK-LINE") return lineReport;
+    if (prompt === "FALLBACK-TASK") return `TASK_REPORT_HEAD_DO_NOT_INLINE_${"z".repeat(MAX_SUBAGENT_RESPONSE_BYTES)}_TASK_REPORT_TAIL_DO_NOT_INLINE`;
+    return "Inherited context accepted";
+  };
+  parentPersisted = false;
+
+  const smallFallback = await tool.execute("ephemeral-parent-small-fallback", {
+    action: "create",
+    mode: "fork",
+    name: "fork-fallback-small",
+    persona: "worker",
+    purpose: "Return a small fallback report",
+    lifetime: "task",
+    prompt: "FALLBACK-SMALL",
+  }, signal, undefined, context);
+  assert.equal(smallFallback.content[0].text, `${fallbackNotice}\n\nSaved as fork-fallback-small.\n\nSmall fallback report.`);
+  assert.deepEqual(smallFallback.details.fork, fallbackForkDetails);
+
+  const bytePromptStart = promptedTargets.length;
+  const byteFallback = await tool.execute("ephemeral-parent-byte-fallback", {
+    action: "create",
+    mode: "fork",
+    name: byteName,
+    persona: "worker",
+    purpose: "Retain a byte-boundary fallback report",
+    lifetime: "one-shot",
+    prompt: "FALLBACK-BYTE",
+  }, signal, undefined, context);
+  assert.equal(byteFallback.details.subagent.lifetime, "task");
+  assert.notEqual(byteFallback.details.subagent.status, "stopped");
+  assert.match(byteFallback.content[0].text, new RegExp(`^${fallbackNotice}\\n\\nRetained ${byteName} as a task because its response needs progressive discovery\\.`));
+  assert.match(byteFallback.content[0].text, new RegExp(`Response from ${byteName} requires progressive discovery`));
+  assert.doesNotMatch(byteFallback.content[0].text, /BYTE_REPORT_HEAD_DO_NOT_INLINE|BYTE_REPORT_TAIL_DO_NOT_INLINE/);
+  assert.deepEqual(byteFallback.details.fork, fallbackForkDetails);
+  const byteFollowUp = await tool.execute("ephemeral-parent-byte-fallback-follow-up", {
+    action: "prompt",
+    id: byteFallback.details.subagent.id,
+    prompt: "FALLBACK-BYTE-FOLLOW-UP",
+  }, signal, undefined, context);
+  assert.equal(byteFollowUp.content[0].text, "Follow-up from the retained fallback subagent.");
+  assert.deepEqual(promptedTargets.slice(bytePromptStart).map(({ target }) => target), [
+    byteFallback.details.subagent.id,
+    byteFallback.details.subagent.id,
+  ]);
+
+  const lineFallback = await tool.execute("ephemeral-parent-line-fallback", {
+    action: "create",
+    mode: "fork",
+    name: lineName,
+    persona: "worker",
+    purpose: "Retain a line-boundary fallback report",
+    lifetime: "one-shot",
+    prompt: "FALLBACK-LINE",
+  }, signal, undefined, context);
+  assert.equal(lineFallback.details.subagent.lifetime, "task");
+  assert.match(lineFallback.content[0].text, new RegExp(`^${fallbackNotice}\\n\\nRetained ${lineName} as a task because its response needs progressive discovery\\.`));
+  assert.match(lineFallback.content[0].text, new RegExp(`Response from ${lineName} requires progressive discovery`));
+  assert.doesNotMatch(lineFallback.content[0].text, /LINE_REPORT_HEAD_DO_NOT_INLINE|LINE_REPORT_TAIL_DO_NOT_INLINE/);
+  assert.deepEqual(lineFallback.details.fork, fallbackForkDetails);
+
+  const taskFallback = await tool.execute("ephemeral-parent-task-fallback", {
+    action: "create",
+    mode: "fork",
+    name: "fork-fallback-task-overflow",
+    persona: "worker",
+    purpose: "Retain an oversized task fallback report",
+    lifetime: "task",
+    prompt: "FALLBACK-TASK",
+  }, signal, undefined, context);
+  assert.equal(taskFallback.details.subagent.lifetime, "task");
+  assert.match(taskFallback.content[0].text, new RegExp(`^${fallbackNotice}\\n\\nSaved as fork-fallback-task-overflow\\.`));
+  assert.match(taskFallback.content[0].text, /Response from fork-fallback-task-overflow requires progressive discovery/);
+  assert.doesNotMatch(taskFallback.content[0].text, /TASK_REPORT_HEAD_DO_NOT_INLINE|TASK_REPORT_TAIL_DO_NOT_INLINE/);
+  assert.deepEqual(taskFallback.details.fork, fallbackForkDetails);
 
   const status = await tool.execute("status-without-skill-metadata", {
     action: "status",
@@ -2782,18 +2896,19 @@ NEEDS: The expected behavior from the parent`;
   assert.equal(persistent.details.subagent.lifetime, "persistent");
   assert.equal(persistent.content[0].text, "Created persistent-override.");
 
-  const retained = await tool.execute("truncated-one-shot", {
+  const retained = await tool.execute("oversized-one-shot", {
     action: "create",
-    name: "truncated-one-shot",
+    name: "oversized-one-shot",
     persona: "bounded-analyst",
-    purpose: "Produce a result requiring continuation",
+    purpose: "Produce a result requiring progressive discovery",
     lifetime: "one-shot",
     prompt: "LONG",
   }, signal, undefined, context);
   assert.equal(retained.details.subagent.lifetime, "task");
   assert.notEqual(retained.details.subagent.status, "stopped");
-  assert.match(retained.content[0].text, /^Retained truncated-one-shot as a task because its response was truncated\./);
-  assert.match(retained.content[0].text, /Full response retained by truncated-one-shot/);
+  assert.match(retained.content[0].text, /^Retained oversized-one-shot as a task because its response needs progressive discovery\./);
+  assert.match(retained.content[0].text, /Response from oversized-one-shot requires progressive discovery/);
+  assert.doesNotMatch(retained.content[0].text, /long result 1|long result 3000/);
 
   const incomplete = await tool.execute("incomplete-one-shot", {
     action: "create",
@@ -3073,6 +3188,7 @@ test("forked persona args load bundled and declared resources with Pi's normal t
     "--extension", "/personas/extensions/review.ts",
     "--skill", "/personas/skills/review/SKILL.md",
     "--skill", "/parent/skills/create-pr/SKILL.md",
+    "--append-system-prompt", SUBAGENT_COMPLETION_GUIDANCE,
     "--fork", "/sessions/parent.jsonl",
   ]);
   assert.equal(args.includes("--tools"), false);
@@ -3102,8 +3218,9 @@ test("restored subagent args use its session model history", () => {
     thinking: "high",
   });
 
-  assert.deepEqual(args.slice(-4), [
+  assert.deepEqual(args.slice(-6), [
     "--system-prompt", "Read the project.\n",
+    "--append-system-prompt", SUBAGENT_COMPLETION_GUIDANCE,
     "--session", "/sessions/subagent.jsonl",
   ]);
   assert.equal(args.includes("--tools"), false);
@@ -3627,6 +3744,8 @@ test("public Cursor one-shot oversized results retain a task and dispatch a new 
   const sends = [];
   let archives = 0;
   const sha = "b".repeat(40);
+  const oversizedCreateReport = `CREATE_REPORT_HEAD_DO_NOT_INLINE\n${"x".repeat(MAX_SUBAGENT_RESPONSE_BYTES + 1_000)}\nCREATE_REPORT_TAIL_DO_NOT_INLINE`;
+  const oversizedPromptReport = `BLOCKED: The evidence bundle is unavailable\nNEEDS: The evidence bundle\nPROMPT_REPORT_HEAD_DO_NOT_INLINE\n${"y".repeat(MAX_SUBAGENT_RESPONSE_BYTES + 1_000)}\nPROMPT_REPORT_TAIL_DO_NOT_INLINE`;
   const makeRun = (id, result) => ({
     id, requestId: `request-${id}`, agentId: agent.agentId, status: "finished", result, createdAt: sends.length,
     supports(operation) { return operation === "wait"; }, unsupportedReason() { return undefined; }, async *stream() {},
@@ -3637,7 +3756,11 @@ test("public Cursor one-shot oversized results retain a task and dispatch a new 
     async send(message, options) {
       sends.push({ message, options });
       const id = `run-oversized-${sends.length}`;
-      const result = sends.length === 1 ? "x".repeat(MAX_SUBAGENT_RESPONSE_BYTES + 1_000) : "New follow-up result";
+      const result = sends.length === 1
+        ? oversizedCreateReport
+        : sends.length === 2
+          ? oversizedPromptReport
+          : "New follow-up result";
       const run = makeRun(id, result);
       runs.set(id, run);
       return run;
@@ -3665,7 +3788,7 @@ test("public Cursor one-shot oversized results retain a task and dispatch a new 
         : key === "rev-parse --verify --quiet @{upstream}" ? sha
         : key === "config --get branch.main.merge" ? "refs/heads/main"
         : key === "rev-list --count @{upstream}..HEAD" ? "0"
-        : key === "status --porcelain=v1 -z" ? ""
+        : key === "status --porcelain=v1 -z" ? "M src/local-only.ts\0"
         : "";
       return { exitCode: stdout || key === "status --porcelain=v1 -z" ? 0 : 1, stdout, stderr: "" };
     },
@@ -3692,18 +3815,45 @@ test("public Cursor one-shot oversized results retain a task and dispatch a new 
   assert.equal(oversized.details.ok, true, oversized.content[0].text);
   const id = oversized.details.subagent.id;
   assert.equal(oversized.details.subagent.lifetime, "task");
-  assert.match(oversized.content[0].text, /^Retained .* as a task because its response was truncated\./);
+  assert.match(oversized.content[0].text, /^Retained .* as a task because its response needs progressive discovery\./);
+  assert.match(oversized.content[0].text, /Runtime warning: The worktree has local changes\. Cursor Cloud sees only the committed HEAD state\./);
+  assert.match(oversized.content[0].text, /Response from cursor-oversized requires progressive discovery/);
+  assert.doesNotMatch(oversized.content[0].text, /CREATE_REPORT_HEAD_DO_NOT_INLINE|CREATE_REPORT_TAIL_DO_NOT_INLINE/);
+  assert.deepEqual(oversized.details.runtimeWarnings, ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."]);
+  assert.equal(oversized.details.cursorDeliveryReceipt.runId, "run-oversized-1");
   assert.equal(archives, 0, "no one-shot archive starts before the retained ToolResult reaches turn_end");
   await events.get("turn_end")({
     message: { role: "assistant", content: [] },
     toolResults: [{ role: "toolResult", toolName: "subagent", details: oversized.details }],
   }, context);
   assert.equal(archives, 0, "promoted oversized results remain reusable after acknowledgement");
+
+  const oversizedPrompt = await tool.execute("cursor-oversized-prompt", {
+    action: "prompt", id, prompt: "Request deferred evidence",
+  }, undefined, undefined, context);
+  assert.equal(oversizedPrompt.details.ok, true, oversizedPrompt.content[0].text);
+  assert.equal(oversizedPrompt.details.subagent.status, "blocked");
+  assert.deepEqual(oversizedPrompt.details.subagent.blocker, {
+    reason: "The evidence bundle is unavailable",
+    need: "The evidence bundle",
+  });
+  assert.match(oversizedPrompt.content[0].text, /^BLOCKED: The evidence bundle is unavailable\nNEEDS: The evidence bundle/);
+  assert.match(oversizedPrompt.content[0].text, /Runtime warning: The worktree has local changes\. Cursor Cloud sees only the committed HEAD state\./);
+  assert.match(oversizedPrompt.content[0].text, /Response from cursor-oversized requires progressive discovery/);
+  assert.doesNotMatch(oversizedPrompt.content[0].text, /PROMPT_REPORT_HEAD_DO_NOT_INLINE|PROMPT_REPORT_TAIL_DO_NOT_INLINE/);
+  assert.deepEqual(oversizedPrompt.details.runtimeWarnings, ["The worktree has local changes. Cursor Cloud sees only the committed HEAD state."]);
+  assert.equal(oversizedPrompt.details.cursorDeliveryReceipt.runId, "run-oversized-2");
+  await events.get("turn_end")({
+    message: { role: "assistant", content: [] },
+    toolResults: [{ role: "toolResult", toolName: "subagent", details: oversizedPrompt.details }],
+  }, context);
+  assert.equal(archives, 0, "oversized prompt results remain reusable after acknowledgement");
+
   const followUp = await tool.execute("cursor-oversized-follow-up", {
     action: "prompt", id, prompt: "Continue with a compact result",
   }, undefined, undefined, context);
-  assert.equal(followUp.content[0].text, "New follow-up result");
-  assert.equal(sends.length, 2, "the follow-up sends a new run instead of replaying the oversized result");
+  assert.match(followUp.content[0].text, /New follow-up result$/);
+  assert.equal(sends.length, 3, "the follow-up sends a new run instead of replaying an oversized result");
   await events.get("turn_end")({
     message: { role: "assistant", content: [] },
     toolResults: [{ role: "toolResult", toolName: "subagent", details: followUp.details }],

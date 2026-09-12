@@ -14,6 +14,7 @@ const {
   SubagentCursorPromptFailure,
 } = await import("../../extensions/subagents/registry.ts");
 const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("../../extensions/subagents/cursor-backend.ts");
+const { buildCursorCloudFollowUp } = await import("../../extensions/subagents/cursor-context.ts");
 
 test("registry creates controllers with its injected backend factory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-factory-"));
@@ -1678,7 +1679,9 @@ test("connected Cursor backend syncs status reconciliation before busy or follow
   const result = await registry.prompt(context, terminal.id, "Use durable follow-up state");
   assert.equal(result.text, "follow result");
   assert.equal(sends.length, 1);
-  assert.match(sends[0].message, /^## Current operating constraints\nLifetime: persistent\nInspect and plan only\. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations\.\n## Follow-up request\nUse durable follow-up state\n\n\[Pi request correlation: pi-correlation-[a-f0-9]{32}\]$/);
+  const correlationSuffix = /\n\n\[Pi request correlation: pi-correlation-[a-f0-9]{32}\]$/;
+  assert.match(sends[0].message, correlationSuffix);
+  assert.equal(sends[0].message.replace(correlationSuffix, ""), buildCursorCloudFollowUp("Use durable follow-up state", "persistent"));
   assert.notEqual(sends[0].options.idempotencyKey, "initial-reconciled-key");
   await registry.shutdown();
 });

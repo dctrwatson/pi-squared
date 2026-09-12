@@ -22,6 +22,7 @@ import { registerArgumentCommand } from "../support/command-support.ts";
 import type { ToolFailureDetails } from "../agent-tools/tool-result.ts";
 import type { SubagentBackendFactory, SubagentRuntime, SubagentThinkingLevel, SubagentUsage } from "./backend.ts";
 import { DEFAULT_CURSOR_MODEL, DEFAULT_CURSOR_THINKING } from "./cursor-models.ts";
+import { hasSubagentDetailsAvailable } from "./completion.ts";
 import {
     BUNDLED_PERSONA_DIRECTORY,
     getSubagentCommandArgumentCompletions,
@@ -190,6 +191,7 @@ export {
 } from "./registry.ts";
 
 const MAX_PARENT_CONTEXT_CHARS = 8_000;
+// Inline delivery thresholds, not limits on report generation.
 export const MAX_SUBAGENT_RESPONSE_BYTES = 16 * 1_024;
 export const MAX_SUBAGENT_RESPONSE_LINES = 400;
 const MAX_SUBAGENT_ERROR_BYTES = 2_000;
@@ -420,19 +422,21 @@ function boundedText(text: string, truncationNotice: string): string {
     return `${content}${suffix}`;
 }
 
-function responseTruncationNotice(name: string): string {
-    return `Response truncated. Full response retained by ${name}; use action "prompt" to request a numbered section or continuation.`;
+function responseDiscoveryNotice(name: string): string {
+    return `Response from ${name} requires progressive discovery; no report body is shown inline. Use action "prompt" with id "${name}" to request a concise overview and numbered section index, then request the sections you need. Do not repeat the underlying task.`;
 }
 
-function responseWouldTruncate(text: string): boolean {
+function responseNeedsDiscovery(text: string): boolean {
     return truncateHead(text, {
         maxBytes: MAX_SUBAGENT_RESPONSE_BYTES,
         maxLines: MAX_SUBAGENT_RESPONSE_LINES,
     }).truncated;
 }
 
+/** Deliver a whole response or a continuation notice, never a cut-off report. */
 export function boundedSubagentResponse(text: string, name: string): string {
-    return boundedText(text.trim() || "(no visible response)", responseTruncationNotice(name));
+    const response = text.trim() || "(no visible response)";
+    return responseNeedsDiscovery(response) ? responseDiscoveryNotice(name) : response;
 }
 
 function requireText(value: string | undefined, field: string): string {
@@ -706,6 +710,7 @@ export default function (
     const finalizeModelPrompt = async (
         result: Awaited<ReturnType<PersistentSubagentRegistry["prompt"]>>,
         action: "create" | "prompt",
+        deliveryPrefix = "",
     ) => {
         const policyWarnings = [...new Set(result.policyWarnings ?? [])]
             .map((warning) => warning.trim())
@@ -726,7 +731,21 @@ export default function (
             : undefined;
         const usage = completeToolUsage(result.usage);
         const incomplete = incompleteResponseReason(result);
+        const detailsAvailable = hasSubagentDetailsAvailable(result.text);
         const oneShot = result.summary.lifetime === "one-shot" || result.delivery?.archiveAfterDelivery === true;
+        const parentResponse = (prefix = "", discoveryRequired = false): string => {
+            const combined = `${deliveryPrefix}${prefix ? `${prefix}\n\n` : ""}${visible}`;
+            if (!discoveryRequired && !responseNeedsDiscovery(combined)) return combined;
+            const blocker = result.summary.blocker;
+            const metadata = [
+                ...(blocker ? [`BLOCKED: ${blocker.reason}\nNEEDS: ${blocker.need}`] : []),
+                deliveryPrefix.trim(),
+                prefix,
+                responseDiscoveryNotice(result.summary.name),
+                warningPrefix,
+            ].filter(Boolean).join("\n\n");
+            return boundedText(metadata, "Continuation metadata limited; inspect tool-result details for complete warnings.");
+        };
         const receiptFor = (
             summary: PersistentSubagentSummary,
             archiveAfterDelivery: boolean,
@@ -748,14 +767,11 @@ export default function (
             ...(partialUsage ? { usage: partialUsage } : {}),
             ...(receipt ? { [SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY]: receipt } : {}),
         });
-        const retainedResult = async (reason: string) => {
+        const retainedResult = async (reason: string, discoveryRequired = false) => {
             // Persist this lifetime decision before the ToolResult receipt. If this
             // fails, the durable result remains available for a later delivery attempt.
             const retained = await registry.setLifetime(result.summary.id, "task");
-            const text = boundedText(
-                `Retained ${retained.name} as a task because ${reason}.\n\n${visible}`,
-                responseTruncationNotice(retained.name),
-            );
+            const text = parentResponse(`Retained ${retained.name} as a task because ${reason}.`, discoveryRequired);
             const receipt = receiptFor(retained, false);
             return {
                 content: [{ type: "text" as const, text }],
@@ -766,15 +782,16 @@ export default function (
 
         if (oneShot && result.summary.blocker) return retainedResult("it is blocked");
         if (oneShot && incomplete) return retainedResult(incomplete);
-        const completed = `Completed one-shot ${result.summary.name}.\n\n${visible}`;
-        const cursorCompleted = `Completed one-shot ${result.summary.name}. Cursor cleanup starts after this result is recorded.\n\n${visible}`;
+        if (oneShot && detailsAvailable) return retainedResult("it offers further sections");
+        const completed = `${deliveryPrefix}Completed one-shot ${result.summary.name}.\n\n${visible}`;
+        const cursorCompleted = `${deliveryPrefix}Completed one-shot ${result.summary.name}. Cursor cleanup starts after this result is recorded.\n\n${visible}`;
         const potentialPiCleanup = `\n\n${formatSubagentStopResult({ ...result.summary, status: "remote-state-unknown" })}`;
-        // Decide before delivery or cleanup. Reserve each runtime's complete parent-visible
-        // text so a one-shot stays reusable instead of truncating its final result.
+        // Reserve cleanup text before delivery. Oversized one-shots remain available
+        // for progressive discovery instead of delivering a cut-off report.
         const oneShotVisible = result.summary.runtime === "cursor-cloud"
             ? cursorCompleted
             : `${completed}${potentialPiCleanup}`;
-        if (oneShot && responseWouldTruncate(oneShotVisible)) return retainedResult("its response was truncated");
+        if (oneShot && responseNeedsDiscovery(oneShotVisible)) return retainedResult("its response needs progressive discovery", true);
 
         if (oneShot) {
             if (result.summary.runtime === "cursor-cloud") {
@@ -801,12 +818,11 @@ export default function (
             };
         }
 
-        const response = incomplete
-            ? `Incomplete subagent response: ${incomplete}. Reprompt ${result.summary.name} for continuation.\n\n${visible}`
-            : visible;
-        const text = action === "create"
-            ? boundedText(`Saved as ${result.summary.name}.\n\n${response}`, responseTruncationNotice(result.summary.name))
-            : boundedSubagentResponse(response, result.summary.name);
+        const prefix = [
+            ...(action === "create" ? [`Saved as ${result.summary.name}.`] : []),
+            ...(incomplete ? [`Incomplete subagent response: ${incomplete}. Reprompt ${result.summary.name} for continuation.`] : []),
+        ].join("\n\n");
+        const text = parentResponse(prefix);
         const receipt = receiptFor(result.summary, false);
         return {
             content: [{ type: "text" as const, text }],
@@ -858,7 +874,8 @@ export default function (
                 ? { ...delivery.completion, text: result.text }
                 : { text: result.text };
             const incomplete = incompleteResponseReason(completion);
-            const retain = delivery.archiveAfterDelivery && (Boolean(result.summary.blocker) || Boolean(incomplete));
+            const retain = delivery.archiveAfterDelivery
+                && (Boolean(result.summary.blocker) || Boolean(incomplete) || hasSubagentDetailsAvailable(result.text));
             if (retain) await registry.setLifetime(result.summary.id, "task");
             const acknowledgement = await delivery.acknowledge();
             if (acknowledgement.acknowledged && acknowledgement.archiveAfterDelivery && !retain) {
@@ -1030,6 +1047,7 @@ export default function (
             `Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle agents use no work slots. Satisfy NEEDS.`,
             "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
             "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
+            "For DETAILS_AVAILABLE or a progressive-discovery notice, use subagent action prompt for an overview/index or named sections from the same instance. Do not repeat the underlying task.",
             "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
         ],
         parameters: SubagentParameters,
@@ -1171,23 +1189,10 @@ export default function (
                             },
                         );
                         promptReturned = true;
-                        const finalized = await finalizeModelPrompt(result, "create");
+                        const finalized = await finalizeModelPrompt(result, "create", fallbackText);
                         const persistenceDetails = finishForkPersistence();
-                        if (!fallback) {
-                            return {
-                                ...finalized,
-                                details: { ...finalized.details, ...persistenceDetails },
-                            };
-                        }
                         return {
                             ...finalized,
-                            content: [{
-                                type: "text" as const,
-                                text: boundedText(
-                                    `${fallbackText}${finalized.content[0]?.text ?? "(no visible response)"}`,
-                                    responseTruncationNotice(summary.name),
-                                ),
-                            }],
                             details: { ...finalized.details, ...fallbackDetails, ...persistenceDetails },
                         };
                     } catch (error) {

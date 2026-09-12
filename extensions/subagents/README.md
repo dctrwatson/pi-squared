@@ -126,7 +126,7 @@ A model-tool create defaults to `task`. An explicit `lifetime` overrides this de
 - `task` retains context for follow-up, integration, and validation across parent turns.
 - `persistent` retains context for related work until you stop it.
 
-A blocked, truncated, incomplete, or response-less one-shot becomes a task. A Cursor one-shot that completes while Pi is offline also becomes a task until delivery. Prompting a dormant task or persistent instance starts it lazily.
+A blocked, incomplete, or response-less one-shot becomes a task. So does a one-shot with a leading `DETAILS_AVAILABLE` section index or a result that requires progressive discovery. A Cursor one-shot that completes while Pi is offline also becomes a task until delivery. Prompting a dormant task or persistent instance starts it lazily.
 
 One parent session can retain up to 20 non-stopped subagents. At most four subagents can work concurrently. Dormant and idle subagents do not use concurrent work slots. Active or unresolved remote runs can occupy these slots. A new prompt fails when four other subagents occupy the slots. Wait for active work to finish or resolve uncertain remote state; do not stop an idle subagent to free a concurrent work slot.
 
@@ -147,6 +147,30 @@ The bundled personas use these initial settings:
 | `test-analyst` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
 | `worker` | `openai-codex/gpt-5.6-terra` | `xhigh` |
 | `doc-auditor` | `fireworks/accounts/fireworks/models/glm-5p3-flash` | `high` |
+
+## Completion reports
+
+
+The default report starts with a short task/status line and the requested result. Include supplied identity and the evidence needed for the next decision:
+
+- Relevant environment, exact paths and deltas, and actual change state.
+- Validation commands, results, and capture limits; required checks not run.
+- `Negative Knowledge`: failed approaches, ruled-out hypotheses, inconclusive checks, or rejected decisions, with scope, evidence, and retry conditions, even after success.
+- Constraints, blockers, and next actions within the assigned scope.
+
+There is no mandatory field checklist. Omit empty or irrelevant fields. Use `none observed` when that fact matters, not as filler. State consequential unknowns and validation gaps; omission is not evidence of `none` or `passed`. On follow-up, return requested sections or changes with identity, task scope, and relevant evidence limits, not a copy of the previous report.
+
+`SUCCESS` means the assigned work and required checks are complete. `FAILURE` means an attempted objective or required check failed. `BLOCKED` means a prerequisite prevents completion. These are report labels, not new registry states. A completed review can report defects and still be `SUCCESS`.
+
+Persona limits remain in effect. Report fields do not authorize extra edits, tests, artifacts, or recommendations. If a persona or caller requires an exact output format, the subagent retains that format instead of adding a Markdown wrapper. Blocked results must still use the preamble below before any report heading.
+
+Reports preserve supplied IDs and omit absent IDs. A persona name is not an instance ID. The prompt does not expose additional registry metadata or verify the report's claims.
+
+Use progressive discovery for extensive reports. Return an overview with decisive findings, constraints, negative knowledge, validation limits, and a numbered section index. If further sections are available, put `DETAILS_AVAILABLE: <numbered section index>` on the first nonblank line, after `BLOCKED`/`NEEDS` when blocked. Omit the marker when no sections remain or an exact output format forbids it. Report length alone is not a blocker.
+
+The tool delivers a whole response inline when it fits within 16 KiB and 400 lines, including delivery metadata. Otherwise it returns a continuation notice without a cut-off report body. The parent uses `action: "prompt"` with the same subagent to request an overview/index, then the sections it needs. It does not repeat the investigation. A one-shot stays available as a task when its report needs progressive discovery or offers further sections.
+
+
 
 ## Blocked subagents
 
@@ -376,11 +400,11 @@ The following limits apply:
 - Parent `context` input: 8,000 characters.
 - Cursor formatted context and request: 6 KiB after redaction, as one input.
 - Cursor initial bootstrap: 24 KiB.
-- Cursor follow-up: 6 KiB.
+- Cursor follow-up: 6 KiB, shared by operating instructions, the completion reminder, and request text.
 - Panel transcript item: 100,000 characters.
 - Panel transcript: 200 items and 500,000 aggregate characters.
 - Panel details: 24,000 characters.
-- Parent-visible subagent response: 400 lines or 16 KiB.
+- Whole inline subagent response: 400 lines and 16 KiB, including delivery metadata. Larger reports use progressive discovery, not a truncated prefix.
 - Parent-visible subagent error: 2,000 bytes.
 - Cursor expected MCP names: 8 after deduplication.
 - Cursor repositories: 20 after deduplication, including the primary repository.

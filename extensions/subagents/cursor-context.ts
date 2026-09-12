@@ -8,6 +8,7 @@ import {
     type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { SubagentBackendError } from "./backend.ts";
+import { SUBAGENT_COMPLETION_GUIDANCE, SUBAGENT_COMPLETION_REMINDER } from "./completion.ts";
 import { selectForkSnapshotEntries } from "./fork.ts";
 import type { SubagentContextMode, SubagentLifetime, SubagentPersona } from "./personas.ts";
 
@@ -433,13 +434,12 @@ export function buildCursorCloudBootstrap(options: CursorBootstrapOptions): stri
         "",
         "## Purpose and operating instructions",
         "",
-        `Name: ${personaName}`,
+        `Persona: ${personaName}`,
         `Purpose: ${purpose}`,
         `Lifetime: ${options.lifetime}`,
         "Inspect and plan only. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations.",
-        "If an expected capability or required data is unavailable, stop and lead with exactly:",
-        "BLOCKED: <reason>",
-        "NEEDS: <minimum requirement>",
+        "",
+        SUBAGENT_COMPLETION_GUIDANCE,
         "",
         "## Cursor Cloud capabilities",
         "",
@@ -464,6 +464,7 @@ export function buildCursorCloudFollowUp(text: string, lifetime: SubagentLifetim
         "## Current operating constraints",
         `Lifetime: ${lifetime}`,
         "Inspect and plan only. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations.",
+        SUBAGENT_COMPLETION_REMINDER,
         "## Follow-up request",
     ].join("\n");
     const requestLimit = MAX_CURSOR_FOLLOW_UP_BYTES - Buffer.byteLength(guidance, "utf8") - 2;

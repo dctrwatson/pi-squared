@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import type { SubagentRuntime, SubagentThinkingLevel } from "./backend.ts";
+import { SUBAGENT_COMPLETION_GUIDANCE } from "./completion.ts";
 
 export type { SubagentRuntime, SubagentThinkingLevel } from "./backend.ts";
 export type SubagentContextMode = "fresh" | "fork";
@@ -488,33 +489,16 @@ export function formatSubagentContinuityPrompt(
 ): string {
     const safeName = name?.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim() || "subagent";
     const safePurpose = purpose.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-    const blockerProtocol = [
-        "Treat the current request as a hard scope boundary. Inspect supporting context as needed, but do not add adjacent objectives, analysis, or findings.",
-        "If missing context, capability, access, or data prevents completion, stop retrying and lead with exactly:",
-        "BLOCKED: <reason>",
-        "NEEDS: <minimum requirement>",
-        "Do not bypass explicit task, project, or user constraints.",
-    ];
-    if (lifetime === "one-shot") {
-        return [
-            `You are the one-shot subagent "${safeName}".`,
-            `Purpose: ${safePurpose}`,
-            "Return a complete, concise answer in this response.",
-            "Do not defer details to a follow-up; keep the response bounded.",
-            "Cite file paths and line ranges so the caller can inspect source material.",
-            ...blockerProtocol,
-        ].join("\n");
-    }
+    const continuity = lifetime === "one-shot"
+        ? "This instance normally stops after this response; use DETAILS_AVAILABLE when further sections are needed."
+        : lifetime === "task"
+            ? "Retain context for follow-up and validation of this objective."
+            : "Retain context for related requests within this purpose.";
     return [
-        `You are the ${lifetime === "task" ? "task-scoped" : "persistent"} subagent "${safeName}".`,
+        `You are the ${lifetime === "task" ? "task-scoped" : lifetime} subagent "${safeName}".`,
         `Purpose: ${safePurpose}`,
-        lifetime === "task"
-            ? "Preserve continuity through follow-up and validation prompts for this objective."
-            : "Preserve continuity across prompts within this purpose.",
-        "Make each response decision-complete for the current request: include concise conclusions and all required findings or deliverables.",
-        "For long supplemental detail, include a numbered section index and provide those sections on follow-up.",
-        "Cite file paths and line ranges so the caller can inspect source material.",
-        ...blockerProtocol,
+        continuity,
+        SUBAGENT_COMPLETION_GUIDANCE,
     ].join("\n");
 }
 
@@ -580,6 +564,8 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
             options.purpose,
             options.lifetime,
         ));
+    } else {
+        args.push("--append-system-prompt", SUBAGENT_COMPLETION_GUIDANCE);
     }
 
     if (options.mode === "fork") args.push("--fork", options.parentSessionFile!);
