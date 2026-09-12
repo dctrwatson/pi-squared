@@ -129,6 +129,14 @@ export type SubagentPromptRequestResult =
     | { readonly run: SubagentRun; readonly handledWithoutRun?: false }
     | { readonly handledWithoutRun: true; readonly run?: never };
 
+/** Text removed from a backend queue before an interrupt. */
+export interface SubagentClearedQueue {
+    readonly steering: readonly string[];
+    readonly followUp: readonly string[];
+    /** The adapter reduced this queue to its documented payload limit. */
+    readonly truncated?: true;
+}
+
 export const MAX_AUTHORITATIVE_COMPLETION_BYTES = 1_024 * 1_024;
 export const AUTHORITATIVE_COMPLETION_TRUNCATION_NOTICE = "\n\n[Full response is limited to 1 MiB. Open the subagent session for the remaining content.]";
 /** Reject implausible remote durations before they reach shared panel state. */
@@ -211,6 +219,8 @@ export interface SubagentAssistantMessage {
 
 export type SubagentHistoryMessage = SubagentUserMessage | SubagentAssistantMessage;
 
+export type SubagentUiPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
+
 export type SubagentExtensionUiRequest = (
     | { readonly method: "select"; readonly id: string; readonly title: string; readonly options: readonly string[]; readonly timeout?: number }
     | { readonly method: "confirm"; readonly id: string; readonly title: string; readonly message: string; readonly timeout?: number }
@@ -236,7 +246,7 @@ export type SubagentBackendEvent =
     | { readonly type: "run_ended"; readonly run: SubagentRun; readonly willRetry: boolean }
     | { readonly type: "run_settled"; readonly run: SubagentRun }
     | { readonly type: "message_started"; readonly run: SubagentRun; readonly message: SubagentUserMessage | SubagentAssistantMessage }
-    | { readonly type: "message_delta"; readonly run: SubagentRun; readonly textDelta?: string; readonly thinkingDelta?: string; readonly toolCallStarted?: true; readonly truncated?: true }
+    | { readonly type: "message_delta"; readonly run: SubagentRun; readonly textDelta?: string; readonly thinkingDelta?: string; readonly toolCallStarted?: true; readonly toolCallId?: string; readonly toolName?: string; readonly truncated?: true }
     | { readonly type: "message_completed"; readonly run: SubagentRun; readonly message: SubagentAssistantMessage }
     | { readonly type: "turn_completed"; readonly run: SubagentRun }
     | { readonly type: "tool_started"; readonly run: SubagentRun; readonly toolCallId: string; readonly name: string; readonly args: string; readonly truncated?: true }
@@ -256,6 +266,8 @@ export type SubagentBackendEvent =
     | { readonly type: "runtime_warning"; readonly run: SubagentRun; readonly warning: string; readonly truncated?: true }
     | { readonly type: "policy_warning"; readonly run: SubagentRun; readonly warning: string; readonly truncated?: true }
     | { readonly type: "thinking_changed"; readonly level: SubagentThinkingLevel }
+    | { readonly type: "ui_prompt_start"; readonly run?: SubagentRun; readonly kind: SubagentUiPromptKind; readonly title?: string; readonly truncated?: true }
+    | { readonly type: "ui_prompt_end"; readonly run?: SubagentRun; readonly kind: SubagentUiPromptKind; readonly title?: string; readonly truncated?: true }
     | { readonly type: "extension_ui_request"; readonly run?: SubagentRun; readonly request: SubagentExtensionUiRequest };
 
 export interface SubagentBackendExit {
@@ -285,6 +297,8 @@ export interface SubagentBackend {
     prompt(message: string, signal?: AbortSignal): Promise<SubagentPromptRequestResult>;
     steer(message: string): Promise<void>;
     followUp(message: string, signal?: AbortSignal): Promise<SubagentPromptRequestResult>;
+    /** Clear queued messages before an interrupt when the backend supports it. */
+    clearQueue?(): Promise<SubagentClearedQueue | undefined>;
     abort(): Promise<void>;
     getState(): Promise<SubagentBackendState>;
     getRunCompletion?(run: SubagentRun): Promise<SubagentRunCompletion | undefined>;

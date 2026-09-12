@@ -39,9 +39,12 @@ function makePiBackend({
     },
   ],
   onPrompt,
+  clearQueueResult = { steering: [], followUp: [] },
+  clearQueueError,
 } = {}) {
   const events = [];
   const extensionUiResponses = [];
+  const rpcCalls = [];
   let abortCalls = 0;
   let rpcOptions;
   const emit = (event) => rpcOptions.onOutput(event);
@@ -52,7 +55,12 @@ function makePiBackend({
     async prompt(message, signal) { await onPrompt?.(message, emit, state, signal); },
     async steer() {},
     async followUp() {},
-    async abort() { abortCalls++; },
+    async clearQueue() {
+      rpcCalls.push("clear_queue");
+      if (clearQueueError) throw clearQueueError;
+      return clearQueueResult;
+    },
+    async abort() { rpcCalls.push("abort"); abortCalls++; },
     async getState() { return state; },
     async getMessages() { return { messages }; },
     async getSessionStats() { return { contextUsage: { tokens: 4, contextWindow: 16 } }; },
@@ -72,7 +80,7 @@ function makePiBackend({
     rpcOptions = options;
     return rpc;
   });
-  return { backend, events, emit, extensionUiResponses, abortCalls: () => abortCalls };
+  return { backend, events, emit, extensionUiResponses, abortCalls: () => abortCalls, rpcCalls };
 }
 
 test("PiRpcBackend normalizes Pi RPC output with the active run", async () => {
@@ -110,6 +118,82 @@ test("PiRpcBackend normalizes Pi RPC output with the active run", async () => {
   assert.equal(backendState.connection.runtime, "pi");
   assert.match(backendState.connection.id, /^pi-connection-/);
   assert.match(backendState.run?.id ?? "", /^pi-run-1-/);
+});
+
+test("PiRpcBackend clears and bounds queued Pi messages before an interrupt", async () => {
+  const oversized = "queued-".repeat(20_000);
+  const { backend, rpcCalls } = makePiBackend({
+    clearQueueResult: { steering: ["Change direction", oversized], followUp: ["Then summarize"] },
+  });
+
+  const [queue, repeatedQueue] = await Promise.all([backend.clearQueue(), backend.clearQueue()]);
+  await backend.abort();
+
+  assert.deepEqual(rpcCalls, ["clear_queue", "abort"]);
+  assert.deepEqual(repeatedQueue, queue);
+  assert.deepEqual(queue?.steering[0], "Change direction");
+  assert.equal(queue?.steering[1].length, MAX_NORMALIZED_MESSAGE_TEXT_CHARS);
+  assert.deepEqual(queue?.followUp, ["Then summarize"]);
+  assert.equal(queue?.truncated, true);
+
+  const timedOut = makePiBackend({ clearQueueError: new Error("Timed out waiting for clear_queue") });
+  assert.equal(await timedOut.backend.clearQueue(), undefined);
+  await timedOut.backend.abort();
+  assert.deepEqual(timedOut.rpcCalls, ["clear_queue", "abort"]);
+});
+
+test("PiRpcBackend forwards bounded UI prompt lifecycle events", () => {
+  const longTitle = "Prompt ".repeat(1_000);
+  const { events, emit } = makePiBackend();
+  emit({ type: "agent_start" });
+  const run = events[0].run;
+  emit({ type: "ui_prompt_start", kind: "input", title: longTitle });
+  emit({ type: "ui_prompt_end", kind: "input", title: longTitle });
+
+  assert.deepEqual(events.slice(1), [
+    { type: "ui_prompt_start", run, kind: "input", title: longTitle.slice(0, MAX_NORMALIZED_ERROR_CHARS), truncated: true },
+    { type: "ui_prompt_end", run, kind: "input", title: longTitle.slice(0, MAX_NORMALIZED_ERROR_CHARS), truncated: true },
+  ]);
+});
+
+test("PiRpcBackend sanitizes control characters in displayed RPC metadata", () => {
+  const { events, emit } = makePiBackend();
+  emit({ type: "agent_start" });
+  const run = events[0].run;
+  emit({ type: "ui_prompt_start", kind: "input", title: "Confirm\u001b[31m\nnow\u009b" });
+  emit({
+    type: "message_update",
+    assistantMessageEvent: { type: "toolcall_start", id: "call\u0000one\u009b", toolName: "read\tfile\u001b[2J" },
+  });
+
+  const prompt = events[1];
+  const tool = events[2];
+  assert.equal(prompt.title, "Confirm [31m now ");
+  assert.equal(tool.toolCallId, "call one ");
+  assert.equal(tool.toolName, "read file [2J");
+  assert.doesNotMatch(`${prompt.title}${tool.toolCallId}${tool.toolName}`, /[\u0000-\u001f\u007f-\u009f]/);
+  assert.equal(prompt.run, run);
+  assert.equal(tool.run, run);
+});
+
+test("PiRpcBackend retains toolcall start identities for streamed status", () => {
+  const longId = `call-${"x".repeat(2_000)}`;
+  const longName = "tool-".repeat(200);
+  const { events, emit } = makePiBackend();
+  emit({ type: "agent_start" });
+  const run = events[0].run;
+  emit({
+    type: "message_update",
+    assistantMessageEvent: { type: "toolcall_start", id: longId, toolName: longName },
+  });
+
+  assert.equal(events[1]?.type, "message_delta");
+  assert.equal(events[1]?.run, run);
+  assert.equal(events[1]?.toolCallStarted, true);
+  assert.notEqual(events[1]?.toolCallId, longId);
+  assert.ok(events[1]?.toolCallId.length <= MAX_NORMALIZED_ID_CHARS);
+  assert.equal(events[1]?.toolName, longName.slice(0, MAX_NORMALIZED_ID_CHARS));
+  assert.equal(events[1]?.truncated, true);
 });
 
 test("PiRpcBackend reconciles Pi delayed starts and keeps extension-handled prompts without agent runs", async () => {
@@ -276,7 +360,7 @@ test("PiRpcBackend correlates opaque extension UI IDs and keeps long identities 
 test("PiRpcBackend cancels pending extension UI with original IDs during prompt cancellation", async () => {
   const originalId = `request-${"x".repeat(2_000)}`;
   const abort = new AbortController();
-  const { backend, events, emit, extensionUiResponses, abortCalls } = makePiBackend({
+  const { backend, events, emit, extensionUiResponses, abortCalls, rpcCalls } = makePiBackend({
     state: { thinkingLevel: "off", isStreaming: false, isCompacting: false },
     onPrompt(_message, _emit, _state, signal) {
       return new Promise((_resolve, reject) => {
@@ -294,6 +378,7 @@ test("PiRpcBackend cancels pending extension UI with original IDs during prompt 
     { type: "extension_ui_response", id: originalId, cancelled: true },
   ]);
   assert.equal(abortCalls(), 1);
+  assert.deepEqual(rpcCalls, ["clear_queue", "abort"]);
 });
 
 test("controller rejects cancellation when Pi prompt acceptance never responds", async () => {

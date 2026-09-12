@@ -370,6 +370,10 @@ export class SubagentPanel implements Focusable {
         this.tui.requestRender();
     }
 
+    getInput(): string {
+        return this.input.getValue();
+    }
+
     handleInput(data: string): void {
         if (this.keybindings.matches(data, "app.message.copy")) {
             if (!this.controller.state.connected) return;
@@ -569,7 +573,7 @@ export async function runSubagentDialog(
             panel.focused = true;
             detach = controller.attach(ctx, () => {
                 panel.invalidate();
-            }, (text) => panel.setInput(text));
+            }, (text) => panel.setInput(text), () => panel.getInput());
             queueMicrotask(() => {
                 void (async () => {
                     try {

@@ -55,6 +55,10 @@ function makeControllerHarness({
   supportsObservationDisposal = runtime === "cursor-cloud",
   promptAcceptance,
   getRunCompletion,
+  clearQueueResult,
+  clearQueueError,
+  abortFailure,
+  parentUi = {},
   select = async () => undefined,
 } = {}) {
   const calls = {
@@ -116,7 +120,19 @@ function makeControllerHarness({
         calls.followUp.push(text);
         return { run: followUpStartsRun ? startRun(nextRun()) : currentRun };
       },
-      async abort() { streaming = false; },
+      ...(clearQueueResult === undefined && clearQueueError === undefined ? {} : {
+        async clearQueue() {
+          calls.clearQueue = (calls.clearQueue ?? 0) + 1;
+          if (clearQueueError) throw clearQueueError;
+          return clearQueueResult;
+        },
+      }),
+      async abort() {
+        calls.abort = (calls.abort ?? 0) + 1;
+        const failure = typeof abortFailure === "function" ? abortFailure() : abortFailure;
+        if (failure) throw failure;
+        streaming = false;
+      },
       ...(getRunCompletion ? { getRunCompletion } : {}),
       async getState() {
         stateReads++;
@@ -145,7 +161,7 @@ function makeControllerHarness({
       respondToExtensionUI() { calls.extensionResponses++; },
     };
   };
-  const controller = new SubagentSessionController({ ui: { select } }, {
+  const controller = new SubagentSessionController({ ui: { select, ...parentUi } }, {
     args: [],
     cwd: "/tmp",
     mode: "fresh",
@@ -199,6 +215,140 @@ test("controller uses normalized fake-backend events for a parent prompt and fol
   }, "Pi retains complete zero-valued tool usage when no usage event arrives");
   assert.equal(harness.controller.state.usage.turns, 0, "Pi does not invent a missing-usage turn");
   assert.equal(harness.controller.latestSettledAssistantText, "The backend seam is preserved.");
+  await harness.controller.stop();
+});
+
+test("controller restores cleared Pi queue text to the panel before it aborts", async () => {
+  const harness = makeControllerHarness({
+    clearQueueResult: { steering: ["Change direction"], followUp: ["Then summarize"] },
+  });
+  const restored = [];
+  await harness.controller.start();
+  harness.startRun();
+  harness.controller.attach({ ui: {} }, () => {}, (text) => restored.push(text), () => "Unsent panel text");
+
+  await harness.controller.interrupt();
+
+  assert.deepEqual(restored, ["Change direction\n\nThen summarize\n\nUnsent panel text"]);
+  assert.equal(harness.calls.clearQueue, 1);
+  assert.equal(harness.calls.abort, 1);
+  await harness.controller.stop();
+});
+
+test("controller aborts after a Pi queue clear timeout", async () => {
+  const harness = makeControllerHarness({ clearQueueError: new Error("Timed out waiting for clear_queue") });
+  await harness.controller.start();
+  harness.startRun();
+
+  await harness.controller.interrupt();
+
+  assert.equal(harness.calls.clearQueue, 1);
+  assert.equal(harness.calls.abort, 1);
+  await harness.controller.stop();
+});
+
+test("controller preserves parent drafts when it restores a Pi queue", async () => {
+  const queue = { steering: ["Change direction"], followUp: ["Then summarize"] };
+  const noPanelRestored = [];
+  const noPanel = makeControllerHarness({
+    clearQueueResult: queue,
+    parentUi: {
+      getEditorText() { return "Parent editor draft"; },
+      setEditorText(text) { noPanelRestored.push(text); },
+    },
+  });
+  await noPanel.controller.start();
+  noPanel.startRun();
+  await noPanel.controller.interrupt();
+  assert.deepEqual(noPanelRestored, ["Change direction\n\nThen summarize\n\nParent editor draft"]);
+  await noPanel.controller.stop();
+
+  const legacyRestored = [];
+  const legacyPanel = makeControllerHarness({ clearQueueResult: queue });
+  await legacyPanel.controller.start();
+  legacyPanel.startRun();
+  legacyPanel.controller.attach({ ui: { getEditorText() { return "Legacy parent editor draft"; } } }, () => {}, (text) => legacyRestored.push(text));
+  await legacyPanel.controller.interrupt();
+  assert.deepEqual(legacyRestored, ["Change direction\n\nThen summarize\n\nLegacy parent editor draft"]);
+  await legacyPanel.controller.stop();
+});
+
+test("controller blocks submissions until an interrupted Pi turn settles", async () => {
+  let releaseClearQueue;
+  let failAbort = true;
+  const delayedQueue = new Promise((resolve) => { releaseClearQueue = resolve; });
+  const harness = makeControllerHarness({
+    clearQueueResult: delayedQueue,
+    abortFailure: () => failAbort ? new Error("Abort request failed") : undefined,
+  });
+  const restored = [];
+  await harness.controller.start();
+  const run = harness.startRun();
+  harness.controller.attach({ ui: {} }, () => {}, (text) => restored.push(text));
+  const firstInterrupt = harness.controller.interrupt();
+  const repeatedInterrupt = harness.controller.interrupt();
+  await waitFor(() => harness.calls.clearQueue === 1);
+
+  assert.equal(await harness.controller.submit("Ordinary prompt", "prompt"), false);
+  assert.equal(await harness.controller.submit("Steer prompt", "steer"), false);
+  assert.equal(await harness.controller.submit("Follow-up prompt", "followUp"), false);
+  assert.deepEqual(harness.calls.prompt, []);
+  assert.deepEqual(harness.calls.steer, []);
+  assert.deepEqual(harness.calls.followUp, []);
+
+  releaseClearQueue({ steering: ["Restore once"], followUp: [] });
+  await Promise.all([firstInterrupt, repeatedInterrupt]);
+  assert.deepEqual(restored, ["Restore once"]);
+  assert.equal(harness.calls.abort, 1);
+
+  failAbort = false;
+  await harness.controller.interrupt();
+  assert.equal(harness.calls.abort, 2, "a failed abort can be retried");
+  assert.equal(await harness.controller.submit("Late steer", "steer"), false);
+  assert.equal(await harness.controller.submit("Late follow-up", "followUp"), false);
+  assert.deepEqual(harness.calls.steer, []);
+  assert.deepEqual(harness.calls.followUp, []);
+
+  harness.settle(run);
+  await waitFor(() => !harness.controller.state.busy);
+  assert.equal(await harness.controller.submit("Prompt after settlement", "prompt"), true);
+  await harness.controller.stop();
+});
+
+test("controller clears its interrupt gate when a prompt is handled without a run", async () => {
+  let resolvePrompt;
+  let prompts = 0;
+  const harness = makeControllerHarness({
+    clearQueueResult: { steering: [], followUp: [] },
+    promptAcceptance() {
+      prompts++;
+      if (prompts > 1) return { handledWithoutRun: true };
+      return new Promise((resolve) => { resolvePrompt = resolve; });
+    },
+  });
+  await harness.controller.start();
+  const pending = harness.controller.submit("Handle this locally", "prompt");
+  await waitFor(() => harness.controller.state.busy);
+  await harness.controller.interrupt();
+  resolvePrompt({ handledWithoutRun: true });
+  assert.equal(await pending, true);
+  assert.equal(harness.controller.state.busy, false);
+  assert.equal(await harness.controller.submit("Handle another local prompt", "prompt"), true);
+  await harness.controller.stop();
+});
+
+test("controller shows Pi UI prompt waits and named tool preparation", async () => {
+  const harness = makeControllerHarness();
+  await harness.controller.start();
+  const run = harness.startRun();
+
+  harness.emit({ type: "ui_prompt_start", run, kind: "input", title: "Need confirmation" });
+  assert.equal(harness.controller.state.phase, "Waiting for user: Need confirmation");
+  harness.emit({ type: "ui_prompt_end", run, kind: "input", title: "Need confirmation" });
+  assert.equal(harness.controller.state.phase, "Subagent is working…");
+
+  harness.emit({ type: "message_delta", run, toolCallStarted: true, toolCallId: "call-1", toolName: "read" });
+  assert.equal(harness.controller.state.phase, "Preparing read…");
   await harness.controller.stop();
 });
 

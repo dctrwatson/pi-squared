@@ -19,7 +19,7 @@ const {
   MAX_SUBAGENT_TRANSCRIPT_ITEMS,
   promptFingerprint,
 } = await import("../../extensions/subagents/controller.ts");
-const { SubagentRpcClient } = await import("../../extensions/subagents/rpc.ts");
+const { CLEAR_QUEUE_TIMEOUT_MS, SubagentRpcClient } = await import("../../extensions/subagents/rpc.ts");
 const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("../../extensions/subagents/cursor-backend.ts");
 const { PiRpcBackend } = await import("../../extensions/subagents/pi-backend.ts");
 const { CursorModelCatalog } = await import("../../extensions/subagents/cursor-models.ts");
@@ -1569,6 +1569,7 @@ process.stdin.on("data", (chunk) => {
   await assert.rejects(client.prompt("hello"), /Rejected prompt/);
   await assert.rejects(client.steer("hello"), /Rejected steer/);
   await assert.rejects(client.followUp("hello"), /Rejected follow_up/);
+  await assert.rejects(client.clearQueue(), /Rejected clear_queue/);
   await assert.rejects(client.abort(), /Rejected abort/);
   await assert.rejects(client.setThinkingLevel("high"), /Rejected set_thinking_level/);
   await client.stop();
@@ -1591,6 +1592,26 @@ test("subagent RPC follow-up acceptance has no fixed timeout", async () => {
 
   assert.equal(sent.command.type, "follow_up");
   assert.equal(sent.timeoutMs, 0);
+});
+
+test("subagent RPC queue clearing uses a short explicit timeout", async () => {
+  const client = new SubagentRpcClient({
+    cwd: "/tmp",
+    args: [],
+    onOutput() {},
+    onExit() {},
+  });
+  let sent;
+  client.send = async (command, timeoutMs) => {
+    sent = { command, timeoutMs };
+    return { success: true, data: { steering: [], followUp: [] } };
+  };
+
+  await client.clearQueue();
+
+  assert.equal(sent.command.type, "clear_queue");
+  assert.equal(sent.timeoutMs, CLEAR_QUEUE_TIMEOUT_MS);
+  assert.ok(sent.timeoutMs < 30_000);
 });
 
 test("subagent RPC prompt acceptance rejects promptly on cancellation", async (t) => {
@@ -1720,6 +1741,23 @@ test("parent prompts return when a response completes after automatic compaction
   const result = await pending;
   assert.equal(result.text, "Authentication summary");
   assert.equal(harness.controller.state.busy, true);
+  await harness.controller.stop();
+});
+
+test("parent prompts wait for a visible response after compaction follows a tool call", async () => {
+  const harness = makeControllerHarness();
+  const pending = harness.controller.promptAndWait("Inspect authentication");
+  await waitFor(() => harness.calls.prompt.length === 1);
+  harness.message("", "toolUse");
+  harness.startCompaction();
+
+  let returned = false;
+  void pending.then(() => { returned = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(returned, false);
+
+  harness.settle("Authentication summary");
+  assert.equal((await pending).text, "Authentication summary");
   await harness.controller.stop();
 });
 

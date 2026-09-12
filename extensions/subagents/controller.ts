@@ -12,6 +12,7 @@ import {
     type SubagentBackendPanelDetails,
     type SubagentBackendState,
     type SubagentBackendConnection,
+    type SubagentClearedQueue,
     type SubagentExtensionUiRequest,
     type SubagentExtensionUiResponse,
     type SubagentModel,
@@ -100,6 +101,7 @@ type PanelAttachment = {
     readonly ctx: ExtensionContext;
     readonly refresh: () => void;
     readonly setInput: (text: string) => void;
+    readonly getInput?: () => string;
 };
 
 export interface SubagentPanelControlAvailability {
@@ -292,6 +294,8 @@ export class SubagentSessionController {
     private refreshTimer: ReturnType<typeof setTimeout> | undefined;
     private controlAvailabilityRetryTimer: ReturnType<typeof setTimeout> | undefined;
     private controlAvailabilityRecoveryEpoch = 0;
+    /** Block all new Pi requests after clear_queue until the turn settles. */
+    private interruptPending = false;
     private commandPending = false;
     private runSlotHeld = false;
     private stopping = false;
@@ -387,6 +391,7 @@ export class SubagentSessionController {
                 if (details.intentional || this.stopping) return;
                 this.settlementEpoch++;
                 this.settlingRuns.clear();
+                this.interruptPending = false;
                 this.state.connected = false;
                 this.state.busy = false;
                 this.releaseRunSlot();
@@ -402,10 +407,15 @@ export class SubagentSessionController {
         this.state.phase = `Starting ${this.backend.displayName} subagent…`;
     }
 
-    attach(ctx: ExtensionContext, refresh: () => void, setInput: (text: string) => void): () => void {
+    attach(
+        ctx: ExtensionContext,
+        refresh: () => void,
+        setInput: (text: string) => void,
+        getInput?: () => string,
+    ): () => void {
         const attachment = Symbol("subagent-panel");
         let detached = false;
-        this.panelAttachments.set(attachment, { ctx, refresh, setInput });
+        this.panelAttachments.set(attachment, { ctx, refresh, setInput, ...(getInput ? { getInput } : {}) });
         this.refreshCallbacks.add(refresh);
         this.reconcileControlAvailabilityRecovery();
         return () => {
@@ -659,6 +669,7 @@ export class SubagentSessionController {
 
     async stop(): Promise<void> {
         this.stopping = true;
+        this.interruptPending = false;
         this.settlementEpoch++;
         this.clearRefreshTimers();
         const error = new Error("Subagent process stopped");
@@ -862,6 +873,10 @@ export class SubagentSessionController {
             this.setTransientStatus("A subagent command is still being accepted.", "warning");
             return { accepted: false };
         }
+        if (this.interruptPending) {
+            this.addStatus("The subagent is aborting. Wait for it to settle.", "warning");
+            return { accepted: false };
+        }
         if (this.state.readOnly) {
             this.setTransientStatus("This completed result is read-only. Return it before sending another prompt.", "warning");
             return { accepted: false };
@@ -939,7 +954,10 @@ export class SubagentSessionController {
                 await this.discardCancelledCursorCompletionIfAborted(acceptedRun).catch(() => {});
             }
             this.lastSubmissionError = boundedError(error);
-            if (startsRun && !this.activeRun) this.releaseRunSlot();
+            if (startsRun && !this.activeRun) {
+                this.interruptPending = false;
+                this.releaseRunSlot();
+            }
             if (startsRun) {
                 if (this.activeRun) {
                     this.state.busy = true;
@@ -976,14 +994,36 @@ export class SubagentSessionController {
     }
 
     async interrupt(): Promise<void> {
-        if (!this.state.busy || !this.state.connected) return;
+        if (!this.state.busy || !this.state.connected || this.interruptPending) return;
+        this.interruptPending = true;
         this.state.phase = "Aborting…";
         this.touch();
         try {
+            this.restoreClearedQueue(await this.backend.clearQueue?.());
+        } catch {
+            // An older or unavailable clear_queue command must not prevent abort.
+        }
+        try {
             await this.backend.abort();
         } catch (error) {
+            this.interruptPending = false;
             this.addStatus(error instanceof Error ? error.message : String(error), "error");
         }
+    }
+
+    /** Restore Pi queue text before abort removes the active turn. */
+    private restoreClearedQueue(queue: SubagentClearedQueue | undefined): void {
+        if (!queue) return;
+        const queuedText = [...queue.steering, ...queue.followUp].filter((text) => text.trim()).join("\n\n");
+        const panel = this.latestPanelAttachment();
+        const ui = panel?.ctx.ui ?? this.ctx.ui;
+        const currentText = panel?.getInput?.() ?? ui.getEditorText?.() ?? "";
+        const text = [queuedText, currentText].filter((value) => value.trim()).join("\n\n");
+        if (text) {
+            if (panel) panel.setInput(text);
+            else ui.setEditorText(text);
+        }
+        if (queue.truncated) this.addStatus("Queued subagent messages were truncated before they returned to the editor.", "warning");
     }
 
     returnText(): string | undefined {
@@ -1185,7 +1225,9 @@ export class SubagentSessionController {
 
     private resolveResponseWaiters(run: SubagentRun): void {
         const accumulator = this.getActiveRunAccumulator(run);
-        if (!accumulator?.hadAssistant) return;
+        if (!accumulator?.hadAssistant || accumulator.assistantStopReason !== "stop" || !accumulator.assistantText.trim()) {
+            return;
+        }
         const waiters = [...this.settledWaiters].filter(
             (waiter) => waiter.run && this.runKey(waiter.run) === this.runKey(run),
         );
@@ -1388,6 +1430,7 @@ export class SubagentSessionController {
     }
 
     private completeHandledPrompt(): void {
+        this.interruptPending = false;
         this.latestSettled = { text: "", responseProduced: false, handledWithoutAgent: true };
         this.state.busy = false;
         this.releaseRunSlot();
@@ -1524,6 +1567,7 @@ export class SubagentSessionController {
             this.latestSettled = settled;
         }
         if (!this.activeRun) {
+            this.interruptPending = false;
             this.state.busy = false;
             this.releaseRunSlot();
             this.state.canFollowUp = parentOwned && !this.state.readOnly && this.backend.capabilities.settledFollowUp;
@@ -1676,6 +1720,16 @@ export class SubagentSessionController {
                 }
                 if (event.run && !this.isActiveRun(event.run)) return;
                 void this.handleExtensionUi(event.request);
+                return;
+            case "ui_prompt_start":
+                if (event.run && !this.isActiveRun(event.run)) return;
+                this.state.phase = event.title ? `Waiting for user: ${event.title}` : "Waiting for user…";
+                this.touch();
+                return;
+            case "ui_prompt_end":
+                if (event.run && !this.isActiveRun(event.run)) return;
+                this.state.phase = this.state.busy ? "Subagent is working…" : "Ready for another prompt";
+                this.touch();
                 return;
             case "run_started": {
                 if (!this.beginRun(event.run)) return;
@@ -1854,7 +1908,8 @@ export class SubagentSessionController {
             accumulator.activeAssistant.thinking = boundedTranscriptText(accumulator.activeAssistant.thinking + event.thinkingDelta);
             this.state.phase = "Thinking…";
         } else if (event.toolCallStarted) {
-            this.state.phase = "Preparing tool call…";
+            const tool = event.toolName ?? event.toolCallId;
+            this.state.phase = tool ? `Preparing ${tool}…` : "Preparing tool call…";
         }
         if (event.truncated) this.reportRunTruncation(accumulator);
         // A stream can grow an existing item after appendItem performed its trim.

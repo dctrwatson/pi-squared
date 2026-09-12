@@ -17,6 +17,7 @@ import {
     type SubagentBackendFactory,
     type SubagentBackendOptions,
     type SubagentBackendState,
+    type SubagentClearedQueue,
     type SubagentExtensionUiRequest,
     type SubagentExtensionUiResponse,
     type SubagentHistoryMessage,
@@ -26,6 +27,7 @@ import {
     type SubagentRunCompletion,
     type SubagentSessionStats,
     type SubagentThinkingLevel,
+    type SubagentUiPromptKind,
     type SubagentUsage,
 } from "./backend.ts";
 
@@ -69,6 +71,7 @@ interface PiRpcClient {
     steer(message: string): Promise<void>;
     followUp(message: string, signal?: AbortSignal): Promise<void>;
     abort(): Promise<void>;
+    clearQueue?(): Promise<unknown>;
     getState(): Promise<unknown>;
     getMessages(): Promise<unknown>;
     getSessionStats(): Promise<unknown>;
@@ -100,10 +103,23 @@ function isThinkingLevel(value: unknown): value is SubagentThinkingLevel {
         || value === "max";
 }
 
+function isUiPromptKind(value: unknown): value is SubagentUiPromptKind {
+    return value === "select"
+        || value === "confirm"
+        || value === "input"
+        || value === "editor"
+        || value === "custom";
+}
+
 function boundedText(value: string, maximum: number): { readonly text: string; readonly truncated: boolean } {
     return value.length <= maximum
         ? { text: value, truncated: false }
         : { text: value.slice(0, maximum), truncated: true };
+}
+
+/** Remove terminal control characters before text reaches panel status. */
+function displayText(value: string): string {
+    return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
 function fullTextFingerprint(text: string): string {
@@ -328,6 +344,33 @@ function extensionUiRequest(
     }
 }
 
+function clearedQueue(value: unknown): SubagentClearedQueue | undefined {
+    if (!isRecord(value)) return undefined;
+    let remainingChars = MAX_NORMALIZED_EXTENSION_UI_TOTAL_CHARS;
+    let remainingItems = MAX_NORMALIZED_EXTENSION_UI_ITEMS;
+    let truncated = false;
+    const messages = (queue: unknown): string[] => {
+        if (!Array.isArray(queue)) return [];
+        const normalized: string[] = [];
+        for (const message of queue) {
+            if (typeof message !== "string") continue;
+            if (remainingItems === 0 || remainingChars === 0) {
+                truncated = true;
+                break;
+            }
+            remainingItems--;
+            const bounded = boundedText(message, Math.min(MAX_NORMALIZED_MESSAGE_TEXT_CHARS, remainingChars));
+            remainingChars -= bounded.text.length;
+            truncated ||= bounded.truncated;
+            normalized.push(bounded.text);
+        }
+        return normalized;
+    };
+    const steering = messages(value.steering);
+    const followUp = messages(value.followUp);
+    return { steering, followUp, ...(truncated ? { truncated: true as const } : {}) };
+}
+
 function eventMessage(value: unknown): SubagentHistoryMessage | undefined {
     const message = historyMessage(value);
     if (!message) return undefined;
@@ -377,6 +420,19 @@ function normalizeOutput(output: SubagentRpcOutput, run: SubagentRun | undefined
             ...(extensionPath?.truncated || error.truncated ? { truncated: true as const } : {}),
         };
     }
+    if (output.type === "ui_prompt_start" || output.type === "ui_prompt_end") {
+        if (!isUiPromptKind(output.kind)) return undefined;
+        const title = typeof output.title === "string"
+            ? boundedText(displayText(output.title), MAX_NORMALIZED_ERROR_CHARS)
+            : undefined;
+        return {
+            type: output.type,
+            ...(run ? { run } : {}),
+            kind: output.kind,
+            ...(title ? { title: title.text } : {}),
+            ...(title?.truncated ? { truncated: true as const } : {}),
+        };
+    }
     if (!run) return undefined;
 
     switch (output.type) {
@@ -395,7 +451,21 @@ function normalizeOutput(output: SubagentRpcOutput, run: SubagentRun | undefined
                 const thinking = boundedText(delta.delta, MAX_NORMALIZED_DELTA_CHARS);
                 return { type: "message_delta", run, thinkingDelta: thinking.text, ...(thinking.truncated ? { truncated: true as const } : {}) };
             }
-            return delta.type === "toolcall_start" ? { type: "message_delta", run, toolCallStarted: true } : undefined;
+            if (delta.type !== "toolcall_start") return undefined;
+            const toolCallId = typeof delta.id === "string"
+                ? boundedText(displayText(opaqueIdentifier(delta.id, "pi-tool-")), MAX_NORMALIZED_ID_CHARS)
+                : undefined;
+            const toolName = typeof delta.toolName === "string"
+                ? boundedText(displayText(delta.toolName), MAX_NORMALIZED_ID_CHARS)
+                : undefined;
+            return {
+                type: "message_delta",
+                run,
+                toolCallStarted: true,
+                ...(toolCallId ? { toolCallId: toolCallId.text } : {}),
+                ...(toolName ? { toolName: toolName.text } : {}),
+                ...(toolCallId?.truncated || toolName?.truncated ? { truncated: true as const } : {}),
+            };
         }
         case "message_end": {
             const message = eventMessage(output.message);
@@ -547,6 +617,8 @@ export class PiRpcBackend implements SubagentBackend {
     private lastRun: { readonly id: string; readonly runtime: "pi" } | undefined;
     private readonly extensionUiResponseIds = new Map<string, string>();
     private readonly runCompletions = new Map<string, SubagentRunCompletion>();
+    /** Share a clear_queue response with simultaneous parent cancellation handlers. */
+    private clearQueuePromise: Promise<SubagentClearedQueue | undefined> | undefined;
     private runCount = 0;
     private readonly rpc: PiRpcClient;
     private readonly options: SubagentBackendOptions;
@@ -609,6 +681,32 @@ export class PiRpcBackend implements SubagentBackend {
             await this.callWithSignal(() => this.rpc.followUp(message, signal), signal);
             return await this.promptResult(runCount, false, signal);
         });
+    }
+
+    async clearQueue(): Promise<SubagentClearedQueue | undefined> {
+        const pending = this.clearQueuePromise;
+        if (pending) return await pending;
+        const clearing = this.clearQueueInternal();
+        this.clearQueuePromise = clearing;
+        void clearing.then(
+            () => {
+                if (this.clearQueuePromise === clearing) this.clearQueuePromise = undefined;
+            },
+            () => {
+                if (this.clearQueuePromise === clearing) this.clearQueuePromise = undefined;
+            },
+        );
+        return await clearing;
+    }
+
+    private async clearQueueInternal(): Promise<SubagentClearedQueue | undefined> {
+        if (!this.rpc.clearQueue) return undefined;
+        try {
+            return clearedQueue(await this.call(() => this.rpc.clearQueue!()));
+        } catch {
+            // Pi versions before clear_queue still support a normal abort.
+            return undefined;
+        }
     }
 
     async abort(): Promise<void> {
@@ -782,7 +880,7 @@ export class PiRpcBackend implements SubagentBackend {
                 // The abort below is still useful when the response channel is closed.
             }
         }
-        void this.call(() => this.rpc.abort()).catch(() => {});
+        void this.clearQueue().then(() => this.call(() => this.rpc.abort())).catch(() => {});
     }
 
     private async withPromptCancellation<T>(signal: AbortSignal | undefined, operation: () => Promise<T>): Promise<T> {

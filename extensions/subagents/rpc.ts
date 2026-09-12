@@ -6,6 +6,8 @@ import type { RpcExtensionUIResponse, RpcSessionState, SessionStats } from "@ear
 import type { SubagentThinkingLevel } from "./personas.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Do not delay a user interrupt on an unavailable clear_queue response. */
+export const CLEAR_QUEUE_TIMEOUT_MS = 1_000;
 const MAX_STDERR_CHARS = 64 * 1024;
 
 export interface SubagentModelInfo {
@@ -166,6 +168,10 @@ export class SubagentRpcClient {
 
     async abort(): Promise<void> {
         this.data<void>(await this.send({ type: "abort" }));
+    }
+
+    async clearQueue(): Promise<unknown> {
+        return this.data<unknown>(await this.send({ type: "clear_queue" }, CLEAR_QUEUE_TIMEOUT_MS));
     }
 
     async getState(): Promise<RpcSessionState> {
