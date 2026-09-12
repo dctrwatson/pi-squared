@@ -18,6 +18,13 @@ export const WORKSPACE_PM_SKILL_PATH = join(
     "SKILL.md",
 );
 
+const WORKSPACE_PROMPT_GUIDANCE = `## Workspace coding guidance
+
+- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.
+- Read repository guidance and inspect Git status before you edit.
+- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.
+- Use targeted reads and searches. Read more context only when needed.
+- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.`;
 
 export interface WorkspaceExtensionOptions {
     createService?: (cwd: string) => WorkspaceService;
@@ -676,9 +683,11 @@ export default function workspaceExtension(
         handler: handleCommand,
     });
     pi.on("resources_discover", () => pmPath ? { skillPaths: [WORKSPACE_PM_SKILL_PATH] } : { skillPaths: [] });
-    pi.on("before_agent_start", (event) => pmPath ? {
-        systemPrompt: `${event.systemPrompt}\n\nActive workspace PM: \`../pm\`. Load \`workspace-pm\` for durable project records.`,
-    } : undefined);
+    pi.on("before_agent_start", (event) => {
+        if (!owned) return undefined;
+        const pmGuidance = pmPath ? "\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records." : "";
+        return { systemPrompt: `${event.systemPrompt}\n\n${WORKSPACE_PROMPT_GUIDANCE}${pmGuidance}` };
+    });
     pi.on("session_start", async (_event, ctx) => {
         workspaceCwd = ctx.cwd;
         pendingMerge = undefined;

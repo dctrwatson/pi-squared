@@ -42,6 +42,10 @@ The picker reads local Git, session, and lease state only. It does not call `gh`
 
 The tool always creates an inactive managed workspace, equivalent to `/ws new <branch> --worktree`, and returns its source directory. On macOS, call `launch_pi` with that directory to start its bound Pi session. On Linux, run `piw` in that directory.
 
+## Prompt guidance
+
+When Pi owns a valid workspace, the extension appends stable coding guidance to the incoming system prompt. It limits work to agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority. It requires repository guidance and Git status before edits, protection for unrelated work, focused context retrieval, validation that meets repository requirements and fits the change, and reports of verified results and limits. It does not include a live branch, HEAD, Git status, assignment, time, or PM content. Plain Pi sessions receive no workspace guidance. Managed workspaces still expose the `workspace-pm` skill and the `Active workspace PM` hint.
+
 ## Launcher
 
 ```bash

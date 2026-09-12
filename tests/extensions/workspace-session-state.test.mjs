@@ -115,6 +115,7 @@ test("session start leaves plain Pi sessions unbound", async () => {
     await mkdir(nested);
     let sessionStart;
     let sessionShutdown;
+    let beforeAgentStart;
     const appended = [];
     const modeEvents = [];
     workspaceExtension({
@@ -122,6 +123,7 @@ test("session start leaves plain Pi sessions unbound", async () => {
       on(event, handler) {
         if (event === "session_start") sessionStart = handler;
         if (event === "session_shutdown") sessionShutdown = handler;
+        if (event === "before_agent_start") beforeAgentStart = handler;
       },
       events: {
         emit(name, payload) {
@@ -156,6 +158,7 @@ test("session start leaves plain Pi sessions unbound", async () => {
     const state = await new WorkspaceService(root).state();
     assert.equal(await state.getWorkspace("main"), undefined);
     assert.deepEqual(appended, []);
+    assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }), undefined);
     assert.deepEqual(modeEvents, []);
     assert.deepEqual(notifications, []);
   } finally {
@@ -170,12 +173,14 @@ test("session start warns when a known workspace session does not own its lease"
     const service = new WorkspaceService(root, { sessions });
     const { record } = await mapWorkspace(service, sessions, "main", root);
     let sessionStart;
+    let beforeAgentStart;
     const modeEvents = [];
     const notifications = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
         if (event === "session_start") sessionStart = handler;
+        if (event === "before_agent_start") beforeAgentStart = handler;
       },
       events: {
         emit(name, payload) {
@@ -200,6 +205,7 @@ test("session start warns when a known workspace session does not own its lease"
     await sessionStart({}, ctx);
 
     assert.deepEqual(modeEvents, []);
+    assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }), undefined);
     assert.deepEqual(notifications, [[
       "Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.",
       "warning",
@@ -209,7 +215,7 @@ test("session start warns when a known workspace session does not own its lease"
   }
 });
 
-test("an active managed workspace exposes concise PM guidance", async () => {
+test("an active managed workspace appends stable guidance and exposes PM", async () => {
   const root = await repository();
   try {
     const sessions = new FakeSessions(root);
@@ -261,8 +267,8 @@ test("an active managed workspace exposes concise PM guidance", async () => {
     await sessionStart({}, ctx);
 
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [WORKSPACE_PM_SKILL_PATH] });
-    assert.deepEqual(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), {
-      systemPrompt: "Base prompt\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
+    assert.deepEqual(beforeAgentStart({ systemPrompt: "Pi base\n\nUser addendum" }, ctx), {
+      systemPrompt: "Pi base\n\nUser addendum\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
     });
     assert.deepEqual(appended.at(-1)?.data, { sessionId: "workspace-session", source: "workspace", mode: "active" });
     assert.deepEqual(modeEvents, [{
@@ -355,7 +361,9 @@ test("an active managed workspace exposes concise PM guidance", async () => {
       payload: { mode: "active", source: "workspace" },
     }]);
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [] });
-    assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), undefined);
+    assert.deepEqual(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), {
+      systemPrompt: "Base prompt\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.",
+    });
     assert.deepEqual(notifications, []);
     assert.deepEqual(statuses, []);
 
