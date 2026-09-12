@@ -225,7 +225,8 @@ function storedCursor(root, id, name, remoteLifecycle = "idle", localLifecycle =
     } : { agentId: `bc-${id}` }),
     remoteCreated,
     repositories: [{ url: "https://github.com/example/project", startingRef: "a".repeat(40) }],
-    requestedProfile: "balanced",
+    requestedModel: "gpt-5.6-terra",
+    requestedThinking: "xhigh",
     currentModel: {
       id: "cursor-model",
       parameters: [{ id: "thinking", value: "high" }],
@@ -505,6 +506,7 @@ test("stored persona lifetime preferences restore as inert legacy data", async (
   t.after(() => rm(root, { recursive: true, force: true }));
   const stored = storedPi(root, "legacy-persona", "legacy-persona");
   stored.lifetime = "task";
+  stored.model = "saved-provider/saved-model";
   stored.persona = {
     name: "legacy-reviewer",
     description: "Review one change",
@@ -522,7 +524,84 @@ test("stored persona lifetime preferences restore as inert legacy data", async (
   const restored = registry.resolve(stored.id).stored;
   assert.equal(restored.lifetime, "task");
   assert.equal(Object.hasOwn(restored.persona, "preferredLifetime"), false);
-  assert.equal(restored.persona.preferredProfile, "fast");
+  assert.equal(Object.hasOwn(restored.persona, "preferredProfile"), false);
+  assert.equal(restored.persona.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(restored.persona.thinking, "high");
+  assert.equal(restored.model, "saved-provider/saved-model");
+  assert.equal(restored.thinking, "low");
+});
+
+test("registry restores legacy Cursor defaults without replacing TUI model choices", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-legacy-models-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const expected = [
+    ["fast", "gpt-5.6-luna", "high"],
+    ["balanced", "gpt-5.6-terra", "xhigh"],
+    ["deep", "gpt-5.6-sol", "xhigh"],
+  ];
+  for (const [profile, model, thinking] of expected) {
+    for (const hasTuiChoice of [false, true]) {
+      const stored = storedCursor(root, `legacy-${profile}-${hasTuiChoice}`, "legacy", "local");
+      delete stored.requestedModel;
+      delete stored.requestedThinking;
+      stored.requestedProfile = profile;
+      const tuiChoice = structuredClone(stored.currentModel);
+      if (!hasTuiChoice) delete stored.currentModel;
+      stored.persona = {
+        name: "legacy-scout", description: "Inspect evidence", systemPrompt: "Inspect the evidence.",
+        runtime: "cursor-cloud", preferredProfile: "fast", extensions: [], skills: [], filePath: "/legacy-scout.md",
+      };
+      const registry = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
+      registry.restore(registryContext(root, registryBranch([stored])));
+      const restored = registry.resolve(stored.id).stored;
+      assert.equal(restored.requestedModel, model);
+      assert.equal(restored.requestedThinking, thinking);
+      assert.equal(restored.persona.model, "gpt-5.6-luna");
+      assert.equal(restored.persona.thinking, "high");
+      assert.equal(Object.hasOwn(restored, "requestedProfile"), false);
+      assert.equal(Object.hasOwn(restored.persona, "preferredProfile"), false);
+      assert.deepEqual(restored.currentModel, hasTuiChoice ? tuiChoice : undefined);
+      assert.equal(registry.summaryFor(stored.id).status, "dormant");
+    }
+  }
+});
+
+test("direct Cursor defaults persist and override legacy defaults without changing saved state", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-direct-models-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const entries = [];
+  const pi = { getThinkingLevel: () => "low", appendEntry(customType, data) { entries.push({ customType, data }); } };
+  const context = registryContext(root);
+  const registry = new PersistentSubagentRegistry(pi);
+  registry.restore(context);
+  const persona = {
+    name: "custom-model", description: "Inspect evidence", systemPrompt: "Inspect the evidence.",
+    runtime: "cursor-cloud", model: "custom-model-id", thinking: "low",
+    extensions: [], skills: [], filePath: "/custom-model.md",
+  };
+  const created = registry.create(context, { purpose: "Inspect evidence", persona, mode: "fresh" });
+  const stored = registry.resolve(created.id).stored;
+  assert.equal(stored.requestedModel, persona.model);
+  assert.equal(stored.requestedThinking, persona.thinking);
+  assert.equal(Object.hasOwn(stored, "requestedProfile"), false);
+  const saved = structuredClone(entries.at(-1).data.upserts.find(({ id }) => id === created.id));
+  saved.requestedProfile = "deep";
+  saved.persona.preferredProfile = "fast";
+  saved.localLifecycle = "stopped";
+  saved.remoteLifecycle = "archived";
+  saved.remoteCreated = true;
+  saved.pendingOperations = [];
+  saved.currentModel = { id: "tui-model", parameters: [{ id: "thinking", value: "high" }], resolvedAt: 1 };
+  const restoredRegistry = new PersistentSubagentRegistry(pi);
+  restoredRegistry.restore(registryContext(root, registryBranch([saved])));
+  const restored = restoredRegistry.resolve(created.id).stored;
+  assert.equal(restored.requestedModel, persona.model);
+  assert.equal(restored.requestedThinking, persona.thinking);
+  assert.equal(restored.persona.model, persona.model);
+  assert.equal(restored.persona.thinking, persona.thinking);
+  assert.deepEqual(restored.currentModel, saved.currentModel);
+  assert.equal(Object.hasOwn(restored, "requestedProfile"), false);
+  assert.equal(restoredRegistry.summaryFor(created.id).status, "stopped");
 });
 
 test("registry represents each saved Cursor lifecycle without remote access", async (t) => {
@@ -1097,14 +1176,14 @@ test("Cursor operations persist queued work but reject late submissions after sh
   const inFlight = registry.runCursorOperation("cursor", async (stored, persist) => {
     started();
     await inFlightReleased;
-    persist({ ...stored, requestedProfile: "fast" });
-    assert.equal(entries.at(-1).data.upserts.find((entry) => entry.id === stored.id)?.requestedProfile, "fast");
+    persist({ ...stored, requestedModel: "gpt-5.6-luna" });
+    assert.equal(entries.at(-1).data.upserts.find((entry) => entry.id === stored.id)?.requestedModel, "gpt-5.6-luna");
     timeline.push("in-flight-persisted", "in-flight-remote-effect");
   });
   await inFlightStarted;
   const queued = registry.runCursorOperation("cursor", async (stored, persist) => {
-    persist({ ...stored, requestedProfile: "deep" });
-    assert.equal(entries.at(-1).data.upserts.find((entry) => entry.id === stored.id)?.requestedProfile, "deep");
+    persist({ ...stored, requestedModel: "gpt-5.6-sol" });
+    assert.equal(entries.at(-1).data.upserts.find((entry) => entry.id === stored.id)?.requestedModel, "gpt-5.6-sol");
     timeline.push("queued-persisted", "queued-remote-effect");
   });
   const shutdown = registry.shutdown();
@@ -1122,8 +1201,8 @@ test("Cursor operations persist queued work but reject late submissions after sh
     "dispose",
   ]);
   const updates = entries.flatMap(({ data }) => data.upserts ?? [])
-    .filter((entry) => entry.id === "cursor").map((entry) => entry.requestedProfile);
-  assert.deepEqual(updates, ["fast", "deep"]);
+    .filter((entry) => entry.id === "cursor").map((entry) => entry.requestedModel);
+  assert.deepEqual(updates, ["gpt-5.6-luna", "gpt-5.6-sol"]);
 });
 
 test("Cursor stop retains archive recovery state through shutdown and a lost response", async (t) => {

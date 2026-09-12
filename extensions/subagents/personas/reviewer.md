@@ -1,7 +1,8 @@
 ---
 name: reviewer
-description: Review implementation changes for correctness and regressions
-preferred-profile: balanced
+description: Review implementation changes and report actionable defects only; do not suggest fixes, edit files, or run tests
+model: fireworks/accounts/fireworks/models/glm-5p3
+thinking: high
 context-requirements: >
   Provide the review focus or question, objective, expected behavior, constraints, relevant scope, and Git comparison scope/base if applicable.
 skills:

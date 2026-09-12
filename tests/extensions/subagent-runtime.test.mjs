@@ -21,10 +21,12 @@ test("cursor persona frontmatter validates and normalizes runtime metadata", asy
   await writePersona(personas, "pi-permissive", "name: pi-permissive\ndescription: 42\nunknown-pi-key: allowed");
   await writePersona(personas, "duplicate-heavy-mcps", `name: duplicate-heavy-mcps\nruntime: cursor-cloud\ncursor-mcps:\n${Array.from({ length: 64 }, () => "  - datadog").join("\n")}`);
   await writePersona(personas, "duplicate-heavy-repos", `name: duplicate-heavy-repos\nruntime: cursor-cloud\ncursor-repos:\n${Array.from({ length: 100 }, () => "  - url: https://github.com/example/repeated.git\n    starting-ref: main").join("\n")}`);
+  await writePersona(personas, "cursor-default", "name: cursor-default\ndescription: Existing Cursor persona\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-valid", `name: cursor-valid
 description: Inspect Cloud evidence
 runtime: cursor-cloud
-preferred-profile: deep
+model: gpt-5.6-terra
+thinking: xhigh
 cursor-mcps:
   - datadog
   - sentry
@@ -44,10 +46,16 @@ cursor-repos:
   await writePersona(personas, "cursor-malformed-description", "name: cursor-malformed-description\ndescription: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-context", "name: cursor-malformed-context\ncontext-requirements: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-persona-lifetime", "name: cursor-persona-lifetime\npreferred-lifetime: task\nruntime: cursor-cloud");
-  await writePersona(personas, "cursor-malformed-profile", "name: cursor-malformed-profile\npreferred-profile: 42\nruntime: cursor-cloud");
-  await writePersona(personas, "cursor-invalid-profile", "name: cursor-invalid-profile\npreferred-profile: slow\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-preferred-profile", "name: cursor-preferred-profile\npreferred-profile: deep\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-model", "name: cursor-malformed-model\nmodel: 42\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-empty-model", "name: cursor-empty-model\nmodel:\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-long-model", `name: cursor-long-model\nmodel: gpt-${"x".repeat(253)}\nruntime: cursor-cloud`);
+  await writePersona(personas, "cursor-control-model", "name: cursor-control-model\nmodel: \"gpt-5.6-terra\u007f\"\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-thinking", "name: cursor-malformed-thinking\nthinking: 42\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-empty-thinking", "name: cursor-empty-thinking\nthinking:\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-invalid-thinking", "name: cursor-invalid-thinking\nthinking: extreme\nruntime: cursor-cloud");
+  await writePersona(personas, "pi-malformed-model", "name: pi-malformed-model\nmodel: 42");
+  await writePersona(personas, "pi-invalid-thinking", "name: pi-invalid-thinking\nthinking: extreme");
   await writePersona(personas, "cursor-unknown-key", "name: cursor-unknown-key\nruntime: cursor-cloud\nunknown-cursor-key: rejected");
   await writePersona(personas, "invalid-mcps", "name: invalid-mcps\nruntime: cursor-cloud\ncursor-mcps: datadog");
   await writePersona(personas, "too-many-mcps", `name: too-many-mcps\nruntime: cursor-cloud\ncursor-mcps:\n${Array.from({ length: 9 }, (_, index) => `  - mcp-${index + 1}`).join("\n")}`);
@@ -59,7 +67,7 @@ cursor-repos:
   await writePersona(personas, "too-many-repos", `name: too-many-repos\nruntime: cursor-cloud\ncursor-repos:\n${Array.from({ length: 21 }, (_, index) => `  - url: https://github.com/example/repo-${index + 1}`).join("\n")}`);
 
   const discovery = personasModule.loadSubagentPersonas(personas);
-  assert.deepEqual(discovery.personas.map(({ name }) => name), ["cursor-valid", "duplicate-heavy-mcps", "duplicate-heavy-repos", "pi-default", "pi-permissive"]);
+  assert.deepEqual(discovery.personas.map(({ name }) => name), ["cursor-default", "cursor-valid", "duplicate-heavy-mcps", "duplicate-heavy-repos", "pi-default", "pi-permissive"]);
   assert.deepEqual(discovery.personas.find(({ name }) => name === "pi-default"), {
     name: "pi-default",
     description: "Existing Pi persona",
@@ -70,6 +78,17 @@ cursor-repos:
     filePath: join(personas, "pi-default.md"),
   });
   assert.equal(discovery.personas.find(({ name }) => name === "pi-permissive")?.description, "Run the pi-permissive subagent persona");
+  const cursorDefault = discovery.personas.find(({ name }) => name === "cursor-default");
+  assert.equal(Object.hasOwn(cursorDefault, "model"), false);
+  assert.equal(Object.hasOwn(cursorDefault, "thinking"), false);
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(cursorDefault), {
+    model: "gpt-5.6-terra",
+    thinking: "xhigh",
+  });
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(discovery.personas.find(({ name }) => name === "pi-default")), {
+    model: "openai-codex/gpt-5.6-terra",
+    thinking: "xhigh",
+  });
   assert.deepEqual(discovery.personas.find(({ name }) => name === "duplicate-heavy-mcps")?.cursorMcps, ["datadog"]);
   assert.deepEqual(discovery.personas.find(({ name }) => name === "duplicate-heavy-repos")?.cursorRepos, [
     { url: "https://github.com/example/repeated", startingRef: "main" },
@@ -79,7 +98,8 @@ cursor-repos:
     description: "Inspect Cloud evidence",
     systemPrompt: "Inspect the requested scope.",
     runtime: "cursor-cloud",
-    preferredProfile: "deep",
+    model: "gpt-5.6-terra",
+    thinking: "xhigh",
     extensions: [],
     skills: [],
     cursorMcps: ["datadog", "sentry"],
@@ -90,6 +110,14 @@ cursor-repos:
     filePath: join(personas, "cursor-valid.md"),
   });
   assert.ok(discovery.diagnostics.filter((diagnostic) => diagnostic.includes("cursor-repos[0].url")).length >= 3);
+  for (const [persona, field] of [
+    ["cursor-malformed-model", "model must be a non-empty string"],
+    ["cursor-invalid-thinking", "invalid thinking \"extreme\""],
+    ["pi-malformed-model", "model must be a non-empty string"],
+    ["pi-invalid-thinking", "invalid thinking \"extreme\""],
+  ]) {
+    assert.ok(discovery.diagnostics.some((diagnostic) => diagnostic.includes(persona) && diagnostic.includes(field)), persona);
+  }
   for (const field of [
     "cursor-mcps is only valid for runtime cursor-cloud",
     "extensions is not valid for runtime cursor-cloud",
@@ -98,10 +126,11 @@ cursor-repos:
     "description must be a non-empty string",
     "context-requirements must be a non-empty string",
     "preferred-lifetime is not valid in a persona; select lifetime when you create the subagent",
-    "preferred-profile must be a non-empty string",
-    "invalid preferred-profile \"slow\"; use fast, balanced, or deep",
-    "model is not valid in a persona; use a creation profile",
-    "thinking is not valid in a persona; use a creation profile",
+    "preferred-profile is not valid in a persona; replace it with model and thinking defaults",
+    "model must be a non-empty string",
+    "model must contain at most 256 characters and no control characters",
+    "thinking must be a non-empty string",
+    "invalid thinking \"extreme\"; use off, minimal, low, medium, high, xhigh, or max",
     "unknown-cursor-key is not valid for runtime cursor-cloud",
     "cursor-mcps must be a list of names",
     "cursor-mcps exceeds 8 names",
@@ -114,13 +143,52 @@ cursor-repos:
   }
 });
 
+test("Pi persona model and thinking defaults apply only when a process starts", () => {
+  const persona = {
+    name: "scout",
+    description: "Inspect local code",
+    systemPrompt: "Inspect the requested scope.",
+    runtime: "pi",
+    model: "openai-codex/gpt-5.6-luna",
+    thinking: "high",
+    extensions: [],
+    skills: [],
+    filePath: "/personas/scout.md",
+  };
+
+  const created = personasModule.buildSubagentProcessArgs({ mode: "fresh", persona });
+  const createdModelIndex = created.indexOf("--model");
+  const createdThinkingIndex = created.indexOf("--thinking");
+  assert.deepEqual(created.slice(createdModelIndex, createdModelIndex + 2), ["--model", "openai-codex/gpt-5.6-luna"]);
+  assert.deepEqual(created.slice(createdThinkingIndex, createdThinkingIndex + 2), ["--thinking", "high"]);
+
+  const explicit = personasModule.buildSubagentProcessArgs({
+    mode: "fresh",
+    persona,
+    model: "openai-codex/gpt-5.6-terra",
+    thinking: "xhigh",
+  });
+  assert.deepEqual(explicit.slice(explicit.indexOf("--model"), explicit.indexOf("--model") + 2), ["--model", "openai-codex/gpt-5.6-terra"]);
+  assert.deepEqual(explicit.slice(explicit.indexOf("--thinking"), explicit.indexOf("--thinking") + 2), ["--thinking", "xhigh"]);
+
+  const restored = personasModule.buildSubagentProcessArgs({
+    mode: "fresh",
+    sessionFile: "/sessions/scout.jsonl",
+    persona,
+    model: "openai-codex/gpt-5.6-terra",
+    thinking: "xhigh",
+  });
+  assert.equal(restored.includes("--model"), false);
+  assert.equal(restored.includes("--thinking"), false);
+});
+
 test("runtime-aware tool metadata keeps prompt-less Cursor creation local without authentication", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-cursor-tool-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const personas = join(root, "personas");
   await mkdir(personas);
   await writePersona(personas, "pi-scout", "name: pi-scout\ndescription: Inspect local code");
-  await writePersona(personas, "cursor-scout", "name: cursor-scout\ndescription: Inspect Cloud evidence\nruntime: cursor-cloud\npreferred-profile: fast\ncursor-mcps:\n  - datadog\n  - sentry\n  - logs");
+  await writePersona(personas, "cursor-scout", "name: cursor-scout\ndescription: Inspect Cloud evidence\nruntime: cursor-cloud\nmodel: gpt-5.6-luna\nthinking: high\ncursor-mcps:\n  - datadog\n  - sentry\n  - logs");
 
   const tools = new Map();
   const events = new Map();
@@ -163,14 +231,40 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
     name: "cursor-scout",
     description: "Inspect Cloud evidence",
     runtime: "cursor-cloud",
-    preferredProfile: "fast",
   });
-  assert.match(personaList.content[0].text, /cursor-scout \[cursor-cloud\].*prefers fast profile/);
+  assert.doesNotMatch(personaList.content[0].text, /model|thinking|prefers/i);
   assert.doesNotMatch(personaList.content[0].text, /MCP|datadog|sentry|logs/i);
 
-  assert.equal(subagentsModule.resolveSubagentCreationProfile(undefined, undefined), "balanced");
-  assert.equal(subagentsModule.resolveSubagentCreationProfile(cursorPersona, undefined), "fast");
-  assert.equal(subagentsModule.resolveSubagentCreationProfile(cursorPersona, "deep"), "deep");
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(undefined), {
+    model: "openai-codex/gpt-5.6-terra",
+    thinking: "xhigh",
+  });
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(undefined, "cursor-cloud"), {
+    model: "gpt-5.6-terra",
+    thinking: "xhigh",
+  });
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings({
+    runtime: "pi",
+    model: "openai-codex/gpt-5.6-luna",
+  }), {
+    model: "openai-codex/gpt-5.6-luna",
+    thinking: "xhigh",
+  });
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings({
+    runtime: "cursor-cloud",
+    thinking: "high",
+  }), {
+    model: "gpt-5.6-terra",
+    thinking: "high",
+  });
+  assert.deepEqual(subagentsModule.resolveSubagentCreationSettings({
+    runtime: "cursor-cloud",
+    model: "gpt-5.6-luna",
+    thinking: "high",
+  }), {
+    model: "gpt-5.6-luna",
+    thinking: "high",
+  });
 
   const invalidInputs = [
     ["persona-less-default-pi", { action: "create", purpose: "Inspect local evidence" }, /Persona-less Pi create is not valid.*worker/i],

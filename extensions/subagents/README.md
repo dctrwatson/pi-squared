@@ -9,7 +9,21 @@ The extension supports macOS and Linux. It has two runtimes:
 | `pi` | Runs an isolated Pi RPC process. The process shares the local worktree, host authority, and Pi tool configuration. |
 | `cursor-cloud` | Runs a remote Cursor Cloud agent through `@cursor/sdk`. The agent inspects a pushed repository commit and configured Cloud MCPs. It does not use local Cursor ACP. |
 
-Pi is the default runtime. Model-tool Pi creation requires an explicit persona. Use `worker` for general execution work. Persona-less model-tool creation requires an explicit `cursor-cloud` runtime. A persona selects its runtime. An explicit model-tool `runtime` must match the persona runtime.
+Pi is the default runtime. Model-tool Pi creation requires an explicit persona. Persona-less model-tool creation requires an explicit `cursor-cloud` runtime. A persona selects its runtime. An explicit model-tool `runtime` must match the persona runtime.
+
+## Persona selection
+
+Select a persona by the requested output and limits, not by tool use. Select `worker` only for explicitly assigned changes or state-changing workflows with ownership. For all other requests, use `reviewer`, `test-analyst`, or `doc-auditor` when its output fits; otherwise use `explorer` for investigation or advice. If the request is unclear, use `explorer` to investigate without changes.
+
+| Requested output | Persona | Critical limits |
+| --- | --- | --- |
+| Explanations, diagnoses, options, or advice when no specialist output fits | `explorer` | Do not apply changes. |
+| Actionable implementation defects only | `reviewer` | No fixes, edits, or test execution. |
+| Testability and coverage assessment, focused test recommendations, or focused test outcomes | `test-analyst` | May run focused tests; no edits. |
+| Documentation defects for implemented behavior | `doc-auditor` | No future designs, rewriting, or edits. |
+| Applied explicitly assigned implementation changes or a state-changing workflow | `worker` | Explicit ownership; preserve concurrent work; validate the work. |
+
+For example, “Find the cause and recommend a fix” uses `explorer`. “Implement the fix in the assigned files” uses `worker`.
 
 ## Commands
 
@@ -51,7 +65,6 @@ subagent({
   action: "create",
   mode: "fresh",
   persona: "worker",
-  profile: "balanced",
   name: "create-pr",
   purpose: "Create the requested pull request",
   skills: ["create-pr", "writing-style"],
@@ -68,16 +81,15 @@ subagent({
 subagent({ action: "list" })
 subagent({ action: "prompt", id: "incident-investigator", prompt: "Check the latest error pattern." })
 subagent({ action: "status", id: "incident-investigator" })
-subagent({ action: "stop", id: "incident-investigator" })
 ```
 
 Use `subagent({ action: "list", kind: "personas" })` to find up to 20 persona templates. The result includes each persona runtime. If more personas exist, use the returned `offset`. `limit` selects 1 through 50 entries. A persona name must match exactly.
 
-A model-tool `create` defaults to a `task` lifetime. Pi creation requires a persona. Use `worker` for general implementation or production work when no specialist fits. Persona-less creation is available only with an explicit `cursor-cloud` runtime and purpose. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
+A model-tool `create` defaults to a `task` lifetime. Pi creation requires a persona. Persona-less creation is available only with an explicit `cursor-cloud` runtime and purpose. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
 
 Selected Pi skills add to persona skills. The extension rejects a selected skill with the same name as a different persona skill. Each skill name must match a skill that Pi discovered in the parent session. The model tool accepts skill names, not paths.
 
-`mode` is `fresh` by default. A fresh subagent can receive concise `context`. `context` is not a standalone input. A model-tool call that includes `context` must include a non-empty `prompt` in the same call. To create a dormant task or persistent subagent, omit both fields.
+Reuse a retained subagent with `prompt` before you consider creating another. For a new subagent, `mode` is `fresh` by default. This default does not mean that related work needs a new instance. A fresh subagent can receive concise `context`. `context` is not a standalone input. A model-tool call that includes `context` must include a non-empty `prompt` in the same call. To create a dormant task or persistent subagent, omit both fields.
 
 - A Pi fork starts from a parent-session branch.
 - A Cursor Cloud fork sends a bounded, sanitized summary of the effective parent branch.
@@ -86,7 +98,7 @@ Selected Pi skills add to persona skills. The extension rejects a selected skill
 
 A Pi model-tool fork can fall back to fresh context when the parent session is ephemeral. The tool reports that fallback. A Cursor fork summary failure returns an error. It does not change the request to fresh mode.
 
-Give each subagent an exact objective, scope, and requested output. For a worker, also give acceptance criteria, explicit file or responsibility ownership, concurrent-work constraints, and required validation. Use `list` and `status` before you create a new instance. Model-facing creation rejects an exact active purpose match in the same runtime. It directs the parent to the retained instance. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
+Give each subagent an exact objective, scope, and requested output. For a worker, also give acceptance criteria, explicit file or responsibility ownership, concurrent-work constraints, and required validation. Check retained subagents before you create a new instance. Use `list` or `status` when their scope or state is unknown. Reuse relevant context even when the new request uses different words. Model-facing creation rejects an exact active purpose match in the same runtime. It does not detect all related work. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
 
 A parent `create` with an initial prompt and a parent `prompt` wait for the subagent result. A human can steer or continue Pi work from the subagent panel. A human can continue Cursor work after settlement.
 
@@ -94,9 +106,9 @@ Subagent conversation stays private from the parent model context. `app.message.
 
 - Delegate substantive isolated work. Keep only coordination and necessary integration in the parent context.
 - Inspect only enough to partition work by shared context and specialty.
-- Reuse subagents for related work. Avoid duplicate investigation.
+- Reuse subagents for related work across parent turns. Send new evidence, decisions, and constraints with follow-up prompts instead of repeating discovery.
 - Parallelize only separate contexts or specialties. Give concurrent workers non-overlapping ownership.
-- Prefer fresh context when a concise handoff is sufficient.
+- For a new subagent, prefer fresh context when a concise handoff is sufficient. Fork only when parent history matters.
 
 ## Context requirements and forks
 
@@ -111,22 +123,30 @@ The model-tool `context` field is limited to 8,000 characters. The Cursor runtim
 A model-tool create defaults to `task`. An explicit `lifetime` overrides this default. Human `/subagent` sessions are always `persistent`.
 
 - `one-shot` is for bounded independent work when continuity cannot help. A model-tool one-shot requires an explicit lifetime and an initial prompt. A Pi one-shot stops after success, cancellation, or failure. A Cursor one-shot archives only after result delivery.
-- `task` retains context for follow-up and validation.
+- `task` retains context for follow-up, integration, and validation across parent turns.
 - `persistent` retains context for related work until you stop it.
 
 A blocked, truncated, incomplete, or response-less one-shot becomes a task. A Cursor one-shot that completes while Pi is offline also becomes a task until delivery. Prompting a dormant task or persistent instance starts it lazily.
 
-One parent session can retain up to 20 non-stopped subagents. At most four subagents can work concurrently. Dormant and idle subagents do not use concurrent work slots. A new prompt fails when four other subagents are working. Stopping an instance frees retained capacity. The registry also keeps metadata for the 20 most recently stopped instances.
+One parent session can retain up to 20 non-stopped subagents. At most four subagents can work concurrently. Dormant and idle subagents do not use concurrent work slots. Active or unresolved remote runs can occupy these slots. A new prompt fails when four other subagents occupy the slots. Wait for active work to finish or resolve uncertain remote state; do not stop an idle subagent to free a concurrent work slot.
 
-The bundled personas use these profile defaults:
+### When to stop
 
-| Persona | Profile |
-| --- | --- |
-| `explorer` | `fast` |
-| `reviewer` | `balanced` |
-| `test-analyst` | `balanced` |
-| `worker` | `balanced` |
-| `doc-auditor` | `fast` |
+A returned result or the end of a parent turn is not a reason to stop a task or persistent subagent. Keep useful context for follow-up questions, integration changes, validation failures, and related collaboration. Reuse the same instance with `prompt`.
+
+Stop only when the user requests it, the context is no longer useful, or the retained limit requires space. At that limit, first reuse a relevant instance. If none fits, select an idle, unrelated instance whose context is no longer needed. Do not discard useful context just to create a new instance.
+
+`stop` is terminal for that instance. It cannot receive another prompt. A stopped Pi session file remains on disk, but the model tool cannot resume the stopped instance. The registry keeps metadata for the 20 most recently stopped instances; this metadata is not reusable conversation context.
+
+The bundled personas use these initial settings:
+
+| Persona | Pi model | Thinking |
+| --- | --- | --- |
+| `explorer` | `openai-codex/gpt-5.6-luna` | `high` |
+| `reviewer` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
+| `test-analyst` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
+| `worker` | `openai-codex/gpt-5.6-terra` | `xhigh` |
+| `doc-auditor` | `fireworks/accounts/fireworks/models/glm-5p3-flash` | `high` |
 
 ## Blocked subagents
 
@@ -143,27 +163,19 @@ A blocked instance has status `blocked`. `list` and `status` include its reason 
 
 Supply the missing context or capability. Then prompt the same task again. A blocked one-shot remains available as a task.
 
-## Execution profiles and settings
+## Initial model and thinking settings
 
-A creation profile selects the initial model and thinking target:
+A persona can set optional `model` and `thinking` defaults. The extension uses them only when it creates a fresh or forked subagent.
 
-| Profile | Target model | Target thinking | Cursor context | Cursor speed |
-| --- | --- | --- | --- | --- |
-| `fast` | GPT-5.6 Luna | `high` | `272k` | Standard |
-| `balanced` | GPT-5.6 Terra | `xhigh` | `272k` | Standard |
-| `deep` | GPT-5.6 Sol | `xhigh` | `272k` | Standard |
+Pi model IDs include the provider, for example `openai-codex/gpt-5.6-terra`. Cursor Cloud accepts an exact account-catalog ID, name, or alias without a provider prefix, for example `gpt-5.6-terra`. `thinking` must be one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
-For Pi, a profile selects the configured Pi model and thinking level. For Cursor Cloud, the extension resolves the complete standard-speed (`fast=false`) variant through the account model catalog. It accepts a model catalog that exposes only the target thinking parameter. It refreshes the catalog once after a miss. It returns an error when no exact model and supported parameter set exist. It does not substitute another model.
+When a persona omits these fields, Pi uses `openai-codex/gpt-5.6-terra` with `xhigh`; Cursor Cloud uses `gpt-5.6-terra` with `xhigh`. A human persona-less `/subagent` keeps the parent Pi session model and thinking settings.
 
-Personas do not select models or thinking values. They can select a preferred profile. An explicit model-tool profile overrides this preference. A create with neither value uses `balanced`. Exact Cursor model IDs and thinking parameters depend on the account catalog.
+For Cursor Cloud, the extension resolves the selected model and thinking value through the account catalog. For GPT-5.6 Luna, Terra, and Sol, it prefers a catalog-supported standard-speed `272k` context variant with `fast=false`. Other models use their catalog-supported thinking parameters or variants. The extension refreshes the catalog once after a miss. It returns an error when the exact model ID, name, or alias, or the supported thinking value, is unavailable. It does not substitute another model.
 
-The `profile` input is valid only for creation.
+A restored Pi session keeps its selected model and thinking settings. The extension does not pass persona defaults or initial runtime settings when it restores the session. The Pi panel can change a model or thinking setting only while Pi is idle. The change applies to the Pi session.
 
-The Pi panel can change a model or thinking setting only while Pi is idle. The change applies to the Pi session.
-
-The Cursor panel can change a model or thinking setting only while Cursor is idle. Cursor saves the setting for the next run. It cannot change an active run.
-
-Cursor thinking controls appear only when the selected model has at least two usable thinking choices. Cursor mode selection is unavailable. Every Cursor initial prompt and follow-up uses Plan mode.
+The Cursor panel can change a model or thinking setting only while Cursor is idle. Cursor saves the setting for the next run. It cannot change an active run. Cursor thinking controls appear only when the selected model has at least two usable thinking choices. Cursor mode selection is unavailable. Every Cursor initial prompt and follow-up uses Plan mode.
 
 ## Personas
 
@@ -178,7 +190,8 @@ description: Explore product requirements and tradeoffs
 runtime: pi
 context-requirements: >
   Provide the desired outcome, users, constraints, and relevant product scope.
-preferred-profile: balanced
+model: openai-codex/gpt-5.6-terra
+thinking: xhigh
 extensions:
   - ../extensions/product-context.ts
 skills:
@@ -196,6 +209,8 @@ name: incident-investigator
 description: Investigate production incidents
 runtime: cursor-cloud
 context-requirements: Provide the incident impact, time range, and affected service.
+model: gpt-5.6-terra
+thinking: xhigh
 cursor-mcps:
   - datadog
   - sentry
@@ -215,9 +230,10 @@ Both runtimes support these fields:
 - `description`: Persona list description. The extension normalizes it to one line and limits it to 240 characters.
 - `runtime`: `pi` is the default. Use `cursor-cloud` for a Cursor Cloud persona.
 - `context-requirements`: Optional first-parent-prompt contract. The extension normalizes it to one line and limits it to 240 characters.
-- `preferred-profile`: Optional `fast`, `balanced`, or `deep` default. An explicit model-tool profile overrides it.
+- `model`: Optional initial model value for the persona runtime. It must be a nonempty string of at most 256 characters with no control characters. Use a Pi provider-qualified ID or an exact Cursor Cloud catalog ID, name, or alias.
+- `thinking`: Optional initial thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
-Persona frontmatter rejects `preferred-lifetime`, `model`, and `thinking`. Select lifetime when you create a model subagent. Use the model-tool `profile` input for initial model selection.
+New persona frontmatter rejects `preferred-lifetime` and `preferred-profile`. Replace a former `preferred-profile` field with `model` and `thinking` defaults. Saved legacy profile fields are read only for old-session compatibility. They are not exposed as choices. The registry keeps this parser for inactive-branch entries instead of rewriting session history. Select lifetime when you create a model subagent.
 
 Pi-only fields are:
 

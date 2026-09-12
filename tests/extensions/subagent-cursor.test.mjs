@@ -264,7 +264,7 @@ test("connected repository lookup is cached and URL-only", async () => {
   assert.equal(calls, 1);
 });
 
-test("Cursor catalog resolves exact Luna, Terra, and Sol targets with catalog parameters", async () => {
+test("Cursor catalog resolves direct defaults and exact catalog model identities", async () => {
   let calls = 0;
   const catalog = new modelsModule.CursorModelCatalog({
     async listModels() {
@@ -273,6 +273,7 @@ test("Cursor catalog resolves exact Luna, Terra, and Sol targets with catalog pa
         {
           id: "catalog-luna",
           displayName: "GPT-5.6 Luna",
+          aliases: ["luna-alias"],
           parameters: [{ id: "reasoning_effort", displayName: "Thinking", values: [{ value: "high" }, { value: "xhigh" }] }],
         },
         {
@@ -288,17 +289,25 @@ test("Cursor catalog resolves exact Luna, Terra, and Sol targets with catalog pa
       ];
     },
   });
-  assert.deepEqual((await catalog.resolveProfile("fast")).selection, {
+  assert.equal(modelsModule.DEFAULT_CURSOR_MODEL, "gpt-5.6-terra");
+  assert.equal(modelsModule.DEFAULT_CURSOR_THINKING, "xhigh");
+  assert.deepEqual((await catalog.resolveCreation()).selection, {
+    id: "catalog-terra", parameters: [{ id: "reasoning_effort", value: "xhigh" }],
+  });
+  assert.deepEqual((await catalog.resolveCreation("catalog-luna")).selection, {
+    id: "catalog-luna", parameters: [{ id: "reasoning_effort", value: "xhigh" }],
+  });
+  assert.deepEqual((await catalog.resolveCreation(undefined, "high")).selection, {
+    id: "catalog-terra", parameters: [{ id: "reasoning_effort", value: "high" }],
+  });
+  assert.deepEqual((await catalog.resolveCreation("catalog-luna", "high")).selection, {
     id: "catalog-luna", parameters: [{ id: "reasoning_effort", value: "high" }],
   });
-  assert.deepEqual((await catalog.resolveProfile("balanced")).selection, {
-    id: "catalog-terra", parameters: [{ id: "reasoning_effort", value: "xhigh" }],
-  });
-  assert.deepEqual((await catalog.resolveProfile("deep")).selection, {
+  assert.deepEqual((await catalog.resolveCreation("GPT-5.6 Sol", "xhigh")).selection, {
     id: "catalog-sol", parameters: [{ id: "reasoning_effort", value: "xhigh" }],
   });
-  assert.deepEqual((await catalog.resolveCreation(undefined)).selection, {
-    id: "catalog-terra", parameters: [{ id: "reasoning_effort", value: "xhigh" }],
+  assert.deepEqual((await catalog.resolveCreation("luna-alias", "high")).selection, {
+    id: "catalog-luna", parameters: [{ id: "reasoning_effort", value: "high" }],
   });
   assert.equal(calls, 1);
   assert.deepEqual(await catalog.panelModels(), [
@@ -308,7 +317,29 @@ test("Cursor catalog resolves exact Luna, Terra, and Sol targets with catalog pa
   ]);
 });
 
-test("Cursor profiles select complete standard-speed catalog variants", async () => {
+test("Cursor creation uses exact arbitrary catalog identities and rejects unsupported thinking", async () => {
+  const catalog = new modelsModule.CursorModelCatalog({
+    async listModels() {
+      return [{
+        id: "catalog-ember",
+        displayName: "Ember Reasoner",
+        aliases: ["ember"],
+        parameters: [{ id: "reasoning_effort", displayName: "Thinking", values: [{ value: "medium" }, { value: "high" }] }],
+      }];
+    },
+  });
+  for (const requested of ["catalog-ember", "Ember Reasoner", "ember"]) {
+    assert.deepEqual((await catalog.resolveCreation(requested, "high")).selection, {
+      id: "catalog-ember", parameters: [{ id: "reasoning_effort", value: "high" }],
+    });
+  }
+  await assert.rejects(catalog.resolveCreation("catalog-ember", "xhigh"), (error) => {
+    assert.equal(error.code, "MODEL_UNAVAILABLE");
+    return true;
+  });
+});
+
+test("Cursor creation selects complete standard-speed catalog variants", async () => {
   const variant = (reasoning, context = "272k", fast = "false") => ({
     displayName: `${context}-${reasoning}-${fast}`,
     params: [
@@ -338,19 +369,19 @@ test("Cursor profiles select complete standard-speed catalog variants", async ()
       ];
     },
   });
-  assert.deepEqual((await catalog.resolveProfile("fast")).selection, {
+  assert.deepEqual((await catalog.resolveCreation("gpt-5.6-luna", "high")).selection, {
     id: "gpt-5.6-luna",
     parameters: variant("high").params,
   });
-  assert.deepEqual((await catalog.resolveProfile("balanced")).selection, {
+  assert.deepEqual((await catalog.resolveCreation("gpt-5.6-terra", "high")).selection, {
     id: "gpt-5.6-terra",
-    parameters: variant("xhigh").params,
+    parameters: variant("high").params,
   });
-  assert.deepEqual((await catalog.resolveProfile("deep")).selection, {
+  assert.deepEqual((await catalog.resolveCreation("gpt-5.6-sol", "xhigh")).selection, {
     id: "gpt-5.6-sol",
     parameters: variant("xhigh").params,
   });
-  assert.deepEqual((await catalog.resolveCreation(undefined)).selection, {
+  assert.deepEqual((await catalog.resolveCreation()).selection, {
     id: "gpt-5.6-terra",
     parameters: variant("xhigh").params,
   });
@@ -418,7 +449,7 @@ test("Cursor variants provide canonical thinking selections when definitions are
   });
 });
 
-test("model lookup refreshes once and never substitutes an unavailable target", async () => {
+test("direct model lookup refreshes once and never substitutes an unavailable model or thinking level", async () => {
   let calls = 0;
   const catalog = new modelsModule.CursorModelCatalog({
     async listModels() {
@@ -430,15 +461,36 @@ test("model lookup refreshes once and never substitutes an unavailable target", 
       }];
     },
   });
-  assert.equal((await catalog.resolveProfile("balanced")).selection.id, "catalog-terra");
+  assert.equal((await catalog.resolveCreation()).selection.id, "catalog-terra");
   assert.equal(calls, 2);
-  await assert.rejects(catalog.resolveProfile("fast"), (error) => {
+  await assert.rejects(catalog.resolveCreation("gpt-5.6-luna", "high"), (error) => {
     assert.equal(error.code, "MODEL_UNAVAILABLE");
-    assert.match(error.message, /GPT-5.6 Luna/);
+    assert.match(error.message, /gpt-5.6-luna/);
     assert.match(error.message, /GPT-5.6 Terra/);
     return true;
   });
   assert.equal(calls, 3);
+  await assert.rejects(catalog.resolveCreation("gpt-5.6-terra", "high"), (error) => {
+    assert.equal(error.code, "MODEL_UNAVAILABLE");
+    return true;
+  });
+  assert.equal(calls, 4);
+});
+
+test("Cursor creation falls back to a catalog variant with only the requested thinking", async () => {
+  const catalog = new modelsModule.CursorModelCatalog({
+    async listModels() {
+      return [{
+        id: "catalog-terra",
+        displayName: "GPT-5.6 Terra",
+        variants: [{ params: [{ id: "reasoning", value: "xhigh" }] }],
+      }];
+    },
+  });
+  assert.deepEqual((await catalog.resolveCreation()).selection, {
+    id: "catalog-terra",
+    parameters: [{ id: "reasoning", value: "xhigh" }],
+  });
 });
 
 function userEntry(id, textOrBlocks) {

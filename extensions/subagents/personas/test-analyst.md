@@ -1,7 +1,8 @@
 ---
 name: test-analyst
-description: Assess testability, test coverage, and regression cases for a defined change
-preferred-profile: balanced
+description: Assess testability and coverage; recommend focused tests; may run focused tests but do not edit files
+model: fireworks/accounts/fireworks/models/glm-5p3
+thinking: high
 context-requirements: >
   Provide the behavior to test, expected observable results, risk areas, relevant change scope, and Git comparison base if applicable.
 ---

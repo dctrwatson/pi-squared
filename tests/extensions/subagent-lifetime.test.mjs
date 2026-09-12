@@ -23,7 +23,9 @@ function fakeLifetimeBackendFactory(log, responseFor) {
   return (options) => {
     const runtime = options.cursor ? "cursor-cloud" : "pi";
     let runNumber = 0;
+    const prompts = [];
     const completions = new Map();
+    log.push(`${runtime}:create`);
     return {
       runtime,
       displayName: runtime === "pi" ? "Fake Pi" : "Fake Cursor",
@@ -33,7 +35,8 @@ function fakeLifetimeBackendFactory(log, responseFor) {
       getDiagnostics() { return ""; },
       async prompt(prompt) {
         const run = { id: `run-${runtime}-${++runNumber}`, runtime };
-        const response = responseFor(prompt);
+        prompts.push(prompt);
+        const response = responseFor(prompt, [...prompts]);
         const text = typeof response === "string" ? response : response.text;
         const stopReason = typeof response === "string" ? "stop" : response.stopReason;
         if (options.cursor) {
@@ -167,6 +170,57 @@ async function endToolResult(events, result, context) {
     toolResults: [toolResultMessage(result)],
   }, context);
 }
+
+test("task and persistent subagents keep the same context across results and parent turns", async (t) => {
+  for (const runtime of ["pi", "cursor-cloud"]) {
+    for (const lifetime of ["task", "persistent"]) {
+      await t.test(`${runtime} ${lifetime}`, async (t) => {
+        const log = [];
+        const { tool, context, events } = await createTool(t, runtime, log,
+          (_prompt, history) => history.join(" -> "),
+        );
+        const created = await tool.execute("initial-findings", {
+          action: "create",
+          runtime,
+          ...(runtime === "pi" ? { persona: "worker" } : {}),
+          ...(lifetime === "persistent" ? { lifetime } : {}),
+          name: "retained-context",
+          purpose: "Retain discovery through integration and validation",
+          prompt: "initial findings",
+        }, undefined, undefined, context);
+        const id = created.details.subagent.id;
+        assert.equal(created.details.subagent.lifetime, lifetime);
+        await endToolResult(events, created, context);
+
+        const listed = await tool.execute("list-retained", { action: "list" }, undefined, undefined, context);
+        assert.match(listed.content[0].text, /retained-context \[(?:pi|cursor-cloud), idle,/);
+        let history = "initial findings";
+        for (const prompt of ["integration question", "validation results"]) {
+          const followUp = await tool.execute(prompt, {
+            action: "prompt", id, prompt,
+          }, undefined, undefined, context);
+          history += ` -> ${prompt}`;
+          assert.equal(followUp.details.subagent.id, id);
+          assert.equal(followUp.details.subagent.status, "idle");
+          assert.ok(followUp.content[0].text.includes(history), "follow-up retains earlier discovery");
+          await endToolResult(events, followUp, context);
+        }
+        assert.equal(log.filter((entry) => entry === `${runtime}:create`).length, 1);
+        assert.equal(log.includes(`${runtime}:stop`), false);
+        assert.equal(log.includes(`${runtime}:archive`), false);
+
+        const stopped = await tool.execute("explicit-stop", { action: "stop", id }, undefined, undefined, context);
+        assert.equal(stopped.details.subagent.status, "stopped");
+        const afterStop = await tool.execute("after-stop", {
+          action: "prompt", id, prompt: "another question",
+        }, undefined, undefined, context);
+        assert.equal(afterStop.details.ok, false);
+        assert.match(afterStop.details.error.message, /has been stopped/);
+        await events.get("session_shutdown")({}, context);
+      });
+    }
+  }
+});
 
 test("shared lifetime contract keeps Pi and Cursor results, promotions, and follow-ups aligned", async (t) => {
   for (const runtime of ["pi", "cursor-cloud"]) {

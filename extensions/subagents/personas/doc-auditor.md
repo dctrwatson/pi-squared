@@ -1,7 +1,8 @@
 ---
 name: doc-auditor
-description: Audit repository and code documentation for accuracy and completeness
-preferred-profile: fast
+description: Report documentation defects for implemented behavior; exclude future designs and do not rewrite or edit files
+model: fireworks/accounts/fireworks/models/glm-5p3-flash
+thinking: high
 context-requirements: >
   Provide the objective, intended audience, repository documentation or code scope, and Git comparison scope/base if applicable.
 ---

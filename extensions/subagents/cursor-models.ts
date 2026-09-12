@@ -8,40 +8,15 @@ const MAX_MODEL_PARAMETERS = 16;
 const MAX_PARAMETER_VALUES = 32;
 const MAX_MODEL_TEXT_CHARS = 256;
 
-export const CURSOR_PROFILE_TARGETS = {
-    fast: {
-        target: "GPT-5.6 Luna",
-        ids: ["gpt-5.6-luna"],
-        thinking: "high",
-        parameters: [
-            { id: "context", value: "272k" },
-            { id: "reasoning", value: "high" },
-            { id: "fast", value: "false" },
-        ],
-    },
-    balanced: {
-        target: "GPT-5.6 Terra",
-        ids: ["gpt-5.6-terra"],
-        thinking: "xhigh",
-        parameters: [
-            { id: "context", value: "272k" },
-            { id: "reasoning", value: "xhigh" },
-            { id: "fast", value: "false" },
-        ],
-    },
-    deep: {
-        target: "GPT-5.6 Sol",
-        ids: ["gpt-5.6-sol"],
-        thinking: "xhigh",
-        parameters: [
-            { id: "context", value: "272k" },
-            { id: "reasoning", value: "xhigh" },
-            { id: "fast", value: "false" },
-        ],
-    },
-} as const;
+export const DEFAULT_CURSOR_MODEL = "gpt-5.6-terra";
+export const DEFAULT_CURSOR_THINKING: SubagentThinkingLevel = "xhigh";
 
-export type CursorExecutionProfile = keyof typeof CURSOR_PROFILE_TARGETS;
+/** Known model identities retain their standard-speed canonical variants. */
+const CURSOR_COMPATIBILITY_TARGETS = [
+    { target: "GPT-5.6 Luna", ids: ["gpt-5.6-luna"] },
+    { target: "GPT-5.6 Terra", ids: ["gpt-5.6-terra"] },
+    { target: "GPT-5.6 Sol", ids: ["gpt-5.6-sol"] },
+] as const;
 
 export interface CursorCatalogParameterValue {
     readonly value: string;
@@ -211,6 +186,23 @@ function targetMatches(model: CursorCatalogModel, targets: readonly string[]): b
     return targets.some((target) => modelNames.includes(exactKey(target)));
 }
 
+function compatibilityTargetForName(requested: string): typeof CURSOR_COMPATIBILITY_TARGETS[number] | undefined {
+    return CURSOR_COMPATIBILITY_TARGETS.find((target) =>
+        [target.target, ...target.ids].some((identity) => exactKey(identity) === exactKey(requested)));
+}
+
+function compatibilityTargetForModel(model: CursorCatalogModel): typeof CURSOR_COMPATIBILITY_TARGETS[number] | undefined {
+    return CURSOR_COMPATIBILITY_TARGETS.find((target) => targetMatches(model, [target.target, ...target.ids]));
+}
+
+function standardSpeedParameters(thinking: SubagentThinkingLevel): readonly CursorModelParameterSelection[] {
+    return [
+        { id: "context", value: "272k" },
+        { id: "reasoning", value: thinking },
+        { id: "fast", value: "false" },
+    ];
+}
+
 function isThinkingParameter(id: string, name = id): boolean {
     return /(?:^|[-_\s])(thinking|reasoning)(?:$|[-_\s])|^(thinking|reasoning)/i.test(`${id} ${name}`);
 }
@@ -301,14 +293,21 @@ export class CursorModelCatalog {
         return this.catalogPromise;
     }
 
-    async resolveProfile(profile: CursorExecutionProfile): Promise<CursorResolvedModel> {
-        const target = CURSOR_PROFILE_TARGETS[profile];
-        return this.resolveMappedTarget(target, target.thinking);
-    }
-
-    /** Apply the selected creation profile or the balanced default. */
-    async resolveCreation(profile: CursorExecutionProfile | undefined): Promise<CursorResolvedModel> {
-        return this.resolveProfile(profile ?? "balanced");
+    /** Resolve direct creation settings, with stable defaults for omitted values. */
+    async resolveCreation(
+        model?: string,
+        thinking?: SubagentThinkingLevel,
+    ): Promise<CursorResolvedModel> {
+        const requestedModel = model ?? DEFAULT_CURSOR_MODEL;
+        const requestedThinking = thinking ?? DEFAULT_CURSOR_THINKING;
+        const compatibilityTarget = compatibilityTargetForName(requestedModel);
+        return this.resolveTarget(
+            requestedModel,
+            compatibilityTarget ? [compatibilityTarget.target, ...compatibilityTarget.ids] : [],
+            requestedThinking,
+            undefined,
+            true,
+        );
     }
 
     /** Resolve a panel selection only when the catalog supports every parameter. */
@@ -328,27 +327,15 @@ export class CursorModelCatalog {
         return panelModelsFrom(await this.refresh());
     }
 
-    private resolveMappedTarget(
-        target: typeof CURSOR_PROFILE_TARGETS[CursorExecutionProfile],
-        thinking: SubagentThinkingLevel,
-    ): Promise<CursorResolvedModel> {
-        const parameters = target.parameters.map((parameter) =>
-            isThinkingParameter(parameter.id) ? { ...parameter, value: thinking } : parameter);
-        return this.resolveTarget(target.target, target.ids, thinking, parameters, true);
-    }
-
     private async resolveTarget(
         requested: string,
         alternateIds: readonly string[],
         thinking: SubagentThinkingLevel | undefined,
         requestedParameters?: readonly CursorModelParameterSelection[],
-        fallbackToThinking = false,
+        preferStandardSpeed = false,
     ): Promise<CursorResolvedModel> {
         const resolve = (models: readonly CursorCatalogModel[]): CursorResolvedModel | undefined =>
-            this.resolveFrom(models, requested, alternateIds, thinking, requestedParameters)
-            ?? (fallbackToThinking && requestedParameters
-                ? this.resolveFrom(models, requested, alternateIds, thinking, undefined)
-                : undefined);
+            this.resolveFrom(models, requested, alternateIds, thinking, requestedParameters, preferStandardSpeed);
         let models = await this.list();
         let resolved = resolve(models);
         if (!resolved) {
@@ -365,13 +352,14 @@ export class CursorModelCatalog {
         alternateIds: readonly string[],
         thinking: SubagentThinkingLevel | undefined,
         requestedParameters: readonly CursorModelParameterSelection[] | undefined,
+        preferStandardSpeed: boolean,
     ): CursorResolvedModel | undefined {
         const targets = [requested, ...alternateIds];
         const matches = models.filter((model) => targetMatches(model, targets));
         if (matches.length !== 1) return undefined;
         const model = matches[0]!;
         const parameters = requestedParameters === undefined
-            ? resolveThinking(model, thinking)
+            ? this.resolveCreationThinking(model, thinking, preferStandardSpeed)
             : this.validateParameters(model, requestedParameters);
         if (!parameters) return undefined;
         return {
@@ -380,6 +368,18 @@ export class CursorModelCatalog {
             selection: { id: model.id, parameters },
             resolvedAt: Date.now(),
         };
+    }
+
+    private resolveCreationThinking(
+        model: CursorCatalogModel,
+        thinking: SubagentThinkingLevel | undefined,
+        preferStandardSpeed: boolean,
+    ): readonly CursorModelParameterSelection[] | undefined {
+        if (!preferStandardSpeed || !thinking || !compatibilityTargetForModel(model)) {
+            return resolveThinking(model, thinking);
+        }
+        return this.validateParameters(model, standardSpeedParameters(thinking))
+            ?? resolveThinking(model, thinking);
     }
 
     private validateParameters(

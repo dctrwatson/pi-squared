@@ -28,7 +28,6 @@ import {
     CursorModelCatalog,
     persistableCursorModelSelection,
     type CursorCatalogParameterValue,
-    type CursorExecutionProfile,
     type CursorPanelModel,
 } from "./cursor-models.ts";
 import { buildCursorRepositoryList, detectCursorPrimaryRepository, type GitCommandPort } from "./cursor-repositories.ts";
@@ -1347,7 +1346,8 @@ export class CursorCloudBackend implements SubagentBackend {
     private async ensureModel(): Promise<void> {
         if (this.stored.currentModel) return;
         const resolved = await this.catalog.resolveCreation(
-            this.stored.requestedProfile as CursorExecutionProfile | undefined,
+            this.stored.requestedModel ?? this.stored.persona?.model,
+            this.stored.requestedThinking ?? this.stored.persona?.thinking,
         );
         this.stored.currentModel = storedModelSelection(persistableCursorModelSelection(resolved));
         this.persist();

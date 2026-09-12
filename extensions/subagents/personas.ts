@@ -10,8 +10,6 @@ export type { SubagentRuntime, SubagentThinkingLevel } from "./backend.ts";
 export type SubagentContextMode = "fresh" | "fork";
 export const SUBAGENT_LIFETIMES = ["one-shot", "task", "persistent"] as const;
 export type SubagentLifetime = typeof SUBAGENT_LIFETIMES[number];
-export const SUBAGENT_PROFILES = ["fast", "balanced", "deep"] as const;
-export type SubagentProfile = typeof SUBAGENT_PROFILES[number];
 export const SUBAGENT_COMMAND_HELP_TEXT = `Usage: /subagent [--fork] [prompt]
        /subagent:<persona> [--fork] [prompt]
 
@@ -43,7 +41,8 @@ export interface SubagentPersona {
     systemPrompt: string;
     runtime: SubagentRuntime;
     contextRequirements?: string;
-    preferredProfile?: SubagentProfile;
+    model?: string;
+    thinking?: SubagentThinkingLevel;
     extensions: string[];
     skills: string[];
     cursorMcps?: string[];
@@ -87,6 +86,9 @@ export const SUBAGENT_EXTENSION_PATHS = [
 ] as const;
 const MAX_CONTEXT_REQUIREMENTS_CHARS = 240;
 const MAX_PERSONA_DESCRIPTION_CHARS = 240;
+const MAX_PERSONA_MODEL_CHARS = 256;
+const CONTROL_CHARACTER_PATTERN = /[\p{Cc}]/u;
+const SUBAGENT_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly SubagentThinkingLevel[];
 export const MAX_CURSOR_PERSONA_MCPS = 8;
 export const MAX_CURSOR_PERSONA_MCP_ENTRIES = 64;
 export const MAX_CURSOR_PERSONA_MCP_NAME_CHARS = 64;
@@ -101,7 +103,8 @@ interface PersonaFrontmatter extends Record<string, unknown> {
     name?: unknown;
     description?: unknown;
     "context-requirements"?: unknown;
-    "preferred-profile"?: unknown;
+    model?: unknown;
+    thinking?: unknown;
     extension?: unknown;
     extensions?: unknown;
     skill?: unknown;
@@ -115,7 +118,8 @@ const CURSOR_PERSONA_TOP_LEVEL_FIELDS = new Set<string>([
     "name",
     "description",
     "context-requirements",
-    "preferred-profile",
+    "model",
+    "thinking",
     "extension",
     "extensions",
     "skill",
@@ -128,7 +132,6 @@ const CURSOR_PERSONA_SHARED_STRING_FIELDS = [
     "name",
     "description",
     "context-requirements",
-    "preferred-profile",
 ] as const;
 
 function stringValue(value: unknown): string | undefined {
@@ -152,6 +155,25 @@ function requiredFrontmatterString(value: unknown, field: string): string {
         throw new Error(`${field} must be a non-empty string`);
     }
     return value.trim();
+}
+
+function parsePersonaModel(value: unknown): string {
+    if (typeof value === "string" && CONTROL_CHARACTER_PATTERN.test(value)) {
+        throw new Error(`model must contain at most ${MAX_PERSONA_MODEL_CHARS} characters and no control characters`);
+    }
+    const model = requiredFrontmatterString(value, "model");
+    if (model.length > MAX_PERSONA_MODEL_CHARS) {
+        throw new Error(`model must contain at most ${MAX_PERSONA_MODEL_CHARS} characters and no control characters`);
+    }
+    return model;
+}
+
+function parsePersonaThinking(value: unknown): SubagentThinkingLevel {
+    const thinking = requiredFrontmatterString(value, "thinking");
+    if (!SUBAGENT_THINKING_LEVELS.includes(thinking as SubagentThinkingLevel)) {
+        throw new Error(`invalid thinking "${thinking}"; use off, minimal, low, medium, high, xhigh, or max`);
+    }
+    return thinking as SubagentThinkingLevel;
 }
 
 function hasFrontmatterField(frontmatter: PersonaFrontmatter, field: string): boolean {
@@ -314,11 +336,8 @@ function loadPersona(filePath: string): SubagentPersona {
         throw new Error(`invalid runtime "${runtimeValue}"; use pi or cursor-cloud`);
     }
     const runtime = runtimeValue as SubagentRuntime;
-    if (hasFrontmatterField(frontmatter, "model")) {
-        throw new Error("model is not valid in a persona; use a creation profile");
-    }
-    if (hasFrontmatterField(frontmatter, "thinking")) {
-        throw new Error("thinking is not valid in a persona; use a creation profile");
+    if (hasFrontmatterField(frontmatter, "preferred-profile")) {
+        throw new Error("preferred-profile is not valid in a persona; replace it with model and thinking defaults");
     }
     if (hasFrontmatterField(frontmatter, "preferred-lifetime")) {
         throw new Error("preferred-lifetime is not valid in a persona; select lifetime when you create the subagent");
@@ -337,12 +356,12 @@ function loadPersona(filePath: string): SubagentPersona {
     const contextRequirements = contextRequirementsValue
         ? normalizePersonaContextRequirements(contextRequirementsValue)
         : undefined;
-    const preferredProfileValue = frontmatter["preferred-profile"] === undefined
-        ? undefined
-        : requiredFrontmatterString(frontmatter["preferred-profile"], "preferred-profile");
-    if (preferredProfileValue && !SUBAGENT_PROFILES.includes(preferredProfileValue as SubagentProfile)) {
-        throw new Error(`invalid preferred-profile "${preferredProfileValue}"; use fast, balanced, or deep`);
-    }
+    const model = hasFrontmatterField(frontmatter, "model")
+        ? parsePersonaModel(frontmatter.model)
+        : undefined;
+    const thinking = hasFrontmatterField(frontmatter, "thinking")
+        ? parsePersonaThinking(frontmatter.thinking)
+        : undefined;
 
     const extensionValues = unique([
         ...stringList(frontmatter.extension),
@@ -373,7 +392,8 @@ function loadPersona(filePath: string): SubagentPersona {
         systemPrompt: body.trim(),
         runtime,
         ...(contextRequirements ? { contextRequirements } : {}),
-        ...(preferredProfileValue ? { preferredProfile: preferredProfileValue as SubagentProfile } : {}),
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
         extensions,
         skills,
         ...(cursorMcps?.length ? { cursorMcps } : {}),
@@ -527,11 +547,13 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
     if (options.sessionDir) args.push("--session-dir", options.sessionDir);
     if (options.sessionName) args.push("--name", options.sessionName);
 
-    // A restored session owns its model and thinking history. Model settings are
-    // initial defaults only when creating a fresh or forked subagent.
+    // A restored session owns its model and thinking history. Explicit settings
+    // and persona defaults apply only when a fresh or forked subagent starts.
     if (!options.sessionFile) {
-        if (options.model) args.push("--model", options.model);
-        if (options.thinking) args.push("--thinking", options.thinking);
+        const model = options.model ?? persona?.model;
+        const thinking = options.thinking ?? persona?.thinking;
+        if (model) args.push("--model", model);
+        if (thinking) args.push("--thinking", thinking);
     }
 
     if (persona) {

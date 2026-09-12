@@ -47,7 +47,7 @@ const {
   parseSubagentsCommandArgs,
   PersistentSubagentRegistry,
   SUBAGENT_COMMAND_HELP_TEXT,
-  SUBAGENT_EXECUTION_PROFILES,
+  resolveSubagentCreationSettings,
   SUBAGENT_EXTENSION_PATHS,
   SUBAGENT_REGISTRY_TOOL_DETAILS_KEY,
 } = subagentsModule;
@@ -240,13 +240,14 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.deepEqual(tools.map(({ name }) => name), ["subagent"]);
   assert.deepEqual(tools[0].parameters.properties.action.enum, ["create", "list", "prompt", "status", "stop"]);
   assert.deepEqual(Object.keys(tools[0].parameters.properties), [
-    "action", "id", "name", "purpose", "persona", "profile", "runtime", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
+    "action", "id", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
   ]);
   assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
   assert.match(tools[0].parameters.properties.persona.description, /required for Pi.*optional for Cursor Cloud/i);
-  assert.deepEqual(tools[0].parameters.properties.profile.enum, ["fast", "balanced", "deep"]);
-  assert.match(tools[0].parameters.properties.profile.description, /fast=Luna.*balanced=Terra default.*deep=Sol escalation/i);
+  for (const field of ["profile", "model", "thinking"]) {
+    assert.equal(Object.hasOwn(tools[0].parameters.properties, field), false);
+  }
   assert.match(tools[0].parameters.properties.runtime.description, /Pi default.*persona-less requires explicit Cursor Cloud/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
   assert.match(tools[0].parameters.properties.lifetime.description, /task default.*one-shot needs prompt/i);
@@ -258,11 +259,12 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
   assert.equal(tools[0].parameters.properties.context.description, "Background sent with prompt; not valid alone; required by listed persona on its first prompt");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, list unknown options. A prompt starts work. If you provide context, include prompt in the same call; never send context alone. Omit both only for an intentionally dormant task or persistent subagent. On a persona's first prompt, satisfy its listed context requirements. Choose a persona by its description; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-    "Default to task subagents. Use one-shot only when continuity cannot help; use persistent for open-ended work. Run at most 4; idle subagents do not count. Satisfy NEEDS; stop complete subagents.",
-    "Give subagent objective, scope, and output; avoid adjacent work.",
-    "Delegate substantive isolated work to subagents; keep only coordination and necessary integration in the parent context.",
-    "Prefer fresh context. Fork only when parent history is material. Inspect only enough to partition work by shared context and specialty, then delegate. Avoid duplicate investigation. Reuse subagents for related work. Parallelize only separate contexts or specialties.",
+    "Before subagent create, check retained agents and list unknown personas. Send context with a prompt; omit both for dormant creation. Meet first-prompt context requirements. Persona-less create needs explicit Cursor Cloud.",
+    "Select subagents by output, not tool use. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned changes or state-changing workflows. If unclear, use explorer without changes.",
+    "Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most 4; idle agents use no work slots. Satisfy NEEDS.",
+    "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
+    "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
+    "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
   ]);
   assert.equal(tools[0].description, "Retain up to 20; run up to 4 subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.");
   assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
@@ -274,7 +276,8 @@ test("extension exposes one concise subagent tool and persistent-session command
     parameters: tools[0].parameters,
   });
   const modelFacingBytes = Buffer.byteLength(modelFacingDefinition, "utf8");
-  assert.ok(modelFacingBytes <= 3_200, `model-facing subagent definition is ${modelFacingBytes} bytes`);
+  assert.doesNotMatch(modelFacingDefinition, /profile|escalat|Luna|Terra|Sol/);
+  assert.ok(modelFacingBytes <= 3_000, `model-facing subagent definition is ${modelFacingBytes} bytes`);
   const personaPage = await tools[0].execute(
     "list-personas",
     { action: "list", kind: "personas", offset: 0, limit: 1 },
@@ -287,10 +290,8 @@ test("extension exposes one concise subagent tool and persistent-session command
     { action: "list", kind: "personas", offset: 10_000, limit: 1 },
   );
   assert.match(emptyPersonaPage.content[0].text, /No subagent personas at this offset/);
-  assert.deepEqual(SUBAGENT_EXECUTION_PROFILES, {
-    fast: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
-    balanced: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
-    deep: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
+  assert.deepEqual(resolveSubagentCreationSettings(), {
+    model: "openai-codex/gpt-5.6-terra", thinking: "xhigh",
   });
   assert.deepEqual(commands.filter((name) => ["subagent", "subagents"].includes(name)), [
     "subagent", "subagents",
@@ -2098,7 +2099,8 @@ test("persistent subagent registry stores branch-local mutations and restores do
       description: "Explore product decisions",
       systemPrompt: "Analyze product requirements.",
       contextRequirements: "Provide the goal, constraints, Git base, and relevant scope.",
-      preferredProfile: "fast",
+      model: "openai-codex/gpt-5.6-luna",
+      thinking: "high",
       extensions: ["/personas/extensions/unsafe.ts"],
       skills: ["/personas/skills/product/SKILL.md"],
       filePath: "/personas/product-manager.md",
@@ -2113,7 +2115,8 @@ test("persistent subagent registry stores branch-local mutations and restores do
   assert.deepEqual(storedPersona.skills, ["/personas/skills/product/SKILL.md"]);
   assert.deepEqual(storedPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(storedPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
-  assert.equal(storedPersona.preferredProfile, "fast");
+  assert.equal(storedPersona.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(storedPersona.thinking, "high");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, undefined);
 
@@ -2213,7 +2216,8 @@ NEEDS: A release decision from the parent`;
   assert.deepEqual(restoredPersona.skills, ["/personas/skills/product/SKILL.md"]);
   assert.deepEqual(restoredPersona.extensions, ["/personas/extensions/unsafe.ts"]);
   assert.equal(restoredPersona.contextRequirements, "Provide the goal, constraints, Git base, and relevant scope.");
-  assert.equal(restoredPersona.preferredProfile, "fast");
+  assert.equal(restoredPersona.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(restoredPersona.thinking, "high");
   assert.equal(storedSkilled.lifetime, "task");
   assert.equal(storedSkilled.parentContextProvided, true);
   assert.deepEqual(storedSkilled.selectedSkillPaths, [
@@ -2341,7 +2345,8 @@ Implement the requested change.
   await writeFile(join(personaDirectory, "worker.md"), `---
 name: worker
 description: Execute a bounded production task
-preferred-profile: balanced
+model: openai-codex/gpt-5.6-terra
+thinking: xhigh
 ---
 Execute the assigned work.
 `);
@@ -2418,8 +2423,8 @@ Execute the assigned work.
   const signal = new AbortController().signal;
 
   for (const [id, input, expected] of [
-    ["persona-less-default-pi", { action: "create", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*worker/i],
-    ["persona-less-explicit-pi", { action: "create", runtime: "pi", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*worker/i],
+    ["persona-less-default-pi", { action: "create", purpose: "Investigate a regression" }, /Persona-less Pi create is not valid.*explorer for investigation or advice.*worker only for explicitly assigned changes or state-changing workflows/i],
+    ["persona-less-explicit-pi", { action: "create", runtime: "pi", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*explorer for investigation or advice.*worker only for explicitly assigned changes or state-changing workflows/i],
     ["command-only-skill", { action: "create", persona: "worker", purpose: "Create a pull request", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
   ]) {
     const result = await tool.execute(id, input, signal, undefined, context);
@@ -2623,7 +2628,8 @@ test("model-created subagents default to task and honor explicit lifetimes", asy
   await writeFile(join(personaDirectory, "bounded-analyst.md"), `---
 name: bounded-analyst
 description: Complete bounded analysis
-preferred-profile: fast
+model: openai-codex/gpt-5.6-luna
+thinking: high
 ---
 Return a complete analysis.
 `);
@@ -2707,8 +2713,10 @@ NEEDS: The expected behavior from the parent`;
     action: "list",
     kind: "personas",
   }, signal, undefined, context);
-  assert.match(personas.content[0].text, /bounded-analyst \[pi\]: Complete bounded analysis \[prefers fast profile\]/);
-  assert.equal(personas.details.personas[0].preferredProfile, "fast");
+  assert.equal(personas.content[0].text, "bounded-analyst [pi]: Complete bounded analysis");
+  assert.equal(Object.hasOwn(personas.details.personas[0], "preferredProfile"), false);
+  assert.equal(Object.hasOwn(personas.details.personas[0], "model"), false);
+  assert.equal(Object.hasOwn(personas.details.personas[0], "thinking"), false);
   assert.equal(Object.hasOwn(personas.details.personas[0], "preferredLifetime"), false);
   const invalidOneShot = await tool.execute("explicit-one-shot-without-prompt", {
     action: "create",
@@ -2927,7 +2935,11 @@ Inspect the project without changing it.
     ["context-without-prompt", { action: "create", name: "context-only", purpose: "Context without an accompanying request", persona: "test-scout", context: "Goal: inspect the project" }, /context requires an accompanying prompt/i],
     ["context-on-list", { action: "list", context: "Not valid for list" }, /context is only valid with create or prompt/i],
     ["oversized-context", { action: "list", context: "x".repeat(8_001) }, /context exceeds 8000 characters/i],
-    ["profile-on-list", { action: "list", profile: "fast" }, /profile is only valid with create/i],
+    ["profile-on-list", { action: "list", profile: "fast" }, /profile is not valid for subagent action "list"/i],
+    ["profile-on-create", { action: "create", persona: "test-scout", profile: "deep" }, /profile is not valid for subagent action "create"/i],
+    ["profile-on-prompt", { action: "prompt", id: "agent-1", prompt: "Continue", profile: "deep" }, /profile is not valid for subagent action "prompt"/i],
+    ["model-on-create", { action: "create", persona: "test-scout", model: "other-model" }, /model is not valid for subagent action "create"/i],
+    ["thinking-on-create", { action: "create", persona: "test-scout", thinking: "low" }, /thinking is not valid for subagent action "create"/i],
     ["lifetime-on-list", { action: "list", lifetime: "task" }, /lifetime is only valid with create/i],
     ["persona-on-list", { action: "list", persona: "test-scout" }, /persona is not valid for subagent action "list"/i],
     ["offset-on-subagent-list", { action: "list", offset: 1 }, /offset and limit are only valid for persona lists/i],
@@ -2944,29 +2956,16 @@ Inspect the project without changing it.
     assert.match(result.details.error.message, message, id);
   }
 
-  const profileNames = ["fast", "balanced", "deep"];
-  const createdWithProfiles = [];
   for (let index = 1; index <= MAX_CONCURRENT_SUBAGENTS; index++) {
-    createdWithProfiles.push(await subagentTool.execute(`create-${index}`, {
+    const created = await subagentTool.execute(`create-${index}`, {
       action: "create",
       name: `agent-${index}`,
       persona: "test-scout",
       purpose: `Retain context for project area ${index}`,
-      ...(profileNames[index - 1] ? { profile: profileNames[index - 1] } : {}),
-    }, signal, undefined, context));
+    }, signal, undefined, context);
+    assert.equal(created.details.subagent.model, "openai-codex/gpt-5.6-terra");
+    assert.equal(created.details.subagent.thinking, "xhigh");
   }
-  assert.deepEqual(
-    createdWithProfiles.map(({ details }) => ({
-      model: details.subagent.model,
-      thinking: details.subagent.thinking,
-    })),
-    [
-      { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
-      { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
-      { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
-      { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
-    ],
-  );
   const duplicate = await subagentTool.execute("create-duplicate-purpose", {
     action: "create",
     name: "duplicate-area",
@@ -2993,7 +2992,7 @@ Inspect the project without changing it.
   }, signal, undefined, context);
   assert.equal(overLimit.details.ok, false);
   assert.equal(overLimit.details.error.code, "SUBAGENT_FAILED");
-  assert.match(overLimit.details.error.message, /Retained subagent limit reached \(20\)/i);
+  assert.match(overLimit.details.error.message, /Retained subagent limit reached \(20\).*Reuse related context first.*stop only an idle, unrelated subagent whose context is no longer needed/i);
 
   await commands.get("subagents").handler("--stop agent-1", context);
   assert.equal(confirmations.length, 1);
@@ -3145,10 +3144,10 @@ test("bundled personas provide focused defaults and user personas override by na
     })),
     [
       { name: "doc-auditor", role: "You are a repository documentation auditor. Verify that documentation about the repository or implemented code matches actual behavior and gives its intended audience enough information to use the documented functionality correctly." },
-      { name: "explorer", role: "You are an explorer for the primary agent. Investigate the requested scope and return concise, evidence-based summaries and direct answers to its questions." },
+      { name: "explorer", role: "You are an explorer for the primary agent. Investigate the requested scope and answer requested questions with concise, evidence-based summaries and direct answers. Explain behavior, diagnose issues, compare options, or give advice when requested. Do not apply changes or state-changing workflows." },
       { name: "reviewer", role: "You are a code reviewer, not an implementation agent." },
       { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Assess testability, test coverage, and regression cases for a defined change. Do not define product requirements, determine feature scope, or make design decisions. For a design document, assess only whether its stated behavior is precise and observable enough to derive tests." },
-      { name: "worker", role: "You are a worker for the primary agent. Execute the assigned implementation or production task within its explicit ownership boundary." },
+      { name: "worker", role: "You are a worker for the primary agent. Apply explicitly assigned implementation changes or state-changing production workflows within explicit ownership." },
     ],
   );
   const bundledPrompts = Object.fromEntries(
@@ -3157,6 +3156,9 @@ test("bundled personas provide focused defaults and user personas override by na
   assert.match(bundledPrompts.explorer, /available evidence.*source code, documentation, configuration, tests, history, project records, artifacts, and declared third-party dependencies/);
   assert.match(bundledPrompts.explorer, /Lead with direct answers and a concise summary/);
   assert.match(bundledPrompts.explorer, /Do not edit or write project files.*use Bash to inspect.*dependencies/s);
+  assert.match(bundledPrompts.explorer, /Explain behavior, diagnose issues, compare options, or give advice when requested/);
+  assert.match(bundledPrompts.explorer, /Do not evaluate change quality or propose changes unless requested/);
+  assert.match(bundledPrompts.explorer, /Do not apply changes or state-changing workflows/);
   assert.match(bundledPrompts["doc-auditor"], /Do not audit plans, design documents, proposals, requirements.*intended or future work/s);
   assert.match(bundledPrompts["doc-auditor"], /Do not provide a generic document critique.*outside this scope.*stop/s);
   assert.match(bundledPrompts["doc-auditor"], /Report only actionable findings.*documentation and implementation evidence/s);
@@ -3170,6 +3172,9 @@ test("bundled personas provide focused defaults and user personas override by na
   assert.match(bundledPrompts.reviewer, /Do not edit files or run tests.*Base the review on the changes and repository evidence/s);
   assert.match(bundledPrompts["test-analyst"], /recommend focused tests.*setup, action, and assertions/s);
   assert.match(bundledPrompts["test-analyst"], /Do not edit files.*Run focused tests when useful.*commands and outcomes you actually observed/s);
+  assert.match(bundledPrompts.worker, /BLOCKED: No explicitly assigned change or state-changing workflow\.\nNEEDS: Use explorer or a fitting specialist/);
+  assert.match(bundledPrompts.worker, /Do not infer permission from tool use or a request for advice/);
+  assert.match(bundledPrompts.worker, /investigate the repository only as needed to support an assigned implementation or workflow/);
   assert.match(bundledPrompts.worker, /You are not alone in the worktree.*Do not revert, overwrite, or reformat unrelated work/s);
   assert.match(bundledPrompts.worker, /ownership overlaps.*stop and return `BLOCKED` and `NEEDS`.*minimum boundary change/s);
   assert.match(bundledPrompts.worker, /Run focused validation.*Do not commit, change branches, rewrite Git state, or remove files/s);
@@ -3182,13 +3187,13 @@ test("bundled personas provide focused defaults and user personas override by na
     "Provide the objective, acceptance criteria, owned files or responsibilities, constraints, concurrent work, and required validation.",
   );
   assert.deepEqual(
-    bundled.personas.map(({ name, preferredProfile }) => ({ name, preferredProfile })),
+    bundled.personas.map(({ name, model, thinking }) => ({ name, model, thinking })),
     [
-      { name: "doc-auditor", preferredProfile: "fast" },
-      { name: "explorer", preferredProfile: "fast" },
-      { name: "reviewer", preferredProfile: "balanced" },
-      { name: "test-analyst", preferredProfile: "balanced" },
-      { name: "worker", preferredProfile: "balanced" },
+      { name: "doc-auditor", model: "fireworks/accounts/fireworks/models/glm-5p3-flash", thinking: "high" },
+      { name: "explorer", model: "openai-codex/gpt-5.6-luna", thinking: "high" },
+      { name: "reviewer", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
+      { name: "test-analyst", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
+      { name: "worker", model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
     ],
   );
   assert.match(
@@ -3207,8 +3212,28 @@ Review using local conventions.
   const merged = loadSubagentPersonasFromDirectories([BUNDLED_PERSONA_DIRECTORY, root]);
   assert.deepEqual(merged.diagnostics, []);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").description, "Custom reviewer");
-  assert.equal(merged.personas.find(({ name }) => name === "reviewer").preferredProfile, undefined);
+  assert.equal(merged.personas.find(({ name }) => name === "reviewer").model, undefined);
+  assert.equal(merged.personas.find(({ name }) => name === "reviewer").thinking, undefined);
   assert.equal(merged.personas.find(({ name }) => name === "reviewer").filePath, join(root, "reviewer.md"));
+});
+
+test("bundled persona lists expose output and action boundaries without full prompts", () => {
+  const { personas, diagnostics } = loadSubagentPersonas(BUNDLED_PERSONA_DIRECTORY);
+  assert.deepEqual(diagnostics, []);
+  const descriptions = Object.fromEntries(personas.map(({ name, description }) => [name, description]));
+  assert.match(descriptions.explorer, /explain, diagnose, compare options, or advise when requested.*do not apply changes/);
+  assert.match(descriptions.worker, /explicitly assigned changes or state-changing workflows within ownership/);
+  assert.match(descriptions.reviewer, /implementation changes.*defects only.*do not suggest fixes, edit files, or run tests/);
+  assert.match(descriptions["test-analyst"], /testability and coverage.*recommend focused tests.*may run focused tests.*do not edit files/);
+  assert.match(descriptions["doc-auditor"], /implemented behavior.*exclude future designs.*do not rewrite or edit files/);
+  for (const persona of personas) {
+    const listed = formatPersonaForModel(persona);
+    assert.ok(listed.includes(persona.description));
+    assert.equal(listed.includes(persona.systemPrompt), false);
+    assert.equal(persona.description.includes("…"), false, `${persona.name} description must not truncate`);
+    assert.ok(persona.description.length <= 160, `${persona.name} description must stay concise`);
+    assert.doesNotMatch(listed, /general (?:execution|implementation|production) work/);
+  }
 });
 
 test("persona descriptions truncate at a Unicode code-point boundary", () => {
@@ -3234,7 +3259,8 @@ description: Explore product decisions
 context-requirements: >
   Provide the goal, expected behavior, constraints, Git base revision,
   and relevant scope. Do not include patch text.
-preferred-profile: deep
+model: openai-codex/gpt-5.6-sol
+thinking: xhigh
 extensions:
   - ../extensions/context.ts
 skill: ../skills/research/SKILL.md
@@ -3290,17 +3316,23 @@ preferred-lifetime: task
 ---
 This persona should be rejected.
 `);
+  await writeFile(join(personaDir, "profile.md"), `---
+name: profile
+preferred-profile: fast
+---
+This persona should be rejected.
+`);
   await writeFile(join(personaDir, "model.md"), `---
 name: model
 description: Invalid model selection
-model: anthropic/claude-sonnet-4-6
+model: 42
 ---
 This persona should be rejected.
 `);
   await writeFile(join(personaDir, "thinking.md"), `---
 name: thinking
 description: Invalid thinking selection
-thinking: low
+thinking: someday
 ---
 This persona should be rejected.
 `);
@@ -3309,7 +3341,7 @@ This persona should be rejected.
   assert.equal(discovery.personas.length, 1);
   assert.equal(
     formatPersonaForModel(discovery.personas[0]),
-    "product-manager [pi]: Explore product decisions [prefers deep profile] [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
+    "product-manager [pi]: Explore product decisions [context required: Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.]",
   );
   assert.deepEqual(discovery.personas[0], {
     name: "product-manager",
@@ -3317,7 +3349,8 @@ This persona should be rejected.
     systemPrompt: "You are a product manager, not a coding agent.",
     runtime: "pi",
     contextRequirements: "Provide the goal, expected behavior, constraints, Git base revision, and relevant scope. Do not include patch text.",
-    preferredProfile: "deep",
+    model: "openai-codex/gpt-5.6-sol",
+    thinking: "xhigh",
     extensions: [join(root, "extensions", "context.ts")],
     skills: [
       join(root, "skills", "research", "SKILL.md"),
@@ -3325,7 +3358,7 @@ This persona should be rejected.
     ],
     filePath: join(personaDir, "a-product.md"),
   });
-  assert.equal(discovery.diagnostics.length, 10);
+  assert.equal(discovery.diagnostics.length, 11);
   assert.ok(discovery.diagnostics.some((diagnostic) => /duplicate subagent persona/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /invalid name.*at most 64/i.test(diagnostic)));
@@ -3334,8 +3367,9 @@ This persona should be rejected.
   assert.ok(discovery.diagnostics.some((diagnostic) => /skill path does not exist/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /context-requirements exceeds 240 characters/i.test(diagnostic)));
   assert.ok(discovery.diagnostics.some((diagnostic) => /preferred-lifetime is not valid in a persona.*select lifetime/i.test(diagnostic)));
-  assert.ok(discovery.diagnostics.some((diagnostic) => /model is not valid in a persona.*creation profile/i.test(diagnostic)));
-  assert.ok(discovery.diagnostics.some((diagnostic) => /thinking is not valid in a persona.*creation profile/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /preferred-profile is not valid.*model and thinking/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /model must be a non-empty string/i.test(diagnostic)));
+  assert.ok(discovery.diagnostics.some((diagnostic) => /invalid thinking "someday"/i.test(diagnostic)));
 });
 
 test("public stop output reports pending and uncertain Cursor cleanup", async (t) => {

@@ -10,13 +10,11 @@ import {
     buildSubagentProcessArgs,
     normalizePersonaContextRequirements,
     SUBAGENT_LIFETIMES,
-    SUBAGENT_PROFILES,
     type SubagentContextMode,
     type SubagentPersona,
     type SubagentScopedModel,
     type SubagentThinkingLevel,
     type SubagentLifetime,
-    type SubagentProfile,
 } from "./personas.ts";
 import { createActiveTurnForkSnapshot, type ModelForkContext } from "./fork.ts";
 import {
@@ -41,7 +39,6 @@ import {
 } from "./cursor-repositories.ts";
 import { runSubagentDialog } from "./ui.ts";
 import type { SubagentBackendFactory, SubagentRuntime } from "./backend.ts";
-import type { CursorExecutionProfile } from "./cursor-models.ts";
 
 const REGISTRY_ENTRY_TYPE = "persistent-subagents";
 export const SUBAGENT_REGISTRY_TOOL_DETAILS_KEY = "persistentSubagentRegistry";
@@ -67,7 +64,19 @@ const THINKING_LEVELS = new Set<SubagentThinkingLevel>([
     "off", "minimal", "low", "medium", "high", "xhigh", "max",
 ]);
 const LIFETIMES = new Set<SubagentLifetime>(SUBAGENT_LIFETIMES);
-const PROFILES = new Set<SubagentProfile>(SUBAGENT_PROFILES);
+// Keep this conversion for old registry entries, including inactive branches.
+// New personas and records use model and thinking.
+const LEGACY_PROFILE_DEFAULTS = {
+    fast: { model: "gpt-5.6-luna", thinking: "high" },
+    balanced: { model: "gpt-5.6-terra", thinking: "xhigh" },
+    deep: { model: "gpt-5.6-sol", thinking: "xhigh" },
+} as const;
+
+function legacyModelDefaults(value: unknown, runtime: SubagentRuntime): { model: string; thinking: SubagentThinkingLevel } | undefined {
+    if (typeof value !== "string" || !Object.hasOwn(LEGACY_PROFILE_DEFAULTS, value)) return undefined;
+    const defaults = LEGACY_PROFILE_DEFAULTS[value as keyof typeof LEGACY_PROFILE_DEFAULTS];
+    return { ...defaults, model: runtime === "pi" ? `openai-codex/${defaults.model}` : defaults.model };
+}
 
 export type PersistentSubagentStatus =
     | "dormant"
@@ -119,8 +128,6 @@ export interface CreatePersistentSubagentOptions {
     skills?: readonly string[];
     model?: string;
     thinking?: SubagentThinkingLevel;
-    /** Cursor profile resolution happens lazily before the first Cloud send. */
-    cursorProfile?: CursorExecutionProfile;
 }
 
 export interface PromptPersistentSubagentOptions {
@@ -270,7 +277,9 @@ export interface StoredCursorSubagent extends StoredSubagentBase {
     currentRunId?: string;
     currentRequestId?: string;
     repositories: CursorStoredRepository[];
-    requestedProfile?: "fast" | "balanced" | "deep";
+    /** Resolve initial defaults lazily. A saved currentModel always takes precedence. */
+    requestedModel?: string;
+    requestedThinking?: SubagentThinkingLevel;
     currentModel?: {
         id: string;
         parameters: CursorStoredModelParameter[];
@@ -373,9 +382,8 @@ function clonePersona(persona: SubagentPersona | undefined): SubagentPersona | u
         ...(typeof persona.contextRequirements === "string" && persona.contextRequirements.trim()
             ? { contextRequirements: normalizePersonaContextRequirements(persona.contextRequirements) }
             : {}),
-        ...(persona.preferredProfile && PROFILES.has(persona.preferredProfile)
-            ? { preferredProfile: persona.preferredProfile }
-            : {}),
+        ...(isSafeCursorValue(persona.model) && persona.model.trim() ? { model: persona.model.trim() } : {}),
+        ...(persona.thinking && THINKING_LEVELS.has(persona.thinking) ? { thinking: persona.thinking } : {}),
         extensions: Array.isArray(persona.extensions)
             ? persona.extensions.filter((extension): extension is string => typeof extension === "string")
             : [],
@@ -453,6 +461,8 @@ function parseStoredPersona(value: unknown, runtime: SubagentRuntime): SubagentP
         || typeof value.description !== "string"
         || typeof value.systemPrompt !== "string"
         || typeof value.filePath !== "string"
+        || (value.model !== undefined && (!isSafeCursorValue(value.model) || !value.model.trim()))
+        || (value.thinking !== undefined && !THINKING_LEVELS.has(value.thinking as SubagentThinkingLevel))
         || (value.contextRequirements !== undefined
             && (typeof value.contextRequirements !== "string" || !value.contextRequirements.trim()))
         || (value.runtime !== undefined && value.runtime !== runtime)) return undefined;
@@ -470,9 +480,9 @@ function parseStoredPersona(value: unknown, runtime: SubagentRuntime): SubagentP
             ? value.skills.filter((entry): entry is string => typeof entry === "string")
             : [],
         ...(typeof value.contextRequirements === "string" ? { contextRequirements: value.contextRequirements } : {}),
-        ...(typeof value.preferredProfile === "string" && PROFILES.has(value.preferredProfile as SubagentProfile)
-            ? { preferredProfile: value.preferredProfile as SubagentProfile }
-            : {}),
+        ...legacyModelDefaults(value.preferredProfile, runtime),
+        ...(typeof value.model === "string" ? { model: value.model } : {}),
+        ...(value.thinking !== undefined ? { thinking: value.thinking as SubagentThinkingLevel } : {}),
         ...(Array.isArray(value.cursorMcps) ? {
             cursorMcps: value.cursorMcps.filter((entry): entry is string => isSafeCursorValue(entry)),
         } : {}),
@@ -691,8 +701,12 @@ function parseStoredCursorSubagent(value: Record<string, unknown>): StoredCursor
     if (isRecord(value.currentModel)
         && (!currentModel || currentModel.parameters.length !== (value.currentModel.parameters as unknown[]).length
             || currentModel.parameters.length > MAX_CURSOR_MODEL_PARAMETERS)) return undefined;
-    if (value.requestedProfile !== undefined && value.requestedProfile !== "fast"
-        && value.requestedProfile !== "balanced" && value.requestedProfile !== "deep") return undefined;
+    const legacyDefaults = legacyModelDefaults(value.requestedProfile, "cursor-cloud");
+    if (value.requestedProfile !== undefined && !legacyDefaults) return undefined;
+    if (value.requestedModel !== undefined && (!isSafeCursorValue(value.requestedModel) || !value.requestedModel.trim())) return undefined;
+    if (value.requestedThinking !== undefined && !THINKING_LEVELS.has(value.requestedThinking as SubagentThinkingLevel)) return undefined;
+    const requestedModel = typeof value.requestedModel === "string" ? value.requestedModel.trim() : legacyDefaults?.model;
+    const requestedThinking = (value.requestedThinking as SubagentThinkingLevel | undefined) ?? legacyDefaults?.thinking;
 
     const remoteLifecycle = value.remoteLifecycle;
     const isUncertainFirstSend = !value.remoteCreated && remoteLifecycle === "remote-state-unknown"
@@ -722,7 +736,8 @@ function parseStoredCursorSubagent(value: Record<string, unknown>): StoredCursor
         ...(currentRunId ? { currentRunId } : {}),
         ...(currentRequestId ? { currentRequestId } : {}),
         repositories,
-        ...(value.requestedProfile ? { requestedProfile: value.requestedProfile } : {}),
+        ...(requestedModel ? { requestedModel } : {}),
+        ...(requestedThinking ? { requestedThinking } : {}),
         ...(currentModel ? { currentModel } : {}),
         pendingOperations,
         remoteLifecycle,
@@ -903,7 +918,7 @@ export class PersistentSubagentRegistry {
         }
         const retainedCount = [...this.records.values()].filter((record) => record.stored.localLifecycle !== "stopped").length;
         if (retainedCount >= MAX_RETAINED_SUBAGENTS) {
-            throw new Error(`Retained subagent limit reached (${MAX_RETAINED_SUBAGENTS}). List and reuse a matching purpose, or stop one before creating another`);
+            throw new Error(`Retained subagent limit reached (${MAX_RETAINED_SUBAGENTS}). Reuse related context first. If none fits, stop only an idle, unrelated subagent whose context is no longer needed.`);
         }
         if (runtime === "pi" && options.mode === "fork") {
             const parentSessionFile = options.parentSessionFile ?? ctx.sessionManager.getSessionFile();
@@ -947,7 +962,8 @@ export class PersistentSubagentRegistry {
                 agentId,
                 remoteCreated: false,
                 repositories: [],
-                ...(options.cursorProfile ? { requestedProfile: options.cursorProfile } : {}),
+                ...((options.model ?? options.persona?.model) ? { requestedModel: options.model ?? options.persona?.model } : {}),
+                ...((options.thinking ?? options.persona?.thinking) ? { requestedThinking: options.thinking ?? options.persona?.thinking } : {}),
                 pendingOperations: [createAgentOperation],
                 remoteLifecycle: "local",
                 pendingResult: { state: "none" },
@@ -964,6 +980,7 @@ export class PersistentSubagentRegistry {
         }
         const sessionDir = this.sessionDir(ctx);
         fs.mkdirSync(sessionDir, { recursive: true });
+        const model = options.model ?? options.persona?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
         const stored: StoredPiSubagent = {
             id,
             name,
@@ -976,12 +993,8 @@ export class PersistentSubagentRegistry {
             ...(parentSessionFile ? { parentSessionFile } : {}),
             sessionDir,
             cwd: ctx.cwd,
-            ...(options.model
-                ? { model: options.model }
-                : ctx.model
-                    ? { model: `${ctx.model.provider}/${ctx.model.id}` }
-                    : {}),
-            thinking: options.thinking ?? this.pi.getThinkingLevel() as SubagentThinkingLevel,
+            ...(model ? { model } : {}),
+            thinking: options.thinking ?? options.persona?.thinking ?? this.pi.getThinkingLevel() as SubagentThinkingLevel,
             scopedModels: ctx.scopedModels.map(({ model, thinkingLevel }) => ({
                 provider: model.provider,
                 id: model.id,

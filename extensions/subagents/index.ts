@@ -20,7 +20,8 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
 import type { ToolFailureDetails } from "../codex-tools/tool-result.ts";
-import type { SubagentBackendFactory, SubagentUsage } from "./backend.ts";
+import type { SubagentBackendFactory, SubagentRuntime, SubagentThinkingLevel, SubagentUsage } from "./backend.ts";
+import { DEFAULT_CURSOR_MODEL, DEFAULT_CURSOR_THINKING } from "./cursor-models.ts";
 import {
     BUNDLED_PERSONA_DIRECTORY,
     getSubagentCommandArgumentCompletions,
@@ -29,10 +30,8 @@ import {
     parseSubagentCommandArgs,
     SUBAGENT_COMMAND_HELP_TEXT,
     SUBAGENT_LIFETIMES,
-    SUBAGENT_PROFILES,
     type SubagentPersona,
     type SubagentLifetime,
-    type SubagentProfile,
 } from "./personas.ts";
 import {
     formatSubagentSummary,
@@ -122,14 +121,14 @@ export {
     type GitCommandResult,
 } from "./cursor-repositories.ts";
 export {
-    CURSOR_PROFILE_TARGETS,
+    DEFAULT_CURSOR_MODEL,
+    DEFAULT_CURSOR_THINKING,
     CursorModelCatalog,
     normalizeCursorModelCatalog,
     persistableCursorModelSelection,
     type CursorCatalogModel,
     type CursorCatalogParameter,
     type CursorCatalogVariant,
-    type CursorExecutionProfile,
     type CursorModelCatalogClient,
     type CursorModelParameterSelection,
     type CursorPanelModel,
@@ -194,17 +193,14 @@ const MAX_PARENT_CONTEXT_CHARS = 8_000;
 export const MAX_SUBAGENT_RESPONSE_BYTES = 16 * 1_024;
 export const MAX_SUBAGENT_RESPONSE_LINES = 400;
 const MAX_SUBAGENT_ERROR_BYTES = 2_000;
-export const SUBAGENT_EXECUTION_PROFILES = {
-    fast: { model: "openai-codex/gpt-5.6-luna", thinking: "high" },
-    balanced: { model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
-    deep: { model: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
-} as const;
-
-export function resolveSubagentCreationProfile(
-    persona: SubagentPersona | undefined,
-    requestedProfile: SubagentProfile | undefined,
-): SubagentProfile {
-    return requestedProfile ?? persona?.preferredProfile ?? "balanced";
+export function resolveSubagentCreationSettings(
+    persona?: SubagentPersona,
+    runtime: SubagentRuntime = persona?.runtime ?? "pi",
+): { model: string; thinking: SubagentThinkingLevel } {
+    return {
+        model: persona?.model ?? (runtime === "cursor-cloud" ? DEFAULT_CURSOR_MODEL : "openai-codex/gpt-5.6-terra"),
+        thinking: persona?.thinking ?? (runtime === "cursor-cloud" ? DEFAULT_CURSOR_THINKING : "xhigh"),
+    };
 }
 
 type SubagentErrorCode = "INVALID_INPUT" | "CANCELLED" | "SUBAGENT_FAILED";
@@ -217,9 +213,6 @@ const SubagentParameters = Type.Object({
     persona: Type.Optional(Type.String({
         maxLength: 64,
         description: "Required for Pi; optional for Cursor Cloud",
-    })),
-    profile: Type.Optional(StringEnum(SUBAGENT_PROFILES, {
-        description: "fast=Luna; balanced=Terra default; deep=Sol escalation",
     })),
     runtime: Type.Optional(StringEnum(["pi", "cursor-cloud"] as const, {
         description: "Pi default; persona-less requires explicit Cursor Cloud",
@@ -260,7 +253,6 @@ function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
         typeof prepared[field] === "string" && prepared[field].length > maximum
     ));
     const invalidAction = !["create", "list", "prompt", "status", "stop"].includes(prepared.action as string);
-    const invalidProfile = prepared.profile !== undefined && !["fast", "balanced", "deep"].includes(prepared.profile as string);
     const invalidRuntime = prepared.runtime !== undefined && !["pi", "cursor-cloud"].includes(prepared.runtime as string);
     const invalidLifetime = prepared.lifetime !== undefined && !SUBAGENT_LIFETIMES.includes(prepared.lifetime as SubagentLifetime);
     const invalidMode = prepared.mode !== undefined && !["fresh", "fork"].includes(prepared.mode as string);
@@ -270,7 +262,7 @@ function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
     const invalidKind = prepared.kind !== undefined && !["subagents", "personas"].includes(prepared.kind as string);
     const invalidOffset = prepared.offset !== undefined && (!Number.isInteger(prepared.offset) || (prepared.offset as number) < 0 || (prepared.offset as number) > 10_000);
     const invalidLimit = prepared.limit !== undefined && (!Number.isInteger(prepared.limit) || (prepared.limit as number) < 1 || (prepared.limit as number) > 50);
-    if (invalidString || invalidLength || invalidAction || invalidProfile || invalidRuntime || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
+    if (invalidString || invalidLength || invalidAction || invalidRuntime || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
         return { action: "list", context: "invalid input" };
     }
     return prepared as SubagentToolInput;
@@ -283,7 +275,7 @@ function subagentFailure(error: unknown, signal: AbortSignal | undefined): {
     const message = error instanceof Error ? error.message : String(error);
     const code: SubagentErrorCode = signal?.aborted
         ? "CANCELLED"
-        : /(^context |^profile |^runtime |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
+        : /(^context |^runtime |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
             ? "INVALID_INPUT"
             : "SUBAGENT_FAILED";
     const bounded = Buffer.byteLength(message) <= MAX_SUBAGENT_ERROR_BYTES
@@ -395,7 +387,7 @@ export function resolveSelectedSubagentSkills(
 
 function validatePersonaLessModelCreate(params: SubagentToolInput): void {
     if (params.runtime !== "cursor-cloud") {
-        throw new Error('Persona-less Pi create is not valid; use persona "worker" for general execution work');
+        throw new Error("Persona-less Pi create is not valid; list personas and select by output. Use explorer for investigation or advice; worker only for explicitly assigned changes or state-changing workflows.");
     }
     if (!params.purpose?.trim()) {
         throw new Error("Persona-less Cursor Cloud create requires an explicit purpose");
@@ -495,11 +487,10 @@ function formatSubagentForModel(summary: PersistentSubagentSummary, includeRunti
 }
 
 export function formatPersonaForModel(persona: SubagentPersona): string {
-    const profilePreference = persona.preferredProfile ? ` [prefers ${persona.preferredProfile} profile]` : "";
     const requirement = persona.contextRequirements
         ? ` [context required: ${persona.contextRequirements}]`
         : "";
-    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${profilePreference}${requirement}`;
+    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${requirement}`;
 }
 
 export type SubagentsCommandArgs =
@@ -508,7 +499,7 @@ export type SubagentsCommandArgs =
     | { action: "open"; target: ""; error: string };
 
 const SUBAGENT_ACTION_FIELDS: Record<string, ReadonlySet<string>> = {
-    create: new Set(["action", "name", "purpose", "persona", "profile", "runtime", "lifetime", "mode", "skills", "prompt", "context"]),
+    create: new Set(["action", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "prompt", "context"]),
     list: new Set(["action", "kind", "offset", "limit"]),
     prompt: new Set(["action", "id", "prompt", "context"]),
     status: new Set(["action", "id"]),
@@ -915,14 +906,12 @@ export default function (
                 || (parsed.mode === "fork"
                     ? "Analysis using inherited parent-session context"
                     : "General project research");
-            const profileName = persona ? resolveSubagentCreationProfile(persona, undefined) : undefined;
-            const profile = profileName ? SUBAGENT_EXECUTION_PROFILES[profileName] : undefined;
+            const settings = persona ? resolveSubagentCreationSettings(persona) : undefined;
             const summary = await registry.create(ctx, {
                 mode: parsed.mode,
                 purpose,
                 persona,
-                ...(persona?.runtime === "pi" && profile ? { model: profile.model, thinking: profile.thinking } : {}),
-                ...(persona?.runtime === "cursor-cloud" && profileName ? { cursorProfile: profileName } : {}),
+                ...settings,
             });
             const result = await registry.open(ctx, summary.id, parsed.prompt);
             if (result?.action === "return") await handoffPanelReturn(ctx, result);
@@ -1036,11 +1025,12 @@ export default function (
         description: `Retain up to ${MAX_RETAINED_SUBAGENTS}; run up to ${MAX_CONCURRENT_SUBAGENTS} subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.`,
         promptSnippet: "Delegate isolated work",
         promptGuidelines: [
-            "Before subagent create, list unknown options. A prompt starts work. If you provide context, include prompt in the same call; never send context alone. Omit both only for an intentionally dormant task or persistent subagent. On a persona's first prompt, satisfy its listed context requirements. Choose a persona by its description; persona-less create is Cursor Cloud only. Keep persona profile defaults; otherwise use balanced, fast for bounded lookup, deep only after cheaper failure or unsafe ambiguity.",
-            `Default to task subagents. Use one-shot only when continuity cannot help; use persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle subagents do not count. Satisfy NEEDS; stop complete subagents.`,
-            "Give subagent objective, scope, and output; avoid adjacent work.",
-            "Delegate substantive isolated work to subagents; keep only coordination and necessary integration in the parent context.",
-            "Prefer fresh context. Fork only when parent history is material. Inspect only enough to partition work by shared context and specialty, then delegate. Avoid duplicate investigation. Reuse subagents for related work. Parallelize only separate contexts or specialties.",
+            "Before subagent create, check retained agents and list unknown personas. Send context with a prompt; omit both for dormant creation. Meet first-prompt context requirements. Persona-less create needs explicit Cursor Cloud.",
+            "Select subagents by output, not tool use. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned changes or state-changing workflows. If unclear, use explorer without changes.",
+            `Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle agents use no work slots. Satisfy NEEDS.`,
+            "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
+            "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
+            "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
         ],
         parameters: SubagentParameters,
         prepareArguments: prepareSubagentArguments,
@@ -1052,9 +1042,6 @@ export default function (
                 const context = parentContext(params.context);
             if (context && params.action !== "create" && params.action !== "prompt") {
                 throw new Error("context is only valid with create or prompt");
-            }
-            if (params.profile && params.action !== "create") {
-                throw new Error("profile is only valid with create");
             }
             if (params.lifetime && params.action !== "create") {
                 throw new Error("lifetime is only valid with create");
@@ -1093,8 +1080,7 @@ export default function (
                             `${reusable.name} already retains context for this purpose; reuse it with action "prompt"`,
                         );
                     }
-                    const profileName = resolveSubagentCreationProfile(persona, params.profile);
-                    const profile = SUBAGENT_EXECUTION_PROFILES[profileName];
+                    const settings = resolveSubagentCreationSettings(persona, runtime);
                     const requestedMode = params.mode ?? "fresh";
                     const createOptions = {
                         runtime,
@@ -1104,8 +1090,7 @@ export default function (
                         ...(persona ? { persona } : {}),
                         skills: selectedSkillPaths,
                         lifetime,
-                        ...(runtime === "pi" ? { model: profile.model, thinking: profile.thinking } : {}),
-                        ...(runtime === "cursor-cloud" ? { cursorProfile: profileName } : {}),
+                        ...settings,
                     };
                     // Validate before a fork snapshot copies parent history.
                     registry.validateCreate(ctx, createOptions);
@@ -1252,12 +1237,10 @@ export default function (
                             description,
                             runtime,
                             contextRequirements,
-                            preferredProfile,
                         }) => ({
                             name,
                             description,
                             runtime,
-                            ...(preferredProfile ? { preferredProfile } : {}),
                             ...(contextRequirements ? { contextRequirements } : {}),
                         }));
                         return {

@@ -20,7 +20,8 @@ function storedCursor(overrides = {}) {
     localLifecycle: "available",
     remoteCreated: false,
     repositories: [{ url: "https://github.com/example/project", startingRef: "a".repeat(40) }],
-    requestedProfile: "balanced",
+    requestedModel: "gpt-5.6-terra",
+    requestedThinking: "xhigh",
     currentModel: { id: "cursor-terra", parameters: [{ id: "reasoning_effort", value: "xhigh" }], resolvedAt: 1 },
     pendingOperations: [],
     remoteLifecycle: "local",
@@ -748,6 +749,74 @@ test("Cursor model and thinking selection persist for Plan sends and reject busy
   }, []));
   await assert.rejects(unsupported.setThinkingLevel("xhigh"), (error) => error.code === "MODEL_UNAVAILABLE");
   assert.ok(persisted.length >= 2);
+});
+
+test("Cursor creation uses direct settings and preserves a current TUI selection", async () => {
+  const resolutions = [];
+  const creations = [];
+  const catalog = {
+    async resolveCreation(model, thinking) {
+      resolutions.push({ model, thinking });
+      return {
+        requested: model ?? "gpt-5.6-terra",
+        model: { id: model ?? "gpt-5.6-terra", name: model ?? "gpt-5.6-terra", aliases: [], parameters: [], variantsPresent: false, variantsComplete: true, variants: [] },
+        selection: { id: model ?? "gpt-5.6-terra", parameters: [{ id: "reasoning_effort", value: thinking ?? "xhigh" }] },
+        resolvedAt: 2,
+      };
+    },
+  };
+  const agent = {
+    agentId: "bc-direct-models",
+    async send() { throw new Error("must not send"); },
+    close() {},
+    async listArtifacts() { return []; },
+    async getUsage() { return {}; },
+  };
+  const start = async (stored) => {
+    const backend = new backendModule.CursorCloudBackend(backendOptions({
+      stored,
+      catalog,
+      sdk: {
+        async createAgent(options) { creations.push(options); return agent; },
+        async resumeAgent() { throw new Error("must not resume"); },
+      },
+      persist(next) { Object.assign(stored, next); },
+    }, []));
+    await backend.start();
+    return backend;
+  };
+
+  const direct = storedCursor({
+    currentModel: undefined,
+    requestedModel: "requested-model",
+    requestedThinking: "high",
+    persona: { model: "persona-model", thinking: "low" },
+  });
+  await start(direct);
+  assert.deepEqual(resolutions, [{ model: "requested-model", thinking: "high" }]);
+  assert.deepEqual(direct.currentModel, { id: "requested-model", parameters: [{ id: "reasoning_effort", value: "high" }], resolvedAt: 2 });
+  assert.deepEqual(creations[0].model, { id: "requested-model", params: [{ id: "reasoning_effort", value: "high" }] });
+
+  const persona = storedCursor({
+    id: "sa_cursor_persona_model",
+    currentModel: undefined,
+    requestedModel: undefined,
+    requestedThinking: undefined,
+    persona: { model: "persona-model", thinking: "low" },
+  });
+  await start(persona);
+  assert.deepEqual(resolutions[1], { model: "persona-model", thinking: "low" });
+
+  const tui = storedCursor({
+    id: "sa_cursor_tui_model",
+    requestedModel: "requested-model",
+    requestedThinking: "high",
+    persona: { model: "persona-model", thinking: "low" },
+    currentModel: { id: "tui-model", parameters: [{ id: "reasoning_effort", value: "minimal" }], resolvedAt: 1 },
+  });
+  await start(tui);
+  assert.equal(resolutions.length, 2, "a restored TUI selection does not resolve creation settings");
+  assert.deepEqual(creations[2].model, { id: "tui-model", params: [{ id: "reasoning_effort", value: "minimal" }] });
 });
 
 test("Cursor leaves an uncertain follow-up unarchived when listRuns cannot identify its run", async () => {
