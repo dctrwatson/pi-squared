@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIRECTORY="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then SOURCE="$TARGET"; else SOURCE="$DIRECTORY/$TARGET"; fi
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." >/dev/null 2>&1 && pwd)"
+exec node --experimental-strip-types "$ROOT/harnesses/hari/src/cli.ts" "$@"

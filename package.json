@@ -1,7 +1,7 @@
 {
   "name": "pi-squared",
   "version": "0.0.1",
-  "description": "Pi extensions and skills",
+  "description": "Pi extensions, skills, and the Hari harness",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -14,6 +14,7 @@
   "author": "dctrwatson",
   "license": "Unlicense",
   "bin": {
+    "hari": "./bin/hari",
     "piw": "./bin/piw"
   },
   "repository": {
@@ -29,13 +30,14 @@
     ]
   },
   "scripts": {
-    "check": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "check": "node ./node_modules/typescript/bin/tsc --noEmit && node ./node_modules/typescript/bin/tsc -p harnesses/hari/tsconfig.json --noEmit",
     "clean": "echo 'nothing to clean'",
     "build": "echo 'nothing to build'",
     "audit:prod": "node ./scripts/audit-prod.mjs",
-    "test": "env -u CURSOR_API_KEY node --experimental-strip-types --test --test-concurrency=$(node -p \"Math.min(8, require('node:os').availableParallelism())\") tests/extensions/*.test.mjs tests/skills/*.test.mjs",
+    "test": "env -u CURSOR_API_KEY node --experimental-strip-types --test --test-concurrency=$(node -p \"Math.min(8, require('node:os').availableParallelism())\") tests/extensions/*.test.mjs tests/skills/*.test.mjs harnesses/hari/tests/*.test.mjs",
     "test:quick": "env -u CURSOR_API_KEY node --experimental-strip-types --test $(find tests/extensions -name '*.test.mjs' ! -name 'workspace-*')",
     "test:extensions": "env -u CURSOR_API_KEY node --experimental-strip-types --test tests/extensions/*.test.mjs",
+    "test:hari": "env -u CURSOR_API_KEY node --experimental-strip-types --test harnesses/hari/tests/*.test.mjs",
     "test:skills": "env -u CURSOR_API_KEY node --test tests/skills/*.test.mjs"
   },
   "peerDependencies": {
@@ -48,6 +50,7 @@
     "@earendil-works/pi-ai": "^0.84.4",
     "@earendil-works/pi-coding-agent": "^0.84.4",
     "@earendil-works/pi-tui": "^0.84.4",
+    "@types/node": "^25.2.1",
     "typebox": "^1.1.32",
     "typescript": "^5.7.2"
   },
