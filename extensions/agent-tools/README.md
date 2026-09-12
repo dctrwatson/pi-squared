@@ -1,14 +1,20 @@
-# Codex tools
+# Agent tools
 
-This extension replaces selected Pi tools for the `openai-codex` provider. It is for a trusted local power-user model. It is not a sandbox or security boundary.
+This extension adds tools and replaces selected Pi tools for all models. It is for trusted local use. It is not a sandbox or security boundary.
 
 ## Activation
 
-The extension registers `read`, `find`, `grep`, `bash`, `git`, `gh`, and `web_search` when the selected model uses `openai-codex`. The replacements stay active if you later change models. Restart Pi to restore built-in tools.
+The extension registers `read`, `find`, `grep`, `bash`, `git`, `gh`, `web_search`, and `ask_user` when it loads. It enables them at session start, regardless of the selected model or provider. Model changes do not affect these tools.
+
+If your configuration names `extensions/codex-tools` or `extensions/ask-user.ts` explicitly, use `extensions/agent-tools` instead. Load `extensions/agent-tools` only once.
 
 `edit` is unchanged. The extension corrects the built-in `write` success message to report UTF-8 byte count. It does not add a patch tool.
 
 `web_search` sends only its query to a separate Codex request with the native web-search tool enabled. It does not send project files or the current conversation. The response includes source URLs and its usage is added to the tool result.
+
+If the selected model uses `openai-codex`, `web_search` uses that model. Otherwise, it uses an available `openai-codex/gpt-5.4-mini` model, or the first available Codex model if that model is absent. Codex authentication is required. If no Codex model is available, `web_search` returns `MODEL_UNAVAILABLE`; the other tools remain available.
+
+`ask_user` asks one question with free text, one option, or multiple options. It requires an interactive TUI. Other modes return `UI_UNAVAILABLE`. Each session permits one active prompt. Session shutdown cancels the prompt.
 
 ## Result contract
 

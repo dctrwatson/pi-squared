@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
-const askUserModule = await import("../../extensions/ask-user.ts");
+const askUserModule = await import("../../extensions/agent-tools/ask-user.ts");
+const { default: agentTools } = await import("../../extensions/agent-tools/index.ts");
 const {
   askUserCancelled,
   createAskUserTool,
@@ -175,13 +176,12 @@ test("ask_user records invocation cancellation before a user answer", async () =
 test("ask_user exposes concise model guidance and clears a prompt on session shutdown", async () => {
   let tool;
   let shutdown;
-  askUserModule.default({
+  agentTools({
     registerTool(value) {
-      tool = value;
+      if (value.name === "ask_user") tool = value;
     },
     on(event, handler) {
-      assert.equal(event, "session_shutdown");
-      shutdown = handler;
+      if (event === "session_shutdown") shutdown = handler;
     },
   });
 

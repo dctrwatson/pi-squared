@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
-const gitModule = await import("../../extensions/codex-tools/git.ts");
-const ghModule = await import("../../extensions/codex-tools/gh.ts");
+const gitModule = await import("../../extensions/agent-tools/git.ts");
+const ghModule = await import("../../extensions/agent-tools/gh.ts");
 
 const plainTheme = {
   fg: (_color, text) => text,
@@ -12,8 +12,8 @@ const plainTheme = {
 };
 
 for (const [name, createTool] of [
-  ["git", gitModule.createCodexGitTool],
-  ["gh", ghModule.createCodexGhTool],
+  ["git", gitModule.createAgentGitTool],
+  ["gh", ghModule.createAgentGhTool],
 ]) {
   test(`${name} renders a clear and safe direct-process invocation`, () => {
     const tool = createTool();
@@ -68,7 +68,7 @@ for (const [name, createTool] of [
 }
 
 test("git renders status 1 without an error color only for normal boolean results", () => {
-  const tool = gitModule.createCodexGitTool();
+  const tool = gitModule.createAgentGitTool();
   const renderResult = (content) => tool.renderResult(
     {
       content,

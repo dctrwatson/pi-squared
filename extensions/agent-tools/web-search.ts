@@ -29,20 +29,20 @@ const EXTERNAL_SYSTEM_PROMPT = [
   "Do not use claims that the search results do not support.",
 ].join(" ");
 
-export const codexWebSearchParameters = Type.Object({
+export const agentWebSearchParameters = Type.Object({
   query: Type.String({ description: "Focused query for current or external information" }),
 });
 
-export type CodexWebSearchInput = Static<typeof codexWebSearchParameters>;
+export type AgentWebSearchInput = Static<typeof agentWebSearchParameters>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function prepareWebSearchArguments(rawInput: unknown): CodexWebSearchInput {
+function prepareWebSearchArguments(rawInput: unknown): AgentWebSearchInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { query: "\0" };
   if (typeof prepared.query !== "string") prepared.query = "\0";
-  return prepared as CodexWebSearchInput;
+  return prepared as AgentWebSearchInput;
 }
 
 export interface WebSearchArtifactDetails {
@@ -76,11 +76,11 @@ export interface WebSearchSuccessDetails extends ToolSuccessDetails<"web_search"
   artifact?: WebSearchArtifactDetails;
 }
 
-export type CodexWebSearchToolDetails =
+export type AgentWebSearchToolDetails =
   | WebSearchSuccessDetails
   | ToolFailureDetails<"web_search", WebSearchErrorCode>;
 
-export interface CodexWebSearchToolOptions {
+export interface AgentWebSearchToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
 }
 
@@ -93,12 +93,12 @@ class WebSearchToolError extends Error {
   }
 }
 
-function normalizeWebSearchInput(rawInput: unknown): CodexWebSearchInput {
+function normalizeWebSearchInput(rawInput: unknown): AgentWebSearchInput {
   if (!isRecord(rawInput)) throw new WebSearchToolError("INVALID_INPUT", "web_search input must be an object");
   const unknown = Object.keys(rawInput).find((key) => key !== "query");
   if (unknown) throw new WebSearchToolError("INVALID_INPUT", `Unknown input field: ${unknown}`);
   if (typeof rawInput.query !== "string") throw new WebSearchToolError("INVALID_INPUT", "web_search query must be a string");
-  return rawInput as CodexWebSearchInput;
+  return rawInput as AgentWebSearchInput;
 }
 
 function validateQuery(query: string): void {
@@ -240,20 +240,28 @@ function webSearchFailure(error: unknown, signal: AbortSignal | undefined): { te
   };
 }
 
-async function runWebSearch(
-  input: CodexWebSearchInput,
-  ctx: ExtensionContext,
-  signal: AbortSignal | undefined,
-  options: CodexWebSearchToolOptions,
-): Promise<{ text: string; details: WebSearchSuccessDetails; usage: Usage }> {
-  if (!ctx.model || ctx.model.provider !== CODEX_PROVIDER) {
-    throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an openai-codex model");
+function selectWebSearchModel(ctx: ExtensionContext): NonNullable<ExtensionContext["model"]> {
+  if (ctx.model?.provider === CODEX_PROVIDER) return ctx.model;
+  const models = ctx.modelRegistry.getAvailable().filter((model) => model.provider === CODEX_PROVIDER);
+  const model = models.find((candidate) => candidate.id === "gpt-5.4-mini") ?? models[0];
+  if (!model) {
+    throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an available openai-codex model");
   }
+  return model;
+}
+
+async function runWebSearch(
+  input: AgentWebSearchInput,
+  ctx: ExtensionContext,
+  model: NonNullable<ExtensionContext["model"]>,
+  signal: AbortSignal | undefined,
+  options: AgentWebSearchToolOptions,
+): Promise<{ text: string; details: WebSearchSuccessDetails; usage: Usage }> {
   input = normalizeWebSearchInput(input);
   validateQuery(input.query);
 
   const response = await ctx.modelRegistry.complete(
-    ctx.model,
+    model,
     {
       systemPrompt: EXTERNAL_SYSTEM_PROMPT,
       messages: [{
@@ -297,9 +305,9 @@ async function runWebSearch(
   };
 }
 
-export function createCodexWebSearchTool(
-  options: CodexWebSearchToolOptions = {},
-): ToolDefinition<typeof codexWebSearchParameters, CodexWebSearchToolDetails> {
+export function createAgentWebSearchTool(
+  options: AgentWebSearchToolOptions = {},
+): ToolDefinition<typeof agentWebSearchParameters, AgentWebSearchToolDetails> {
   return {
     name: "web_search",
     label: "web_search",
@@ -308,21 +316,22 @@ export function createCodexWebSearchTool(
     promptGuidelines: [
       "Use web_search for current or external information that local files cannot verify.",
     ],
-    parameters: codexWebSearchParameters,
+    parameters: agentWebSearchParameters,
     prepareArguments: prepareWebSearchArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      onUpdate?.({
-        content: [{ type: "text", text: "Searching the web…" }],
-        details: {
-          ok: true,
-          tool: "web_search",
-          external_session: true,
-          provider: ctx.model?.provider ?? CODEX_PROVIDER,
-          model: ctx.model?.id ?? "unknown",
-        },
-      });
       try {
-        const result = await runWebSearch(params, ctx, signal, options);
+        const model = selectWebSearchModel(ctx);
+        onUpdate?.({
+          content: [{ type: "text", text: "Searching the web…" }],
+          details: {
+            ok: true,
+            tool: "web_search",
+            external_session: true,
+            provider: model.provider,
+            model: model.id,
+          },
+        });
+        const result = await runWebSearch(params, ctx, model, signal, options);
         return {
           content: [{ type: "text", text: result.text }],
           details: result.details,

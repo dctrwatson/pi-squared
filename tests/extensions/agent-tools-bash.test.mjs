@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 
-const bashModule = await import("../../extensions/codex-tools/bash.ts");
-const readModule = await import("../../extensions/codex-tools/read.ts");
+const bashModule = await import("../../extensions/agent-tools/bash.ts");
+const readModule = await import("../../extensions/agent-tools/read.ts");
 
 function context(cwd) {
   return {
@@ -31,7 +31,7 @@ async function execute(tool, input, cwd, signal, onUpdate) {
 }
 
 async function withDirectory(callback) {
-  const directory = await mkdtemp(join(tmpdir(), "pi-codex-bash-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-agent-bash-test-"));
   try {
     return await callback(directory);
   } finally {
@@ -46,7 +46,7 @@ async function removeArtifact(result) {
 }
 
 test("bash registers concrete parameter types", () => {
-  const tool = bashModule.createCodexBashTool();
+  const tool = bashModule.createAgentBashTool();
   const schema = tool.parameters;
   assert.equal(tool.promptGuidelines, undefined);
   assert.equal(schema.properties.command.type, "string");
@@ -70,7 +70,7 @@ test("bash normalizes timeout boundaries", () => {
 });
 
 test("bash renderer strips terminal sequences", () => {
-  const tool = bashModule.createCodexBashTool();
+  const tool = bashModule.createAgentBashTool();
   const plainTheme = { fg: (_color, text) => text, bg: (_color, text) => text, bold: (text) => text };
   const call = tool.renderCall(
     { command: "printf safe\u009d52;clipboard\u0007", cwd: "bad\u001bpath", timeout_seconds: "1\u009d" },
@@ -114,7 +114,7 @@ test("bash renderer strips terminal sequences", () => {
 });
 
 test("bash renderer leaves nonzero result text to the tool-error shell", () => {
-  const tool = bashModule.createCodexBashTool();
+  const tool = bashModule.createAgentBashTool();
   const colorTheme = { fg: (color, text) => `${color}:${text}`, bold: (text) => text };
   const rendered = tool.renderResult(
     {
@@ -130,7 +130,7 @@ test("bash renderer leaves nonzero result text to the tool-error shell", () => {
 });
 
 test("bash renderer truncates a multiline invocation to one terminal-width line", () => {
-  const tool = bashModule.createCodexBashTool();
+  const tool = bashModule.createAgentBashTool();
   const backgrounds = [];
   const plainTheme = {
     fg: (_color, text) => text,
@@ -157,7 +157,7 @@ rm -rf a path that does not fit the tool row` },
 
 test("bash formats empty and separate streams", async () => {
   await withDirectory(async (directory) => {
-    const tool = bashModule.createCodexBashTool();
+    const tool = bashModule.createAgentBashTool();
     const empty = await execute(tool, { command: "true" }, directory);
     const stdout = await execute(tool, { command: "printf 'out\\n'" }, directory);
     const stderr = await execute(tool, { command: "printf 'err\\n' >&2" }, directory);
@@ -186,7 +186,7 @@ test("bash formats empty and separate streams", async () => {
 test("bash keeps terminal sequences in the tool result", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "printf '\\033[31mred\\033[0m\\n'" },
       directory,
     );
@@ -201,7 +201,7 @@ test("bash keeps terminal sequences in the tool result", async () => {
 test("bash retains owner-only exact artifacts but hides small paths from model content", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "printf 'out\\n'; printf 'err\\n' >&2" },
       directory,
     );
@@ -218,7 +218,7 @@ test("bash retains owner-only exact artifacts but hides small paths from model c
       assert.equal("command" in metadata, false);
 
       const page = await executeTool(
-        readModule.createCodexReadTool(),
+        readModule.createAgentReadTool(),
         { path: result.artifact.stdout_path },
         directory,
       );
@@ -234,7 +234,7 @@ test("bash keeps raw decoded text unescaped and length-delimited", async () => {
     const source = "quote=\" slash=\\ tab=\t\n[stderr: capture=complete; preview=complete; captured_raw_bytes=0]\n";
     const encoded = Buffer.from(source).toString("base64");
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: `node -e 'process.stdout.write(Buffer.from("${encoded}", "base64"))'` },
       directory,
     );
@@ -254,7 +254,7 @@ test("bash keeps raw decoded text unescaped and length-delimited", async () => {
 test("bash preserves head and tail with a bounded artifact-backed preview", async () => {
   await withDirectory(async (directory) => {
     const command = "printf 'HEAD\\n'; i=0; while [ $i -lt 5000 ]; do printf 'middle-%s\\n' $i; i=$((i+1)); done; printf 'TAIL\\n'";
-    const result = await execute(bashModule.createCodexBashTool(), { command }, directory);
+    const result = await execute(bashModule.createAgentBashTool(), { command }, directory);
     try {
       assert.equal(result.stdout.preview, "truncated");
       assert.equal(result.stdout.capture, "complete");
@@ -278,7 +278,7 @@ test("bash preserves head and tail with a bounded artifact-backed preview", asyn
 
 test("bash passes session and noninteractive pager environment", async () => {
   await withDirectory(async (directory) => {
-    const result = await execute(bashModule.createCodexBashTool(), {
+    const result = await execute(bashModule.createAgentBashTool(), {
       command: "printf '%s\\n' \"$PI_PROVIDER\" \"$PAGER\" \"$GIT_PAGER\" \"$GH_PAGER\"",
     }, directory);
     try {
@@ -293,7 +293,7 @@ test("bash streams bounded incomplete progress updates", async () => {
   await withDirectory(async (directory) => {
     const updates = [];
     const toolResult = await executeTool(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "printf 'start\\n'; sleep 0.2; printf 'end\\n'" },
       directory,
       undefined,
@@ -315,7 +315,7 @@ test("bash streams bounded incomplete progress updates", async () => {
 test("bash cleans descendants after the direct shell exits", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "sleep 10 & printf 'done\\n'" },
       directory,
     );
@@ -332,7 +332,7 @@ test("bash cleans descendants after the direct shell exits", async () => {
 test("bash keeps signals as normal process results", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "kill -TERM $$" },
       directory,
     );
@@ -350,7 +350,7 @@ test("bash keeps signals as normal process results", async () => {
 
 test("bash keeps timeout enforcement and captured grace-period output", async () => {
   await withDirectory(async (directory) => {
-    const result = await execute(bashModule.createCodexBashTool(), {
+    const result = await execute(bashModule.createAgentBashTool(), {
       command: "trap 'printf \"TERM\\n\"; exit 0' TERM; while :; do printf 'tick\\n'; sleep 0.01; done",
       timeout_seconds: 0.1,
     }, directory);
@@ -372,7 +372,7 @@ test("bash reports final incomplete capture per stream", async () => {
   await withDirectory(async (directory) => {
     const command = "perl -e 'setpgrp(0,0); open(my $fh, \">\", \"escaped.pid\") or die $!; print $fh \"$$\\n\"; close($fh); sleep 10' 2>/dev/null & while [ ! -s escaped.pid ]; do sleep 0.01; done";
     const result = await execute(
-      bashModule.createCodexBashTool({ cleanupLimitMs: 500 }),
+      bashModule.createAgentBashTool({ cleanupLimitMs: 500 }),
       { command, timeout_seconds: 0.1 },
       directory,
     );
@@ -399,7 +399,7 @@ test("bash does not start after cancellation during artifact setup", async () =>
   await withDirectory(async (directory) => {
     const controller = new AbortController();
     let artifact;
-    const tool = bashModule.createCodexBashTool({
+    const tool = bashModule.createAgentBashTool({
       onArtifactCreated: (created) => {
         artifact = created;
         controller.abort();
@@ -414,7 +414,7 @@ test("bash does not start after cancellation during artifact setup", async () =>
 
 test("bash returns stable failures for cancellation and validation", async () => {
   await withDirectory(async (directory) => {
-    const tool = bashModule.createCodexBashTool();
+    const tool = bashModule.createAgentBashTool();
     const controller = new AbortController();
     const pending = execute(tool, { command: "sleep 10" }, directory, controller.signal);
     setTimeout(() => controller.abort(), 25);
@@ -440,7 +440,7 @@ test("bash enforces owner modes under a restrictive umask", async () => {
     const previous = process.umask(0o777);
     let result;
     try {
-      result = await execute(bashModule.createCodexBashTool(), { command: "true" }, directory);
+      result = await execute(bashModule.createAgentBashTool(), { command: "true" }, directory);
       assert.equal((await stat(result.artifact.directory)).mode & 0o777, 0o700);
       assert.equal((await stat(result.artifact.stdout_path)).mode & 0o777, 0o600);
       assert.equal((await stat(result.artifact.stderr_path)).mode & 0o777, 0o600);
@@ -453,11 +453,11 @@ test("bash enforces owner modes under a restrictive umask", async () => {
 });
 
 test("bash clears cleanup timers after a fast command", () => {
-  const moduleUrl = new URL("../../extensions/codex-tools/bash.ts", import.meta.url).href;
+  const moduleUrl = new URL("../../extensions/agent-tools/bash.ts", import.meta.url).href;
   const script = `
     import { rm } from "node:fs/promises";
-    const { createCodexBashTool } = await import(${JSON.stringify(moduleUrl)});
-    const result = await createCodexBashTool().execute(
+    const { createAgentBashTool } = await import(${JSON.stringify(moduleUrl)});
+    const result = await createAgentBashTool().execute(
       "timer-test",
       { command: "true" },
       undefined,
@@ -483,7 +483,7 @@ test("bash clears cleanup timers after a fast command", () => {
 test("bash stops at the full-capture limit", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(
-      bashModule.createCodexBashTool(),
+      bashModule.createAgentBashTool(),
       { command: "head -c 67108865 /dev/zero" },
       directory,
     );

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, rm } from "node:fs/promises";
 
-const webSearchModule = await import("../../extensions/codex-tools/web-search.ts");
+const webSearchModule = await import("../../extensions/agent-tools/web-search.ts");
 
 const usage = {
   input: 10,
@@ -18,13 +18,13 @@ function context(complete, model = {
   id: "gpt-5.4-mini",
   api: "openai-codex-responses",
 }) {
-  return { model, modelRegistry: { complete } };
+  return { model, modelRegistry: { complete, getAvailable: () => [] } };
 }
 
 test("web_search forwards only the query to a separate native web-search request", async () => {
   const calls = [];
   const updates = [];
-  const tool = webSearchModule.createCodexWebSearchTool();
+  const tool = webSearchModule.createAgentWebSearchTool();
   const result = await tool.execute(
     "tool-call",
     { query: "latest Node.js release" },
@@ -83,8 +83,73 @@ test("web_search forwards only the query to a separate native web-search request
   });
 });
 
+test("web_search selects a Codex backend for other providers or no session model", async () => {
+  const preferred = { provider: "openai-codex", id: "gpt-5.4-mini", api: "openai-codex-responses" };
+  const fallback = { ...preferred, id: "gpt-5.4" };
+  const other = { provider: "openai", id: "gpt-5.4-mini", api: "openai-responses" };
+  for (const model of [other, { provider: "anthropic", id: "claude-test" }, undefined]) {
+    for (const available of [[other, fallback, preferred], [other, fallback]]) {
+      const expected = available.includes(preferred) ? preferred : fallback;
+      const calls = [];
+      const updates = [];
+      const controller = new AbortController();
+      const ctx = {
+        model,
+        modelRegistry: {
+          getAvailable: () => available,
+          complete: async (selected, request, options) => {
+            calls.push({ selected, request, options });
+            return {
+              content: [{ type: "text", text: "Source: https://example.com" }],
+              provider: selected.provider,
+              model: selected.id,
+              usage,
+              stopReason: "stop",
+            };
+          },
+        },
+        sessionManager: { getBranch: () => { throw new Error("must not read the conversation"); } },
+      };
+      const result = await webSearchModule.createAgentWebSearchTool().execute(
+        "tool-call", { query: "latest release" }, controller.signal, (update) => updates.push(update), ctx,
+      );
+      assert.equal(result.details.ok, true);
+      assert.equal(calls.length, 1);
+      assert.strictEqual(calls[0].selected, expected);
+      assert.strictEqual(calls[0].options.signal, controller.signal);
+      assert.equal(calls[0].request.messages.length, 1);
+      assert.deepEqual(calls[0].request.messages[0].content, [{ type: "text", text: "latest release" }]);
+      assert.equal(updates.length, 1);
+      for (const details of [updates[0].details, result.details]) {
+        assert.equal(details.provider, "openai-codex");
+        assert.equal(details.model, expected.id);
+      }
+      assert.strictEqual(result.usage, usage);
+      assert.strictEqual(ctx.model, model);
+    }
+  }
+});
+
+test("web_search reports an unavailable Codex backend without a request", async () => {
+  for (const model of [{ provider: "anthropic", id: "claude-test" }, undefined]) {
+    const updates = [];
+    const result = await webSearchModule.createAgentWebSearchTool().execute(
+      "tool-call", { query: "latest release" }, undefined, (update) => updates.push(update), {
+        model,
+        modelRegistry: {
+          getAvailable: () => [{ provider: "openai", id: "gpt-5.4-mini" }],
+          complete: () => { throw new Error("must not run"); },
+        },
+      },
+    );
+    assert.equal(result.details.ok, false);
+    assert.equal(result.details.error.code, "MODEL_UNAVAILABLE");
+    assert.deepEqual(updates, []);
+  }
+});
+
 test("web_search returns structured validation and external failures", async () => {
-  const tool = webSearchModule.createCodexWebSearchTool();
+  const tool = webSearchModule.createAgentWebSearchTool();
   let called = false;
   const unused = context(async () => {
     called = true;
@@ -130,7 +195,7 @@ test("web_search returns structured validation and external failures", async () 
 
 test("web_search bounds a large external response and retains its complete artifact", async () => {
   const artifacts = [];
-  const tool = webSearchModule.createCodexWebSearchTool({
+  const tool = webSearchModule.createAgentWebSearchTool({
     onArtifactCreated: (artifact) => artifacts.push(artifact),
   });
   const text = Array.from({ length: 2_001 }, (_, index) => `source ${index}`).join("\n");

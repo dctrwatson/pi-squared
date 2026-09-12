@@ -353,11 +353,11 @@ A Pi subagent starts with:
 
 ```text
 --no-extensions --no-skills --no-prompt-templates --no-themes
---extension <bundled-codex-tools-path>
+--extension <bundled-agent-tools-path>
 --extension <bundled-prevent-idle-path>
 ```
 
-Pi loads `codex-tools` and `prevent-idle` explicitly. For an `openai-codex` model, `codex-tools` overrides `read`, `find`, `grep`, `bash`, `git`, and `gh`. It also corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the Pi subagent works.
+Pi loads `agent-tools` and `prevent-idle` explicitly. For all models, `agent-tools` provides `read`, `find`, `grep`, `bash`, `git`, `gh`, and Codex-backed `web_search`. It also corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the Pi subagent works.
 
 The Pi runtime leaves `--tools` unset. A Pi subagent receives Pi's normal configured tool set. Pi's built-in default is `read`, `bash`, `edit`, and `write`. A Pi persona extension can register additional active tools.
 

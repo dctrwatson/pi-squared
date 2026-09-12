@@ -43,8 +43,8 @@ const grepParameters = Type.Object({
   limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return; default: 100" })),
 });
 
-export type CodexFindInput = Static<typeof findParameters>;
-export type CodexGrepInput = Static<typeof grepParameters>;
+export type AgentFindInput = Static<typeof findParameters>;
+export type AgentGrepInput = Static<typeof grepParameters>;
 
 const FIND_DESCRIPTION = "Find paths by glob pattern. Regular-file results are directly reusable by read. Respects .gitignore. The result-count default is 1,000. Text output is capped at 50 KiB. Truncated results expose a complete plain-text artifact when capture succeeds.";
 const GREP_DESCRIPTION = "Search file contents for a pattern. Patterns use regular expressions by default; set literal to true for exact text. The preview groups matches under session-resolvable paths that can be passed directly to read. Artifacts repeat the path on every record. Respects .gitignore. The match-count default is 100. Text output is capped at 50 KiB. Lines are capped at 500 characters. Truncated results expose a complete plain-text artifact when capture succeeds.";
@@ -52,12 +52,12 @@ const GREP_DESCRIPTION = "Search file contents for a pattern. Patterns use regul
 type SearchCaptureState = "complete" | "incomplete";
 type SearchToolName = "find" | "grep";
 
-export interface CodexFindToolOptions extends FindToolOptions {
+export interface AgentFindToolOptions extends FindToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
   executable?: string;
 }
 
-export interface CodexGrepToolOptions {
+export interface AgentGrepToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
   executable?: string;
 }
@@ -90,17 +90,17 @@ interface SearchSuccessDetails<ToolName extends SearchToolName> extends ToolSucc
   truncation?: NonNullable<FindToolDetails["truncation"]>;
 }
 
-export type CodexFindToolDetails = SearchSuccessDetails<"find"> & {
+export type AgentFindToolDetails = SearchSuccessDetails<"find"> & {
   result_limit?: number;
 };
 
-export type CodexGrepToolDetails = SearchSuccessDetails<"grep"> & {
+export type AgentGrepToolDetails = SearchSuccessDetails<"grep"> & {
   match_limit?: number;
   lines_truncated?: boolean;
 };
 
-export type CodexFindResultDetails = CodexFindToolDetails | ToolFailureDetails<"find", SearchErrorCode>;
-export type CodexGrepResultDetails = CodexGrepToolDetails | ToolFailureDetails<"grep", SearchErrorCode>;
+export type AgentFindResultDetails = AgentFindToolDetails | ToolFailureDetails<"find", SearchErrorCode>;
+export type AgentGrepResultDetails = AgentGrepToolDetails | ToolFailureDetails<"grep", SearchErrorCode>;
 
 interface SearchRecord {
   text: string;
@@ -133,15 +133,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function prepareFindArguments(rawInput: unknown): CodexFindInput {
+function prepareFindArguments(rawInput: unknown): AgentFindInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { pattern: "\0" };
   if (typeof prepared.pattern !== "string") prepared.pattern = "\0";
   if (prepared.path !== undefined && typeof prepared.path !== "string") prepared.path = "\0";
   if (prepared.limit !== undefined && typeof prepared.limit !== "number") prepared.limit = -1;
-  return prepared as CodexFindInput;
+  return prepared as AgentFindInput;
 }
 
-function prepareGrepArguments(rawInput: unknown): CodexGrepInput {
+function prepareGrepArguments(rawInput: unknown): AgentGrepInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { pattern: "\0" };
   if (typeof prepared.pattern !== "string") prepared.pattern = "\0";
   if (prepared.path !== undefined && typeof prepared.path !== "string") prepared.path = "\0";
@@ -154,10 +154,10 @@ function prepareGrepArguments(rawInput: unknown): CodexGrepInput {
       prepared.limit = -1;
     }
   }
-  return prepared as CodexGrepInput;
+  return prepared as AgentGrepInput;
 }
 
-function normalizeFindInput(rawInput: unknown): CodexFindInput {
+function normalizeFindInput(rawInput: unknown): AgentFindInput {
   if (!isRecord(rawInput)) throw new Error("Input must be an object");
   const allowed = new Set(["pattern", "path", "limit"]);
   const unknown = Object.keys(rawInput).find((key) => !allowed.has(key));
@@ -169,10 +169,10 @@ function normalizeFindInput(rawInput: unknown): CodexFindInput {
     throw new Error("path must be a string without NUL");
   }
   if (rawInput.limit !== undefined && typeof rawInput.limit !== "number") throw new Error("limit must be a number");
-  return rawInput as CodexFindInput;
+  return rawInput as AgentFindInput;
 }
 
-function normalizeGrepInput(rawInput: unknown): CodexGrepInput {
+function normalizeGrepInput(rawInput: unknown): AgentGrepInput {
   if (!isRecord(rawInput)) throw new Error("Input must be an object");
   const allowed = new Set(["pattern", "path", "glob", "ignore_case", "literal", "context", "limit"]);
   const unknown = Object.keys(rawInput).find((key) => !allowed.has(key));
@@ -197,7 +197,7 @@ function normalizeGrepInput(rawInput: unknown): CodexGrepInput {
     throw new Error("context must be a nonnegative number");
   }
   if (rawInput.limit !== undefined && typeof rawInput.limit !== "number") throw new Error("limit must be a number");
-  return rawInput as CodexGrepInput;
+  return rawInput as AgentGrepInput;
 }
 
 function singleLineErrorMessage(message: string): string {
@@ -522,7 +522,7 @@ async function resolveSearchExecutable(
   names: string[],
   cwd: string,
 ): Promise<string> {
-  if (process.platform === "win32") throw new Error("Codex search tools do not support Windows");
+  if (process.platform === "win32") throw new Error("Agent search tools do not support Windows");
   if (configured) return configured;
   const primaryName = names[0] ?? "search-tool";
   const managed = path.join(getAgentDir(), "bin", primaryName);
@@ -679,7 +679,7 @@ async function captureFind(
   pattern: string,
   searchRoot: string,
   cwd: string,
-  options: CodexFindToolOptions | undefined,
+  options: AgentFindToolOptions | undefined,
   capture: SearchCapture,
   signal: AbortSignal | undefined,
 ): Promise<void> {
@@ -719,7 +719,7 @@ async function captureGrep(
   input: Record<string, unknown>,
   searchRoot: string,
   cwd: string,
-  options: CodexGrepToolOptions | undefined,
+  options: AgentGrepToolOptions | undefined,
   capture: SearchCapture,
   signal: AbortSignal | undefined,
 ): Promise<number> {
@@ -850,10 +850,10 @@ async function captureGrep(
   });
 }
 
-/** Create a Codex find tool with normalized output and recoverable truncation. */
-export function createCodexFindTool(
-  options?: CodexFindToolOptions,
-): ToolDefinition<typeof findParameters, CodexFindResultDetails> {
+/** Create a find tool with normalized output and recoverable truncation. */
+export function createAgentFindTool(
+  options?: AgentFindToolOptions,
+): ToolDefinition<typeof findParameters, AgentFindResultDetails> {
   const base = createFindToolDefinition(process.cwd(), options);
   return {
     name: base.name,
@@ -915,7 +915,7 @@ export function createCodexFindTool(
         const needsArtifact = countLimited || preview.byteTruncated || !capture.complete;
         if (!needsArtifact) await removeSearchArtifact(artifact.directory);
         const readPaths = [...new Set(preview.outputRecords.map((record) => record.readPath))];
-        const details: CodexFindToolDetails = {
+        const details: AgentFindToolDetails = {
           ok: true,
           tool: "find",
           result_count: capture.records.length,
@@ -956,10 +956,10 @@ export function createCodexFindTool(
   };
 }
 
-/** Create a Codex grep tool with canonical read paths and recoverable truncation. */
-export function createCodexGrepTool(
-  options?: CodexGrepToolOptions,
-): ToolDefinition<typeof grepParameters, CodexGrepResultDetails> {
+/** Create a grep tool with canonical read paths and recoverable truncation. */
+export function createAgentGrepTool(
+  options?: AgentGrepToolOptions,
+): ToolDefinition<typeof grepParameters, AgentGrepResultDetails> {
   const base = createGrepToolDefinition(process.cwd());
   return {
     name: base.name,
@@ -1026,7 +1026,7 @@ export function createCodexGrepTool(
         const needsArtifact = countLimited || preview.byteTruncated || preview.lineTruncated || !capture.complete;
         if (!needsArtifact) await removeSearchArtifact(artifact.directory);
         const readPaths = [...new Set(preview.outputRecords.map((record) => record.readPath))];
-        const details: CodexGrepToolDetails = {
+        const details: AgentGrepToolDetails = {
           ok: true,
           tool: "grep",
           result_count: totalMatches,

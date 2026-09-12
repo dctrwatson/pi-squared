@@ -5,11 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
-  createCodexFindTool,
-  createCodexGrepTool,
+  createAgentFindTool,
+  createAgentGrepTool,
   isComposableFindPathRecord,
   toSessionReadPath,
-} from "../../extensions/codex-tools/search.ts";
+} from "../../extensions/agent-tools/search.ts";
 
 function context(cwd) {
   return {
@@ -28,7 +28,7 @@ async function execute(tool, input, cwd) {
 }
 
 async function withDirectory(callback) {
-  const directory = await mkdtemp(join(tmpdir(), "pi-codex-search-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-agent-search-test-"));
   try {
     return await callback(directory);
   } finally {
@@ -37,7 +37,7 @@ async function withDirectory(callback) {
 }
 
 function findTool(results, onArtifactCreated) {
-  return createCodexFindTool({
+  return createAgentFindTool({
     onArtifactCreated,
     operations: {
       exists: () => true,
@@ -187,7 +187,7 @@ test("grep normalizes directory, file, and outside paths", async () => {
     const nested = join(directory, "nested");
     await mkdir(nested);
     await writeFile(join(nested, "source.ts"), "before\nneedle\nafter\n", "utf8");
-    const tool = createCodexGrepTool();
+    const tool = createAgentGrepTool();
 
     const directoryResult = await execute(
       tool,
@@ -226,7 +226,7 @@ test("grep preview groups matches under one heading per file", async () => {
     await writeFile(join(directory, "nested", "a.ts"), "needle one\nneedle two\n", "utf8");
     await writeFile(join(directory, "nested", "b.ts"), "needle three\n", "utf8");
     const result = await execute(
-      createCodexGrepTool(),
+      createAgentGrepTool(),
       { pattern: "needle", path: "nested", literal: true, limit: 10 },
       directory,
     );
@@ -244,7 +244,7 @@ test("small complete grep output deletes its pre-created artifact", async () => 
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source.ts"), "needle\n", "utf8");
     let artifact;
-    const tool = createCodexGrepTool({ onArtifactCreated: (created) => { artifact = created; } });
+    const tool = createAgentGrepTool({ onArtifactCreated: (created) => { artifact = created; } });
     const result = await execute(tool, { pattern: "needle", literal: true }, directory);
     assert.equal(result.content[0].text, "source.ts\n1: needle");
     assert.deepEqual(result.details.read_paths, ["source.ts"]);
@@ -260,7 +260,7 @@ test("grep requests heading-style output from rg", async () => {
       "args-rg",
       "printf '%s\\n' \"$@\" > \"$(dirname \"$0\")/rg-args\"\nexit 1\n",
     );
-    const result = await execute(createCodexGrepTool({ executable }), { pattern: "needle" }, directory);
+    const result = await execute(createAgentGrepTool({ executable }), { pattern: "needle" }, directory);
     assert.equal(result.content[0].text, "No matches found");
     const args = (await readFile(join(directory, "rg-args"), "utf8")).split("\n");
     assert.ok(args.includes("--json"));
@@ -276,7 +276,7 @@ test("grep reports invalid regular expressions with literal-search guidance", as
       "printf '%s\\n' 'rg: regex parse error:' >&2\nprintf '%s\\n' '    (?:prepareArguments()' >&2\nprintf '%s\\n' '    ^' >&2\nprintf '%s\\n' 'error: unclosed group' >&2\nexit 2\n",
     );
     const result = await execute(
-      createCodexGrepTool({ executable }),
+      createAgentGrepTool({ executable }),
       { pattern: "(?:prepareArguments()" },
       directory,
     );
@@ -299,7 +299,7 @@ test("grep match limits retain omitted matches in a complete artifact", async ()
     await mkdir(join(directory, "nested"));
     await writeFile(join(directory, "nested", "source.ts"), "needle one\nneedle two\n", "utf8");
     const result = await execute(
-      createCodexGrepTool(),
+      createAgentGrepTool(),
       { pattern: "needle", path: "nested", literal: true, limit: 1 },
       directory,
     );
@@ -322,7 +322,7 @@ test("grep long-line truncation exposes the complete line artifact", async () =>
   await withDirectory(async (directory) => {
     const longLine = `needle ${"x".repeat(700)}`;
     await writeFile(join(directory, "source.ts"), `${longLine}\n`, "utf8");
-    const result = await execute(createCodexGrepTool(), { pattern: "needle", literal: true }, directory);
+    const result = await execute(createAgentGrepTool(), { pattern: "needle", literal: true }, directory);
     try {
       assert.match(result.content[0].text, /\[grep: matches=1\/1; preview=truncated; lines_truncated=true; capture=complete; artifact=.*\/stdout\]$/);
       assert.equal(result.details.lines_truncated, true);
@@ -339,7 +339,7 @@ test("grep byte truncation retains every captured match", async () => {
     const lines = Array.from({ length: 200 }, (_, index) => `needle-${String(index).padStart(3, "0")}-${"x".repeat(350)}`);
     await writeFile(join(directory, "source.ts"), `${lines.join("\n")}\n`, "utf8");
     const result = await execute(
-      createCodexGrepTool(),
+      createAgentGrepTool(),
       { pattern: "needle", literal: true, limit: 500 },
       directory,
     );
@@ -359,7 +359,7 @@ test("grep byte truncation retains every captured match", async () => {
 test("find retains records captured before an fd failure", async () => {
   await withDirectory(async (directory) => {
     const executable = await writeExecutable(directory, "fake-fd", "printf 'one.ts\\0'\nprintf 'walk failed' >&2\nexit 2\n");
-    const result = await execute(createCodexFindTool({ executable }), { pattern: "*" }, directory);
+    const result = await execute(createAgentFindTool({ executable }), { pattern: "*" }, directory);
     try {
       assert.match(result.content[0].text, /^one\.ts\n\n\[find: results=1\/1; preview=complete; capture=incomplete; artifact=/);
       assert.equal(result.details.capture, "incomplete");
@@ -383,7 +383,7 @@ test("grep retains matches captured before an rg failure", async () => {
       "fake-rg",
       `printf '%s\\n' '${event}'\nprintf 'read failed' >&2\nexit 2\n`,
     );
-    const result = await execute(createCodexGrepTool({ executable }), { pattern: "needle" }, directory);
+    const result = await execute(createAgentGrepTool({ executable }), { pattern: "needle" }, directory);
     try {
       assert.match(result.content[0].text, /^source\.ts\n1: needle\n\n\[grep: matches=1\/1; preview=complete; capture=incomplete; artifact=/);
       assert.equal(result.details.capture, "incomplete");
@@ -399,7 +399,7 @@ test("grep retains matches captured before an rg failure", async () => {
 test("grep marks malformed protocol output as incomplete", async () => {
   await withDirectory(async (directory) => {
     const executable = await writeExecutable(directory, "bad-rg", "printf 'null\\n'\n");
-    const result = await execute(createCodexGrepTool({ executable }), { pattern: "needle" }, directory);
+    const result = await execute(createAgentGrepTool({ executable }), { pattern: "needle" }, directory);
     try {
       assert.match(result.content[0].text, /^\[grep: matches=0\/0; preview=complete; capture=incomplete; artifact=/);
       assert.equal(result.details.capture, "incomplete");
@@ -416,7 +416,7 @@ test("grep cancellation waits for the child and removes its artifact", async () 
     const executable = await writeExecutable(directory, "slow-rg", "trap 'exit 0' TERM\nsleep 10\n");
     const controller = new AbortController();
     let artifact;
-    const tool = createCodexGrepTool({
+    const tool = createAgentGrepTool({
       executable,
       onArtifactCreated: (created) => {
         artifact = created;
@@ -432,8 +432,8 @@ test("grep cancellation waits for the child and removes its artifact", async () 
 });
 
 test("search wrappers expose snake_case schemas and rendering hooks", () => {
-  const find = createCodexFindTool();
-  const grep = createCodexGrepTool();
+  const find = createAgentFindTool();
+  const grep = createAgentGrepTool();
 
   assert.equal(find.name, "find");
   assert.equal(grep.name, "grep");
@@ -456,7 +456,7 @@ test("search wrappers expose snake_case schemas and rendering hooks", () => {
 test("search renderers retain truncation warnings from snake_case details", () => {
   const theme = { fg: (_color, text) => text, bold: (text) => text };
   const context = { lastComponent: undefined, showImages: false };
-  const find = createCodexFindTool();
+  const find = createAgentFindTool();
   const findResult = find.renderResult(
     {
       content: [{ type: "text", text: "one.ts" }],
@@ -477,7 +477,7 @@ test("search renderers retain truncation warnings from snake_case details", () =
   ).render(200).join("\n");
   assert.match(findResult, /Truncated: 1 results limit/);
 
-  const grep = createCodexGrepTool();
+  const grep = createAgentGrepTool();
   const grepResult = grep.renderResult(
     {
       content: [{ type: "text", text: "source.ts\n1: needle" }],

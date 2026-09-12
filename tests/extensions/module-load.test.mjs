@@ -27,8 +27,7 @@ test("all Pi extension modules load with the pinned Pi API", async () => {
     import("../../extensions/prevent-idle.ts"),
     import("../../extensions/interactive-shell.ts"),
     import("../../extensions/workspace/index.ts"),
-    import("../../extensions/ask-user.ts"),
-    import("../../extensions/codex-tools/index.ts"),
+    import("../../extensions/agent-tools/index.ts"),
   ]);
 
   for (const module of modules) {

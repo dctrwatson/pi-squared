@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createExtensionRuntime, ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
-const readModule = await import("../../extensions/codex-tools/read.ts");
-const codexModule = await import("../../extensions/codex-tools/index.ts");
+const readModule = await import("../../extensions/agent-tools/read.ts");
+const agentModule = await import("../../extensions/agent-tools/index.ts");
 
 function context(cwd) {
   return {
@@ -30,7 +30,7 @@ function output(result) {
 }
 
 async function withDirectory(callback) {
-  const directory = await mkdtemp(join(tmpdir(), "pi-codex-read-test-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-agent-read-test-"));
   try {
     return await callback(directory);
   } finally {
@@ -38,33 +38,55 @@ async function withDirectory(callback) {
   }
 }
 
-test("codex-tools register only after a Codex model is selected", async () => {
-  for (const provider of ["openai", "anthropic", undefined]) {
+test("agent-tools register once and enable tools for every provider", async () => {
+  for (const provider of ["openai-codex", "openai", "anthropic", "google", undefined]) {
     const handlers = new Map();
     const tools = [];
-    codexModule.default({
+    let activeTools = ["read", "bash", "edit", "write", "custom_tool"];
+    agentModule.default({
       on(event, handler) {
         handlers.set(event, handler);
       },
       registerTool(tool) {
         tools.push(tool);
       },
+      getActiveTools: () => activeTools,
+      setActiveTools: (names) => { activeTools = names; },
     });
 
-    await handlers.get("session_start")({}, { model: provider ? { provider } : undefined });
-    assert.deepEqual(tools, []);
-    assert.equal(await handlers.get("tool_result")({
+    const expected = ["ask_user", "bash", "find", "gh", "git", "grep", "read", "web_search"];
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
+    const ctx = { model: provider ? { provider } : undefined };
+    await handlers.get("session_start")({}, ctx);
+    await handlers.get("session_start")({}, ctx);
+    assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
+    assert.deepEqual(activeTools.slice().sort(), [...expected, "custom_tool", "edit", "write"].sort());
+    const activeBeforeSwitch = [...activeTools];
+    const notifications = [];
+    for (const nextProvider of ["anthropic", "openai-codex", "google"]) {
+      const model = { provider: nextProvider };
+      await handlers.get("model_select")?.({ model }, {
+        ...ctx, model, hasUI: true, ui: { notify: (...args) => notifications.push(args) },
+      });
+      assert.deepEqual(activeTools, activeBeforeSwitch);
+      assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
+    }
+    assert.deepEqual(notifications, []);
+    const correction = await handlers.get("tool_result")({
       toolName: "write",
-      input: { path: "before.txt", content: "é" },
+      input: { path: "utf8.txt", content: "é" },
       isError: false,
-      content: [{ type: "text", text: "Successfully wrote 1 bytes to before.txt" }],
-    }), undefined);
+      content: [{ type: "text", text: "Successfully wrote 1 bytes to utf8.txt" }],
+    });
+    assert.equal(correction.content[0].text, "Successfully wrote 2 bytes to utf8.txt");
   }
+});
 
+test("agent-tools correct write byte counts and process errors", async () => {
   const handlers = new Map();
   const tools = [];
   let activeTools = ["read", "bash", "edit", "write"];
-  codexModule.default({
+  agentModule.default({
     on(event, handler) {
       handlers.set(event, handler);
     },
@@ -78,13 +100,13 @@ test("codex-tools register only after a Codex model is selected", async () => {
       activeTools = names;
     },
   });
-  const ctx = { model: { provider: "openai-codex" } };
+  const ctx = { model: { provider: "anthropic" } };
   await handlers.get("session_start")({}, ctx);
   await handlers.get("session_start")({}, ctx);
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["bash", "find", "gh", "git", "grep", "read", "web_search"]);
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["ask_user", "bash", "find", "gh", "git", "grep", "read", "web_search"]);
   assert.equal(tools.some((tool) => tool.name === "apply_diff" || tool.name === "patch"), false);
   assert.equal(tools.some((tool) => tool.name === "edit" || tool.name === "write"), false);
-  assert.deepEqual(activeTools.sort(), ["bash", "edit", "find", "gh", "git", "grep", "read", "web_search", "write"]);
+  assert.deepEqual(activeTools.sort(), ["ask_user", "bash", "edit", "find", "gh", "git", "grep", "read", "web_search", "write"]);
 
   const writeResult = (path, content, isError = false) => ({
     toolName: "write",
@@ -127,7 +149,7 @@ test("codex-tools register only after a Codex model is selected", async () => {
   assert.equal(await handlers.get("tool_result")(processResult("git", 1), ctx), undefined);
   assert.deepEqual(await handlers.get("tool_result")(processResult("git", 1, "fatal: bad revision\n"), ctx), { isError: true });
   assert.deepEqual(await handlers.get("tool_result")(processResult("git", 128, "fatal: pathspec 'tests/extensions/child.test.mjs' did not match any files\n"), ctx), { isError: true });
-  for (const toolName of ["bash", "read", "git", "gh"]) {
+  for (const toolName of ["ask_user", "bash", "read", "git", "gh"]) {
     assert.deepEqual(await handlers.get("tool_result")({
       toolName,
       isError: false,
@@ -136,23 +158,11 @@ test("codex-tools register only after a Codex model is selected", async () => {
     }, ctx), { isError: true });
   }
 
-  const notifications = [];
-  await handlers.get("model_select")(
-    { model: { provider: "openai" } },
-    { ...ctx, hasUI: true, ui: { notify: (...args) => notifications.push(args) } },
-  );
-  assert.match(notifications[0][0], /stay active/);
-
-  await handlers.get("model_select")({ model: { provider: "openai" } }, ctx);
-  const afterSwitch = await handlers.get("tool_result")(writeResult("later.txt", "é"), ctx);
-  assert.equal(afterSwitch.content[0].text, "Successfully wrote 2 bytes to later.txt");
-  await handlers.get("model_select")({ model: { provider: "openai-codex" } }, ctx);
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["bash", "find", "gh", "git", "grep", "read", "web_search"]);
 });
 
 test("tool-result middleware preserves content, details, and usage", async () => {
   const handlers = new Map();
-  codexModule.default({
+  agentModule.default({
     on(event, handler) {
       const existing = handlers.get(event) ?? [];
       existing.push(handler);
@@ -165,9 +175,9 @@ test("tool-result middleware preserves content, details, and usage", async () =>
   await handlers.get("session_start")[0]({}, { model: { provider: "openai-codex" } });
 
   const extension = {
-    path: "codex-tools-test",
-    resolvedPath: "codex-tools-test",
-    sourceInfo: { kind: "path", path: "codex-tools-test" },
+    path: "agent-tools-test",
+    resolvedPath: "agent-tools-test",
+    sourceInfo: { kind: "path", path: "agent-tools-test" },
     handlers,
     tools: new Map(),
     messageRenderers: new Map(),
@@ -264,7 +274,7 @@ test("tool-result middleware preserves content, details, and usage", async () =>
 test("read returns raw complete and continuation line pages", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source.ts"), "alpha\nβeta\nlast", "utf8");
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
 
     const first = await execute(tool, { path: "source.ts", max_lines: 2, max_bytes: 100 }, directory);
     const firstText = "alpha\nβeta\n\n[lines 1-2; next_start_line=3; eof=false]";
@@ -300,7 +310,7 @@ test("read adds stable actual line-number gutters on request", async () => {
   await withDirectory(async (directory) => {
     const lines = Array.from({ length: 12 }, (_, index) => `line ${index + 1}`);
     await writeFile(join(directory, "source"), `${lines.join("\n")}\n`, "utf8");
-    const result = await execute(readModule.createCodexReadTool(), {
+    const result = await execute(readModule.createAgentReadTool(), {
       path: "source",
       start_line: 8,
       max_lines: 3,
@@ -324,7 +334,7 @@ test("read reduces numbered pages at the formatted-output limit", async () => {
   await withDirectory(async (directory) => {
     const sourceLine = `${"x".repeat(19)}\n`;
     await writeFile(join(directory, "large-lines"), sourceLine.repeat(2_000), "utf8");
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     const clean = await execute(tool, {
       path: "large-lines",
       max_lines: 2_000,
@@ -363,7 +373,7 @@ test("read reduces numbered pages at the formatted-output limit", async () => {
 
 test("read counts empty and newline-terminated files correctly", async () => {
   await withDirectory(async (directory) => {
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     const cases = [
       ["empty", "", 0, "[lines none; next_start_line=null; eof=true]"],
       ["one-empty-line", "\n", 1, "[lines 1-1; next_start_line=null; eof=true]"],
@@ -393,7 +403,7 @@ test("read counts empty and newline-terminated files correctly", async () => {
 test("read stops at the line byte limit without splitting a line", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source"), "one\ntwo\nthree", "utf8");
-    const result = await execute(readModule.createCodexReadTool(), { path: "source", max_bytes: 7 }, directory);
+    const result = await execute(readModule.createAgentReadTool(), { path: "source", max_bytes: 7 }, directory);
 
     assert.equal(output(result), "one\n\n[lines 1-1; next_start_line=2; eof=false]");
     assert.equal(result.details.end_line, 1);
@@ -403,7 +413,7 @@ test("read stops at the line byte limit without splitting a line", async () => {
 
 test("read reports exact byte offsets for long lines", async () => {
   await withDirectory(async (directory) => {
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     await writeFile(join(directory, "first"), "12345\n", "utf8");
     const first = await execute(tool, { path: "first", max_bytes: 5 }, directory);
     assert.equal(output(first), "[read error: LINE_TOO_LONG; The first requested line exceeds max_bytes; line=1; byte_offset=0]");
@@ -422,7 +432,7 @@ test("read reports exact byte offsets for long lines", async () => {
 
 test("read applies the long-line boundary to exact source bytes", async () => {
   await withDirectory(async (directory) => {
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     await writeFile(join(directory, "exact"), "1234", "utf8");
     const exact = await execute(tool, { path: "exact", max_bytes: 4 }, directory);
     assert.match(output(exact), /^1234\n\n\[lines/);
@@ -438,7 +448,7 @@ test("read supports UTF-8 byte pages at code-point boundaries", async () => {
   await withDirectory(async (directory) => {
     const content = "Aé😀B";
     await writeFile(join(directory, "utf8"), content, "utf8");
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
 
     const first = await execute(tool, { path: "utf8", mode: "bytes", max_bytes: 3 }, directory);
     assert.equal(output(first), "Aé\n\n[bytes 0,3); next_start_byte=3; eof=false]");
@@ -460,7 +470,7 @@ test("read supports UTF-8 byte pages at code-point boundaries", async () => {
 test("read returns exact Base64 pages", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "binary"), Buffer.from([0xff, 0x00, 0x01]));
-    const result = await execute(readModule.createCodexReadTool(), {
+    const result = await execute(readModule.createAgentReadTool(), {
       path: "binary",
       mode: "bytes",
       encoding: "base64",
@@ -476,7 +486,7 @@ test("read preserves UTF-8 source text without JSON escaping", async () => {
   await withDirectory(async (directory) => {
     const source = "\uFEFF\"quote\"\\slash\tend\n[read: source-shaped line]\n";
     await writeFile(join(directory, "source"), source, "utf8");
-    const result = await execute(readModule.createCodexReadTool(), { path: "source" }, directory);
+    const result = await execute(readModule.createAgentReadTool(), { path: "source" }, directory);
     const text = output(result);
 
     assert.ok(text.startsWith(`${source}\n`));
@@ -490,7 +500,7 @@ test("read preserves UTF-8 source text without JSON escaping", async () => {
 test("read rejects invalid UTF-8 in text modes", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "binary"), Buffer.from([0xff]));
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
 
     for (const input of [{ path: "binary" }, { path: "binary", mode: "bytes" }]) {
       const result = await execute(tool, input, directory);
@@ -503,7 +513,7 @@ test("read rejects invalid UTF-8 in text modes", async () => {
 test("read treats revision input as an unknown field", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source"), "ok", "utf8");
-    const result = await execute(readModule.createCodexReadTool(), {
+    const result = await execute(readModule.createAgentReadTool(), {
       path: "source",
       expected_revision: `sha256:${"0".repeat(64)}`,
     }, directory);
@@ -515,7 +525,7 @@ test("read treats revision input as an unknown field", async () => {
 test("read returns INVALID_INPUT for invalid fields", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source"), "ok", "utf8");
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     const cases = [
       { path: 12 },
       { path: "source", unknown: true },
@@ -535,7 +545,7 @@ test("read returns INVALID_INPUT for invalid fields", async () => {
 
 test("read keeps caller-controlled failures in one control line", async () => {
   await withDirectory(async (directory) => {
-    const result = await execute(readModule.createCodexReadTool(), {
+    const result = await execute(readModule.createAgentReadTool(), {
       path: "missing",
       ["bad\n[read: false]"]: true,
     }, directory);
@@ -548,7 +558,7 @@ test("read keeps caller-controlled failures in one control line", async () => {
 test("read resolves one leading @ and rejects an @-only path", async () => {
   await withDirectory(async (directory) => {
     await writeFile(join(directory, "source"), "ok", "utf8");
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     const result = await execute(tool, { path: "@source" }, directory);
     assert.match(output(result), /^ok\n\n\[lines/);
 
@@ -562,7 +572,7 @@ test("read rejects files larger than the file limit", async () => {
     const path = join(directory, "large");
     await writeFile(path, "", "utf8");
     await truncate(path, 67_108_865);
-    const result = await execute(readModule.createCodexReadTool(), { path: "large" }, directory);
+    const result = await execute(readModule.createAgentReadTool(), { path: "large" }, directory);
     assert.equal(result.details.error.code, "RESOURCE_LIMIT");
   });
 });
@@ -570,7 +580,7 @@ test("read rejects files larger than the file limit", async () => {
 test("read reports unsupported and missing paths", async () => {
   await withDirectory(async (directory) => {
     await mkdir(join(directory, "folder"));
-    const tool = readModule.createCodexReadTool();
+    const tool = readModule.createAgentReadTool();
     const folder = await execute(tool, { path: "folder" }, directory);
     const missing = await execute(tool, { path: "missing" }, directory);
     assert.equal(folder.details.error.code, "UNSUPPORTED_FILE_TYPE");
@@ -584,7 +594,7 @@ test("read returns cancellation before file access", async () => {
     await writeFile(join(directory, "source"), "ok", "utf8");
     const controller = new AbortController();
     controller.abort();
-    const result = await execute(readModule.createCodexReadTool(), { path: "source" }, directory, controller.signal);
+    const result = await execute(readModule.createAgentReadTool(), { path: "source" }, directory, controller.signal);
     assert.equal(output(result), "[read error: CANCELLED; Read was cancelled]");
     assert.equal(result.details.error.code, "CANCELLED");
   });
@@ -595,7 +605,7 @@ test("read measures the raw model-visible result", async () => {
     const source = '"'.repeat(40_960);
     await writeFile(join(directory, "quotes"), source, "utf8");
     const result = await execute(
-      readModule.createCodexReadTool(),
+      readModule.createAgentReadTool(),
       { path: "quotes", max_bytes: 40_960 },
       directory,
     );
@@ -607,7 +617,7 @@ test("read measures the raw model-visible result", async () => {
 
 test("read bounds generated model-visible errors", async () => {
   await withDirectory(async (directory) => {
-    const result = await execute(readModule.createCodexReadTool(), {
+    const result = await execute(readModule.createAgentReadTool(), {
       path: "missing",
       ["x".repeat(50_000)]: true,
     }, directory);
@@ -617,7 +627,7 @@ test("read bounds generated model-visible errors", async () => {
 });
 
 test("read metadata omits revisions", () => {
-  const tool = readModule.createCodexReadTool();
+  const tool = readModule.createAgentReadTool();
   assert.equal("expected_revision" in tool.parameters.properties, false);
   assert.equal("show_line_numbers" in tool.parameters.properties, true);
   assert.doesNotMatch(tool.description, /revision/i);
@@ -631,7 +641,7 @@ test("read metadata omits revisions", () => {
 });
 
 test("read module resolves from the expected extension path", async () => {
-  const path = fileURLToPath(new URL("../../extensions/codex-tools/read.ts", import.meta.url));
+  const path = fileURLToPath(new URL("../../extensions/agent-tools/read.ts", import.meta.url));
   const source = await readFile(path, "utf8");
   assert.match(source, /name: "read"/);
   assert.doesNotMatch(source, /createHash|REVISION_MISMATCH/);

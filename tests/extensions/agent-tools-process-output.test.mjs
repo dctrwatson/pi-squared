@@ -6,7 +6,7 @@ import {
   createCapturedProcessStream,
   formatProcessFailure,
   formatProcessResult,
-} from "../../extensions/codex-tools/process-output.ts";
+} from "../../extensions/agent-tools/process-output.ts";
 
 const artifact = {
   id: "artifact",

@@ -81,7 +81,7 @@ const MAX_PERSONA_NAME_CHARS = 64;
 const SUBAGENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 export const BUNDLED_PERSONA_DIRECTORY = path.resolve(SUBAGENT_DIRECTORY, "personas");
 export const SUBAGENT_EXTENSION_PATHS = [
-    path.resolve(SUBAGENT_DIRECTORY, "../codex-tools/index.ts"),
+    path.resolve(SUBAGENT_DIRECTORY, "../agent-tools/index.ts"),
     path.resolve(SUBAGENT_DIRECTORY, "../prevent-idle.ts"),
 ] as const;
 const MAX_CONTEXT_REQUIREMENTS_CHARS = 240;

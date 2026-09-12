@@ -66,15 +66,15 @@ function sanitizeDisplayText(text: string): string {
     .join("");
 }
 
-export const codexBashParameters = Type.Object({
+export const agentBashParameters = Type.Object({
   command: Type.String({ description: "Bash source text to execute" }),
   cwd: Type.Optional(Type.String({ description: "Working directory, relative to the session directory by default" })),
   timeout_seconds: Type.Optional(Type.Number({ description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
 });
 
-const bashParameters = codexBashParameters;
+const bashParameters = agentBashParameters;
 
-export type CodexBashInput = Static<typeof bashParameters>;
+export type AgentBashInput = Static<typeof bashParameters>;
 
 export type BashErrorCode =
   | "INVALID_INPUT"
@@ -89,7 +89,7 @@ export type BashErrorCode =
 
 export type BashToolDetails = ProcessToolDetails;
 
-export interface CodexBashToolOptions {
+export interface AgentBashToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
   cleanupLimitMs?: number;
 }
@@ -155,8 +155,8 @@ export function normalizeInput(rawInput: unknown): NormalizedBashInput {
   };
 }
 
-function prepareBashArguments(rawInput: unknown): CodexBashInput {
-  if (!isRecord(rawInput)) return { command: "\0" } as CodexBashInput;
+function prepareBashArguments(rawInput: unknown): AgentBashInput {
+  if (!isRecord(rawInput)) return { command: "\0" } as AgentBashInput;
   const prepared: Record<string, unknown> = { ...rawInput };
   if (typeof prepared.command !== "string") prepared.command = "\0";
   if (prepared.cwd !== undefined && typeof prepared.cwd !== "string") prepared.cwd = "\0";
@@ -166,7 +166,7 @@ function prepareBashArguments(rawInput: unknown): CodexBashInput {
   ) {
     prepared.timeout_seconds = -1;
   }
-  return prepared as CodexBashInput;
+  return prepared as AgentBashInput;
 }
 
 export async function validateCwd(input: NormalizedBashInput, sessionCwd: string): Promise<string> {
@@ -371,7 +371,7 @@ async function runBash(
   env: NodeJS.ProcessEnv,
   signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback<BashToolDetails> | undefined,
-  options: CodexBashToolOptions,
+  options: AgentBashToolOptions,
 ): Promise<FormattedProcessResult> {
   if (signal?.aborted) throw new BashToolError("CANCELLED", "Bash command was cancelled");
   const cleanupLimitMs = options.cleanupLimitMs ?? STOP_GRACE_MS + STOP_FORCE_WAIT_MS;
@@ -699,7 +699,7 @@ async function runBash(
   }
 }
 
-export function createCodexBashTool(options: CodexBashToolOptions = {}): ToolDefinition<typeof bashParameters, BashToolDetails> {
+export function createAgentBashTool(options: AgentBashToolOptions = {}): ToolDefinition<typeof bashParameters, BashToolDetails> {
   return {
     name: "bash",
     label: "bash",

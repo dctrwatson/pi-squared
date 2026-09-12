@@ -14,7 +14,7 @@ import {
   type Focusable,
 } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import type { ToolFailureDetails, ToolSuccessDetails } from "./codex-tools/tool-result.ts";
+import type { ToolFailureDetails, ToolSuccessDetails } from "./tool-result.ts";
 
 const MAX_PROMPT_CODE_POINTS = 4_000;
 const MAX_OPTIONS = 20;
@@ -639,7 +639,7 @@ export function createAskUserTool(state: AskUserSessionState = {}): ToolDefiniti
   };
 }
 
-export default function askUserExtension(pi: ExtensionAPI): void {
+export function registerAskUserTool(pi: ExtensionAPI): void {
   const state: AskUserSessionState = {};
   pi.registerTool(createAskUserTool(state));
   pi.on("session_shutdown", () => {

@@ -19,7 +19,7 @@ import {
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
-import type { ToolFailureDetails } from "../codex-tools/tool-result.ts";
+import type { ToolFailureDetails } from "../agent-tools/tool-result.ts";
 import type { SubagentBackendFactory, SubagentRuntime, SubagentThinkingLevel, SubagentUsage } from "./backend.ts";
 import { DEFAULT_CURSOR_MODEL, DEFAULT_CURSOR_THINKING } from "./cursor-models.ts";
 import {

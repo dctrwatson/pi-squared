@@ -42,7 +42,7 @@ const gitParameters = Type.Object({
   timeout_seconds: Type.Optional(Type.Number({ description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
 });
 
-export type CodexGitInput = Static<typeof gitParameters>;
+export type AgentGitInput = Static<typeof gitParameters>;
 
 export type GitErrorCode =
   | "INVALID_INPUT"
@@ -52,7 +52,7 @@ export type GitErrorCode =
 
 export type GitToolDetails = ProcessToolDetails;
 
-export interface CodexGitToolOptions {
+export interface AgentGitToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
   cleanupLimitMs?: number;
 }
@@ -102,7 +102,7 @@ export function gitExitIsExpected(details: unknown, content: readonly (TextConte
   return !GIT_ERROR_DIAGNOSTIC.test(output.slice(stderrStart));
 }
 
-function prepareGitArguments(rawInput: unknown): CodexGitInput {
+function prepareGitArguments(rawInput: unknown): AgentGitInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { args: [] };
   if (!Array.isArray(prepared.args)) {
     prepared.args = [];
@@ -118,7 +118,7 @@ function prepareGitArguments(rawInput: unknown): CodexGitInput {
   if (prepared.timeout_seconds !== undefined && typeof prepared.timeout_seconds !== "number") {
     prepared.timeout_seconds = -1;
   }
-  return prepared as CodexGitInput;
+  return prepared as AgentGitInput;
 }
 
 function normalizeInput(rawInput: unknown): NormalizedGitInput {
@@ -211,7 +211,7 @@ async function executeGit(
   rawInput: unknown,
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
-  options: CodexGitToolOptions,
+  options: AgentGitToolOptions,
   onUpdate: AgentToolUpdateCallback<GitToolDetails> | undefined,
 ): Promise<FormattedProcessResult | ReturnType<typeof formatProcessFailure>> {
   try {
@@ -241,7 +241,7 @@ async function executeGit(
   }
 }
 
-export function createCodexGitTool(options: CodexGitToolOptions = {}): ToolDefinition<typeof gitParameters, GitToolDetails> {
+export function createAgentGitTool(options: AgentGitToolOptions = {}): ToolDefinition<typeof gitParameters, GitToolDetails> {
   return {
     name: "git",
     label: "git",

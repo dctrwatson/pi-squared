@@ -26,7 +26,7 @@ const readParameters = Type.Object({
   encoding: Type.Optional(Type.String({ description: "Byte mode only: string enum utf8 (default) or base64" })),
 });
 
-export type CodexReadInput = Static<typeof readParameters>;
+export type AgentReadInput = Static<typeof readParameters>;
 
 type ReadMode = "lines" | "bytes";
 type ByteEncoding = "utf8" | "base64";
@@ -166,7 +166,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function prepareReadArguments(rawInput: unknown): CodexReadInput {
+function prepareReadArguments(rawInput: unknown): AgentReadInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { path: "" };
   if (typeof prepared.path !== "string") prepared.path = "";
   if (prepared.mode !== undefined && typeof prepared.mode !== "string") prepared.mode = "";
@@ -178,7 +178,7 @@ function prepareReadArguments(rawInput: unknown): CodexReadInput {
     prepared.max_bytes = -1;
   }
   if (prepared.encoding !== undefined && typeof prepared.encoding !== "string") prepared.encoding = "";
-  return prepared as CodexReadInput;
+  return prepared as AgentReadInput;
 }
 
 function fail(
@@ -719,7 +719,7 @@ function boundResult(result: ReadResult): { result: ReadResult; text: string } {
   return { result: failure, text: formatReadResult(failure) };
 }
 
-export function createCodexReadTool(): ToolDefinition<typeof readParameters, ReadToolDetails> {
+export function createAgentReadTool(): ToolDefinition<typeof readParameters, ReadToolDetails> {
   return {
     name: "read",
     label: "read",
@@ -742,6 +742,6 @@ export function createCodexReadTool(): ToolDefinition<typeof readParameters, Rea
   };
 }
 
-export function registerCodexReadTool(pi: ExtensionAPI): void {
-  pi.registerTool(createCodexReadTool());
+export function registerAgentReadTool(pi: ExtensionAPI): void {
+  pi.registerTool(createAgentReadTool());
 }

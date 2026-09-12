@@ -39,7 +39,7 @@ const ghParameters = Type.Object({
   timeout_seconds: Type.Optional(Type.Number({ description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
 });
 
-export type CodexGhInput = Static<typeof ghParameters>;
+export type AgentGhInput = Static<typeof ghParameters>;
 
 export type GhErrorCode =
   | "INVALID_INPUT"
@@ -49,7 +49,7 @@ export type GhErrorCode =
 
 export type GhToolDetails = ProcessToolDetails;
 
-export interface CodexGhToolOptions {
+export interface AgentGhToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
   cleanupLimitMs?: number;
 }
@@ -78,7 +78,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function prepareGhArguments(rawInput: unknown): CodexGhInput {
+function prepareGhArguments(rawInput: unknown): AgentGhInput {
   const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { args: [] };
   if (!Array.isArray(prepared.args)) {
     prepared.args = [];
@@ -94,7 +94,7 @@ function prepareGhArguments(rawInput: unknown): CodexGhInput {
   if (prepared.timeout_seconds !== undefined && typeof prepared.timeout_seconds !== "number") {
     prepared.timeout_seconds = -1;
   }
-  return prepared as CodexGhInput;
+  return prepared as AgentGhInput;
 }
 
 function normalizeInput(rawInput: unknown): NormalizedGhInput {
@@ -183,7 +183,7 @@ async function executeGh(
   rawInput: unknown,
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
-  options: CodexGhToolOptions,
+  options: AgentGhToolOptions,
   onUpdate: AgentToolUpdateCallback<GhToolDetails> | undefined,
 ): Promise<FormattedProcessResult | ReturnType<typeof formatProcessFailure>> {
   try {
@@ -213,7 +213,7 @@ async function executeGh(
   }
 }
 
-export function createCodexGhTool(options: CodexGhToolOptions = {}): ToolDefinition<typeof ghParameters, GhToolDetails> {
+export function createAgentGhTool(options: AgentGhToolOptions = {}): ToolDefinition<typeof ghParameters, GhToolDetails> {
   return {
     name: "gh",
     label: "gh",

@@ -715,7 +715,7 @@ test("fresh subagent args load bundled extensions, disable ambient resources, an
     "--thinking", "high",
   ]);
   assert.deepEqual(SUBAGENT_EXTENSION_PATHS, [
-    join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "codex-tools", "index.ts"),
+    join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "agent-tools", "index.ts"),
     join(BUNDLED_PERSONA_DIRECTORY, "..", "..", "prevent-idle.ts"),
   ]);
   assert.equal(args.includes("--tools"), false);

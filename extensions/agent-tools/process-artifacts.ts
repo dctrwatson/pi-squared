@@ -4,7 +4,7 @@ import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const ARTIFACT_ROOT = join(tmpdir(), "pi-codex-tools");
+const ARTIFACT_ROOT = join(tmpdir(), "pi-agent-tools");
 const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export interface ProcessArtifact {
