@@ -16,14 +16,14 @@ const MAX_UTF8_PAGE_BYTES = 40_960;
 const MAX_BASE64_PAGE_BYTES = 30_720;
 
 const readParameters = Type.Object({
-  path: Type.String({ description: "Required string path to the file to read" }),
-  mode: Type.Optional(Type.String({ description: "String enum: lines (default) or bytes" })),
-  start_line: Type.Optional(Type.Number({ description: "Line mode only: one-based integer from 1 through 2147483647; default 1" })),
-  max_lines: Type.Optional(Type.Number({ description: "Line mode only: integer from 1 through 2000; default 500" })),
-  show_line_numbers: Type.Optional(Type.Boolean({ description: "Line mode only: prefix actual 1-based line numbers; default false" })),
-  max_bytes: Type.Optional(Type.Number({ description: "Raw source-byte page limit; line or UTF-8 byte mode: 1 through 40960; Base64 byte mode: 1 through 30720" })),
-  start_byte: Type.Optional(Type.Number({ description: "Byte mode only: zero-based integer from 0 through 67108864; default 0" })),
-  encoding: Type.Optional(Type.String({ description: "Byte mode only: string enum utf8 (default) or base64" })),
+  path: Type.String({ description: "File path" }),
+  mode: Type.Optional(Type.String({ description: "lines (default) or bytes" })),
+  start_line: Type.Optional(Type.Number({ description: "Line mode: 1-based start, 1–2147483647 (default 1)" })),
+  max_lines: Type.Optional(Type.Number({ description: "Line mode: 1–2000 (default 500)" })),
+  show_line_numbers: Type.Optional(Type.Boolean({ description: "Line mode: prefix 1-based line numbers (default false)" })),
+  max_bytes: Type.Optional(Type.Number({ description: "Line or UTF-8 byte mode: 1–40960; Base64: 1–30720" })),
+  start_byte: Type.Optional(Type.Number({ description: "Byte mode: 0-based start, 0–67108864 (default 0)" })),
+  encoding: Type.Optional(Type.String({ description: "Byte mode: utf8 (default) or base64" })),
 });
 
 export type AgentReadInput = Static<typeof readParameters>;
@@ -726,8 +726,7 @@ export function createAgentReadTool(): ToolDefinition<typeof readParameters, Rea
     description: "Read a regular file as bounded line or byte pages. Line ranges are inclusive; byte ranges are zero-based and half-open. Set show_line_numbers=true when precise line identity is needed. Large lines require byte mode.",
     promptSnippet: "Read file contents with bounded line or byte paging",
     promptGuidelines: [
-      "Use read to examine and page files. Do not use nl, cat -n, or sed solely for numbering or paging files.",
-      "Use read with show_line_numbers=true when precise line identity is needed.",
+      "Use read for file examination or paging; set show_line_numbers=true for exact line identity. Do not use nl, cat -n, or sed only to number or page files.",
       "Use read byte mode when line mode reports LINE_TOO_LONG, starting at error.byte_offset.",
     ],
     parameters: readParameters,

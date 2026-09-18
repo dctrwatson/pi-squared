@@ -77,9 +77,9 @@ function result(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text }], details };
 }
 
-function limitText(text: string, source: string): string {
+function limitText(text: string, source: string, recovery = "Use a narrower request for the rest."): string {
   if (text.length <= TEXT_LIMIT) return text;
-  return `${text.slice(0, TEXT_LIMIT)}\n\n[${source} is ${text.length} characters; output is paged here. Retrieve the source file or use a narrower request for the rest.]`;
+  return `${text.slice(0, TEXT_LIMIT)}\n\n[${source}: first ${TEXT_LIMIT} of ${text.length} characters shown. ${recovery}]`;
 }
 
 function asList(values: string[] | undefined): string[] {
@@ -254,10 +254,10 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
       const config = getConfig();
       if (params.project) {
         const project = await readProject(config.coordinationDir, params.project);
-        return result(limitText(JSON.stringify(project, null, 2), `Project ${project.id}`), { project });
+        return result(limitText(JSON.stringify(project, null, 2), `Project ${project.id}`, `Read the full record with hari_record_page(kind: project, project: ${project.id}, offset: 0).`), { project });
       }
       const index = await readIndex(config.coordinationDir);
-      return result(limitText(JSON.stringify(index, null, 2), "PROJECTS.md"), { index });
+      return result(limitText(JSON.stringify(index, null, 2), "PROJECTS.md", "Read the full record with hari_record_page(kind: index, offset: 0)."), { index });
     },
   });
 
@@ -427,7 +427,7 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
       acceptanceCriteria: Type.Optional(Type.Array(Type.String())),
       constraints: Type.Optional(Type.Array(Type.String())),
       checkout: Type.String({ description: "Absolute path to the agreed prepared checkout" }),
-      branch: Type.String({ description: "Explicit local branch to activate with piw" }),
+      branch: Type.String({ description: "Agreed local branch in the prepared checkout" }),
     }),
     async execute(_id, params) {
       const manager = await mutate(() => addManager(getConfig().coordinationDir, params.project, {
@@ -513,28 +513,30 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
     async execute(_id, params) {
       const reports = await projectReports(getConfig().coordinationDir, params.project);
       const text = reports.length === 0 ? "No manager reports are present." : reports.map((report) => `## ${report.manager}\nPath: ${report.path}\n\n${report.content}`).join("\n\n");
-      return result(limitText(text, `Manager reports for ${params.project}; use hari_record_page(kind: report, project, manager, offset) for more`), { reports: reports.map(({ manager, path }) => ({ manager, path })) });
+      return result(limitText(text, `Manager reports for ${params.project}`, "Read each full report with hari_record_page(kind: report, project, manager, offset: 0)."), { reports: reports.map(({ manager, path }) => ({ manager, path })) });
     },
   });
 
   pi.registerTool({
     name: "hari_record_page",
     label: "Read Hari Record Page",
-    description: "Read a deterministic page of the authoritative generated coordination record. Use the returned nextOffset to continue without losing bounded output.",
+    description: "Read a coordination record page with its source path and continuation offset. Start at offset 0; use nextOffset with the same record arguments to continue.",
     parameters: Type.Object({
       kind: StringEnum(["index", "inbox", "project", "report"] as const),
       project: Type.Optional(Type.String({ description: "Required for project and report" })),
       manager: Type.Optional(Type.String({ description: "Required for report" })),
-      offset: Type.Optional(Type.Integer({ minimum: 0 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TEXT_LIMIT })),
+      offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based character offset; default: 0" })),
+      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: TEXT_LIMIT, description: "Source characters per page; default: 16000" })),
     }),
     async execute(_id, params) {
       const record = await readCoordinationRecord(getConfig().coordinationDir, params.kind, params.project, params.manager);
       const offset = params.offset ?? 0;
       const limit = params.limit ?? TEXT_LIMIT;
       const text = record.content.slice(offset, offset + limit);
-      const nextOffset = offset + text.length;
-      return result(text, { path: record.path, offset, nextOffset: nextOffset < record.content.length ? nextOffset : undefined, totalChars: record.content.length });
+      const end = offset + text.length;
+      const nextOffset = end < record.content.length ? end : undefined;
+      const page = `[${record.path}: offset=${offset}; chars=${text.length}; total=${record.content.length}; ${nextOffset === undefined ? "eof=true" : `nextOffset=${nextOffset}`}]`;
+      return result(`${text}\n\n${page}`, { path: record.path, offset, nextOffset, totalChars: record.content.length });
     },
   });
 
@@ -604,7 +606,7 @@ function registerManagerTools(
   pi.registerTool({
     name: "manager_context",
     label: "Refresh Manager Context",
-    description: "Refresh the current manager assignment, project facts, actual checkout state, applicable checkout guidance, and read-only issue observation before a dependent action.",
+    description: "Read the full current assignment, project facts, checkout state/guidance, and read-only issue observation. Required before dependent work when no applicable full result is visible.",
     parameters: Type.Object({}),
     async execute() {
       const assembly = await assembleContext(getConfig());
@@ -620,8 +622,8 @@ function registerManagerTools(
     description: "Write this manager's concise report with result, evidence references, coordination impact, blockers, and exceptions. Managers cannot edit shared Hari project/index records.",
     parameters: Type.Object({
       result: Type.String({ description: "Completion recommendation or specific current blocker" }),
-      support: Type.Optional(Type.Array(Type.String())),
-      evidenceReferences: Type.Optional(Type.Array(Type.String())),
+      support: Type.Optional(Type.Array(Type.String({ description: "Concise basis for the recommendation" }))),
+      evidenceReferences: Type.Optional(Type.Array(Type.String({ description: "Source paths, URLs, commands, or commit IDs for detailed evidence" }))),
       coordinationImpact: Type.Optional(Type.Array(Type.String())),
       blockers: Type.Optional(Type.Array(Type.String())),
       exceptions: Type.Optional(Type.Array(Type.String())),

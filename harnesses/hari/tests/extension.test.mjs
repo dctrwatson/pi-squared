@@ -202,6 +202,48 @@ test("Hari keeps a stable prompt while tools retrieve current coordination facts
   await assert.rejects(currentIndex, "record errors surface on retrieval, not as a stale cached result");
 });
 
+test("Hari record pages expose provenance and continuation in model-visible content", async (t) => {
+  const f = await managerHarness(t);
+  process.env.HARI_ROLE = "hari";
+  const pi = fakePi();
+  hariExtension(pi);
+  await pi.tools.get("hari_replace_index_items").execute("large-index", { field: "decisions", items: ["x".repeat(17_000)] });
+  const index = await pi.tools.get("hari_projects").execute("index", {});
+  assert.match(index.content[0].text, /first 16000 of \d+ characters shown/);
+  assert.match(index.content[0].text, /hari_record_page\(kind: index, offset: 0\)/);
+
+  const pageTool = pi.tools.get("hari_record_page");
+  const path = join(f.coordination, "PROJECTS.md");
+  const source = await readFile(path, "utf8");
+  const chunks = [];
+  let offset = 0;
+  while (true) {
+    const response = await pageTool.execute("page", { kind: "index", offset });
+    const visible = response.content[0].text;
+    const footerStart = visible.lastIndexOf("\n\n[");
+    assert.ok(footerStart >= 0);
+    const chunk = visible.slice(0, footerStart);
+    assert.ok(chunk.length <= 16_000);
+    chunks.push(chunk);
+    const footer = visible.slice(footerStart);
+    assert.ok(footer.includes(path));
+    assert.ok(footer.includes(`offset=${offset}; chars=${chunk.length}; total=${source.length}`));
+    const continuation = footer.match(/nextOffset=(\d+)/);
+    if (!continuation) {
+      assert.match(footer, /eof=true/);
+      assert.equal(response.details.nextOffset, undefined);
+      break;
+    }
+    offset = Number(continuation[1]);
+    assert.equal(offset, response.details.nextOffset);
+    assert.ok(offset < source.length);
+  }
+  assert.equal(chunks.join(""), source, "visible offsets recover the complete source, not the JSON preview");
+
+  const beyond = await pageTool.execute("beyond", { kind: "index", offset: source.length + 1, limit: 5 });
+  assert.match(beyond.content[0].text, /chars=0;.*eof=true/);
+});
+
 test("manager identity blocks native switching and gates changed authority until full manager_context delivery", async () => {
   const { home, coordination, checkout, session, project } = await setupManager();
   const previous = { ...process.env };

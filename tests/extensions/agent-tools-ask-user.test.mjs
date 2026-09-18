@@ -187,7 +187,7 @@ test("ask_user exposes concise model guidance and clears a prompt on session shu
 
   assert.equal(tool.name, "ask_user");
   assert.deepEqual(tool.promptGuidelines, [
-    "Use ask_user only when required information or a decision cannot be inferred safely.",
+    "Use ask_user only when required information or a decision cannot be safely inferred.",
     "Do not use ask_user to request passwords, access tokens, or other secrets.",
   ]);
 

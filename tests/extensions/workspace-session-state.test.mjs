@@ -30,6 +30,15 @@ import {
   mapWorkspace,
 } from "./workspace-test-support.mjs";
 
+test("workspace PM guidance keeps record writes and commits within assigned ownership", async () => {
+  const skill = await readFile(WORKSPACE_PM_SKILL_PATH, "utf8");
+  assert.match(skill, /only within assigned PM ownership/);
+  assert.match(skill, /Read-only or source-only helpers return proposed record updates to the parent/);
+  assert.match(skill, /no additional write, commit, or lifecycle authority/);
+  assert.match(skill, /Commit owned PM changes separately when authorized/);
+  assert.match(skill, /source repository, not `\.\.\/pm`/);
+});
+
 test("primary branch round trips resume the mapped central session", async () => {
   const root = await repository();
   try {

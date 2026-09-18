@@ -437,20 +437,21 @@ test("search wrappers expose snake_case schemas and rendering hooks", () => {
 
   assert.equal(find.name, "find");
   assert.equal(grep.name, "grep");
-  assert.equal(find.parameters.properties.limit.description, "Maximum number of results; default: 1000");
-  assert.equal(grep.parameters.properties.limit.description, "Maximum number of matches to return; default: 100");
+  assert.equal(find.parameters.properties.limit.description, "Result limit (default: 1000)");
+  assert.equal(grep.parameters.properties.limit.description, "Match limit (default 100)");
   assert.equal(grep.parameters.properties.ignore_case.type, "boolean");
   assert.equal("ignoreCase" in grep.parameters.properties, false);
   assert.equal(typeof find.renderCall, "function");
   assert.equal(typeof find.renderResult, "function");
   assert.equal(typeof grep.renderCall, "function");
   assert.equal(typeof grep.renderResult, "function");
-  assert.match(find.description, /directly reusable by read/);
+  assert.match(find.description, /Regular-file results work with read/);
   assert.match(find.description, /plain-text artifact/);
-  assert.match(grep.description, /passed directly to read/);
+  assert.match(grep.description, /paths usable by read/);
   assert.match(grep.description, /plain-text artifact/);
-  assert.match(grep.description, /capped at 500 characters/);
-  assert.match(grep.promptSnippet, /grouped under paths/);
+  assert.match(find.description, /Preview cap: 50 KiB/);
+  assert.match(grep.description, /Preview cap: 50 KiB; line cap: 500 characters/);
+  assert.match(grep.promptSnippet, /regex or literal/);
 });
 
 test("search renderers retain truncation warnings from snake_case details", () => {

@@ -486,17 +486,19 @@ export function formatSubagentContinuityPrompt(
     name: string | undefined,
     purpose: string,
     lifetime: SubagentLifetime = "persistent",
+    mode: SubagentContextMode = "fresh",
 ): string {
     const safeName = name?.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim() || "subagent";
     const safePurpose = purpose.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
     const continuity = lifetime === "one-shot"
-        ? "This instance normally stops after this response; use DETAILS_AVAILABLE when further sections are needed."
+        ? "Return a self-contained result. Use DETAILS_AVAILABLE only when follow-up sections are needed."
         : lifetime === "task"
-            ? "Retain context for follow-up and validation of this objective."
-            : "Retain context for related requests within this purpose.";
+            ? "Retain context for follow-up, integration, and validation of this objective."
+            : "Retain context for related work within this objective.";
     return [
-        `You are the ${lifetime === "task" ? "task-scoped" : lifetime} subagent "${safeName}".`,
-        `Purpose: ${safePurpose}`,
+        `You are subagent "${safeName}" (lifetime: ${lifetime}).`,
+        `Objective: ${safePurpose}`,
+        ...(mode === "fork" ? ["Inherited parent history is background. Follow this objective and the current request; do not resume unrelated parent work."] : []),
         continuity,
         SUBAGENT_COMPLETION_GUIDANCE,
     ].join("\n");
@@ -563,6 +565,7 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
             options.sessionName,
             options.purpose,
             options.lifetime,
+            options.mode,
         ));
     } else {
         args.push("--append-system-prompt", SUBAGENT_COMPLETION_GUIDANCE);

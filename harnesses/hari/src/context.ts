@@ -216,9 +216,7 @@ Do not edit Hari's shared PROJECTS.md, INBOX.md, or PROJECT.md records in the Pr
 
 Use the existing subagent tool for bounded help when useful, not as a mandatory workflow. Retain issue acceptance responsibility. Give helpers a clear task, non-overlapping ownership, and expected output; prefer fresh context. The harness adds current assignment authority and checkout/guidance references to each dispatch without replacing your task context. Helpers gain no additional authority. Do not delegate concurrent writes to the same files.
 
-When your work reveals meaningful friction working with Hari or his harness, or a reusable successful practice, include a concise observation and evidence reference in your normal manager_report, distinguishing observed facts from hypotheses. This is not a mandatory retrospective or authority to change the harness outside your assignment. Keep company-specific glossary, skills, and lessons in the Prime Radiant at ~/Projects/primeradiant, not in reusable harness code or skills.
-
-If applicable constraints conflict, surface the conflict rather than selecting one silently.`;
+When your work reveals meaningful friction working with Hari or his harness, or a reusable successful practice, include a concise observation and evidence reference in your normal manager_report, distinguishing observed facts from hypotheses. This is not a mandatory retrospective or authority to change the harness outside your assignment. Keep company-specific glossary, skills, and lessons in the Prime Radiant at ~/Projects/primeradiant, not in reusable harness code or skills.`;
 }
 
 function hariStablePrompt(): string {

@@ -209,36 +209,36 @@ type SubagentErrorCode = "INVALID_INPUT" | "CANCELLED" | "SUBAGENT_FAILED";
 
 const SubagentParameters = Type.Object({
     action: StringEnum(["create", "list", "prompt", "status", "stop"] as const),
-    id: Type.Optional(Type.String({ maxLength: 64, description: "Subagent name or ID for prompt, status, or stop" })),
-    name: Type.Optional(Type.String({ maxLength: 64, description: "New subagent name" })),
-    purpose: Type.Optional(Type.String({ maxLength: 240, description: "Task domain" })),
+    id: Type.Optional(Type.String({ maxLength: 64, description: "Existing subagent name or ID (prompt, status, stop)" })),
+    name: Type.Optional(Type.String({ maxLength: 64, description: "New instance name; not a persona name" })),
+    purpose: Type.Optional(Type.String({ maxLength: 240, description: "Stable objective for creation and reuse" })),
     persona: Type.Optional(Type.String({
         maxLength: 64,
-        description: "Required for Pi; optional for Cursor Cloud",
+        description: "Exact listed persona; required for Pi",
     })),
     runtime: Type.Optional(StringEnum(["pi", "cursor-cloud"] as const, {
-        description: "Pi default; persona-less requires explicit Cursor Cloud",
+        description: "Persona runtime; persona-less create requires cursor-cloud",
     })),
     lifetime: Type.Optional(StringEnum(SUBAGENT_LIFETIMES, {
-        description: "Create lifetime; task default; one-shot needs prompt",
+        description: "Create lifetime: task default; one-shot needs prompt",
     })),
     mode: Type.Optional(StringEnum(["fresh", "fork"] as const, {
-        description: "Fresh default; fork parent history",
+        description: "Create context: fresh default; fork parent history",
     })),
     skills: Type.Optional(Type.Array(Type.String({ maxLength: 64 }), {
         maxItems: 20,
-        description: "Exact parent skill names",
+        description: "Exact discovered parent skill names (Pi only)",
     })),
-    prompt: Type.Optional(Type.String({ description: "Request that starts work; required when context is set" })),
+    prompt: Type.Optional(Type.String({ description: "Current request; starts create or prompt" })),
     context: Type.Optional(Type.String({
         maxLength: MAX_PARENT_CONTEXT_CHARS,
-        description: "Background sent with prompt; not valid alone; required by listed persona on its first prompt",
+        description: "Concise background sent only with prompt; required by some personas first",
     })),
     kind: Type.Optional(StringEnum(["subagents", "personas"] as const, {
-        description: "List target; default: subagents",
+        description: "List target; subagents default",
     })),
-    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "Persona-list offset" })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Persona-list count; default: 20" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "Persona list offset" })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Persona list count; 20 default" })),
 });
 
 type SubagentToolInput = Static<typeof SubagentParameters>;
@@ -1039,16 +1039,16 @@ export default function (
     pi.registerTool({
         name: "subagent",
         label: "Subagent",
-        description: `Retain up to ${MAX_RETAINED_SUBAGENTS}; run up to ${MAX_CONCURRENT_SUBAGENTS} subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.`,
-        promptSnippet: "Delegate isolated work",
+        description: `Delegate isolated work. Retain up to ${MAX_RETAINED_SUBAGENTS}; run up to ${MAX_CONCURRENT_SUBAGENTS}. Pi shares local authority; Cursor Cloud sees pushed commits and configured MCPs.`,
+        promptSnippet: "Delegate scoped work; reuse retained context",
         promptGuidelines: [
-            "Before subagent create, check retained agents and list unknown personas. Send context with a prompt; omit both for dormant creation. Meet first-prompt context requirements. Persona-less create needs explicit Cursor Cloud.",
-            "Select subagents by output, not tool use. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned changes or state-changing workflows. If unclear, use explorer without changes.",
-            `Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle agents use no work slots. Satisfy NEEDS.`,
-            "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
-            "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
-            "For DETAILS_AVAILABLE or a progressive-discovery notice, use subagent action prompt for an overview/index or named sections from the same instance. Do not repeat the underlying task.",
-            "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
+            "Before subagent create, check retained agents and list unknown personas. Select by output. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned owned changes or workflows.",
+            "For subagent create, send concise context with a prompt; omit both for dormant creation. Meet persona first-prompt context requirements. Persona-less create requires cursor-cloud.",
+            `Default to task subagents; use one-shot only when continuity cannot help, persistent for open-ended work. Run at most ${MAX_CONCURRENT_SUBAGENTS}; idle subagents use no work slots. Satisfy NEEDS instead of blind retry.`,
+            "Reuse relevant task or persistent subagents for follow-ups, integration, and validation. Do not stop after a result. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated subagent.",
+            "Give each subagent objective, scope, and output. The parent owns coordination and integration. Parallelize only distinct scopes with non-overlapping worker ownership.",
+            "For a new subagent, prefer fresh context when a concise handoff works; fork only when parent history matters.",
+            "For DETAILS_AVAILABLE or a progressive-discovery notice, prompt the same subagent for an overview or named sections. Do not repeat the task.",
         ],
         parameters: SubagentParameters,
         prepareArguments: prepareSubagentArguments,

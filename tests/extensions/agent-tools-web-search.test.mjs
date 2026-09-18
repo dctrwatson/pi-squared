@@ -59,7 +59,10 @@ test("web_search forwards only the query to a separate native web-search request
   assert.equal(calls[0].model.id, "gpt-5.4-mini");
   assert.equal(calls[0].request.messages.length, 1);
   assert.deepEqual(calls[0].request.messages[0].content, [{ type: "text", text: "latest Node.js release" }]);
-  assert.match(calls[0].request.systemPrompt, /Use web search/);
+  assert.equal(
+    calls[0].request.systemPrompt,
+    "Search the web. Return a concise factual answer with direct source URLs. Do not make unsupported claims.",
+  );
   assert.deepEqual(await calls[0].options.onPayload({
     model: "gpt-5.4-mini",
     tools: [{ type: "function", name: "do_not_forward" }],

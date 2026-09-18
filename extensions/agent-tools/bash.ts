@@ -265,8 +265,15 @@ async function waitForProcessGroupGone(child: ChildProcess, milliseconds: number
 async function terminateProcessGroup(child: ChildProcess, budgetMs: number): Promise<void> {
   if (!child.pid || !processGroupExists(child.pid)) return;
   const deadline = Date.now() + budgetMs;
-  signalProcessGroup(child, "SIGTERM");
   const grace = Math.min(STOP_GRACE_MS, Math.max(0, deadline - Date.now()));
+  try {
+    signalProcessGroup(child, "SIGTERM");
+  } catch (error) {
+    // A group can finish between its existence check and SIGTERM. Keep the
+    // cleanup contract by waiting for it to disappear before reporting EPERM.
+    if ((error as NodeJS.ErrnoException).code !== "EPERM" || !await waitForProcessGroupGone(child, grace)) throw error;
+    return;
+  }
   if (await waitForProcessGroupGone(child, grace)) return;
 
   signalProcessGroup(child, "SIGKILL");
@@ -703,8 +710,8 @@ export function createAgentBashTool(options: AgentBashToolOptions = {}): ToolDef
   return {
     name: "bash",
     label: "bash",
-    description: "Execute Bash with a 120-second default timeout. Returns a bounded status and stream preview. Read an artifact for omitted captured bytes. Incomplete capture is marked.",
-    promptSnippet: "Execute Bash with bounded status and stream previews",
+    description: "Run Bash with a 120-second default timeout and bounded stream previews. Read artifacts for omitted captured bytes. Incomplete capture is marked.",
+    promptSnippet: "Run Bash with bounded status and previews",
     parameters: bashParameters,
     prepareArguments: prepareBashArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {

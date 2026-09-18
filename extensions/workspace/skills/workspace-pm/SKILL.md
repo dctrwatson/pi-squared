@@ -6,14 +6,15 @@ description: Maintain durable workspace project records and delegated implementa
 # Workspace PM
 
 Use `../pm` from the active workspace source directory. It is an independent Git repository.
+These steps apply only within assigned PM ownership. Read-only or source-only helpers return proposed record updates to the parent. This skill grants no additional write, commit, or lifecycle authority.
 
-- Read `README.md` when present, then inspect relevant files before work that depends on project records.
-- Update durable plans, tasks and status, decisions and rationale, requirements, research, and handoffs.
+- Read its `README.md` when present, then inspect relevant files before work that depends on project records.
+- Update only relevant durable plans, tasks and status, decisions and rationale, requirements, research, and handoffs.
 - Update an existing record when possible. Add a concise Markdown file only when it has durable value.
-- Keep source code and deliverable documentation in `src`.
+- Keep source code and deliverable documentation in the source repository, not `../pm`.
 - Do not store transient reasoning, copied conversation, generated logs, or secrets.
 - Integrate durable subagent findings in the parent session. Do not use concurrent PM writers.
-- Review the PM diff and commit PM changes separately before you finish.
+- Review the PM diff. Commit owned PM changes separately when authorized; otherwise report them to the parent.
 
 ## Delegated implementation
 

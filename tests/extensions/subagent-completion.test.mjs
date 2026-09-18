@@ -17,7 +17,9 @@ const {
 } = personasModule;
 const {
   MAX_CURSOR_BOOTSTRAP_BYTES,
+  MAX_CURSOR_CORRELATION_MARKER_BYTES,
   MAX_CURSOR_FOLLOW_UP_BYTES,
+  MAX_CURSOR_PARENT_REQUEST_BYTES,
   buildCursorCloudBootstrap,
   buildCursorCloudFollowUp,
 } = cursorContextModule;
@@ -58,26 +60,41 @@ function assertCompletionProtocolOnce(prompt) {
   }
 }
 
+function utf8Text(bytes) {
+  return "🙂".repeat(Math.floor(bytes / 4)) + "a".repeat(bytes % 4);
+}
+
+function cursorFollowUpRequestBudget(lifetime) {
+  const guidance = [
+    "## Follow-up",
+    `Lifetime: ${lifetime}`,
+    "Inspect and plan only. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations.",
+    SUBAGENT_COMPLETION_REMINDER,
+    "## Request",
+  ].join("\n");
+  return MAX_CURSOR_FOLLOW_UP_BYTES - Buffer.byteLength(guidance, "utf8") - 1 - MAX_CURSOR_CORRELATION_MARKER_BYTES;
+}
+
 test("lean completion guidance retains required evidence and follow-up rules", () => {
   const fullBytes = Buffer.byteLength(SUBAGENT_COMPLETION_GUIDANCE, "utf8");
   const reminderBytes = Buffer.byteLength(SUBAGENT_COMPLETION_REMINDER, "utf8");
   const wrapper = formatSubagentContinuityPrompt("completion-instance", "Inspect completion assembly", "task");
   // These byte limits constrain static instructions, not report length.
-  assert.ok(fullBytes <= 2_600, `full guidance is ${fullBytes} bytes`);
-  assert.ok(reminderBytes <= 1_000, `reminder is ${reminderBytes} bytes`);
+  assert.ok(fullBytes <= 2_200, `full guidance is ${fullBytes} bytes`);
+  assert.ok(reminderBytes <= 1_050, `reminder is ${reminderBytes} bytes`);
   assert.ok(reminderBytes < fullBytes, "the reminder is smaller than full guidance");
   assert.equal(occurrences(wrapper, SUBAGENT_COMPLETION_GUIDANCE), 1);
   assert.ok(Buffer.byteLength(wrapper, "utf8") - fullBytes <= 250, "Pi lifetime wrapper has bounded overhead");
 
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /short task\/status line.*requested result.*relevant evidence.*supplied worker\/task\/run identity.*Omit absent IDs.*unknown or not run/s);
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /SUCCESS.*required checks.*completed review can find defects.*Never label unrun checks as passed/s);
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /exact paths\/line ranges.*SHA length.*Exclude secret values/s);
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /Negative Knowledge.*FAILED, RULED_OUT, INCONCLUSIVE, or REJECTED.*even after success.*none observed when that fact matters/s);
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /follow-ups.*requested section or new evidence, changes, and validation, not the full previous report.*identity and task scope.*constraints and evidence limits/s);
-  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /exact output formats without an extra wrapper.*BLOCKED: <reason> and NEEDS: <minimum requirement>.*DETAILS_AVAILABLE: <numbered section index>.*Length alone is not a blocker/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /exact formats.*exact format overrides this default wrapper.*Otherwise: short task\/status line.*supplied worker, task, run, or instance IDs.*Do not infer instance IDs from persona labels.*consequential unknown or unrun work, and "none observed" when this matters/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /SUCCESS requires.*assigned objective and required checks.*completed review can find defects.*Never call an unrun check passed/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /paths and line ranges.*before\/after values.*environment variables.*SHA length.*Exclude secrets/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /Read omitted output before relying on it.*Negative Knowledge.*FAILED, RULED_OUT, INCONCLUSIVE, or REJECTED.*after success.*scope, evidence, and retry condition.*No reproduction does not show no bug.*Do not repeat unchanged failed work without an authorized discriminating retest/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /On follow-up.*requested section or new evidence, changes, and validation.*task scope and material limits/s);
+  assert.match(SUBAGENT_COMPLETION_GUIDANCE, /BLOCKED: <reason> and NEEDS: <minimum requirement>.*DETAILS_AVAILABLE: <numbered section index>.*Length alone is not a blocker/s);
 
-  assert.match(SUBAGENT_COMPLETION_REMINDER, /requested sections or changes.*task scope and supplied identity.*omit empty fields and absent IDs.*decisive findings.*validation results\/limits.*unrun required checks.*negatives\/retry conditions, even after success/s);
-  assert.match(SUBAGENT_COMPLETION_REMINDER, /exact output formats.*BLOCKED: <reason> then NEEDS: <minimum requirement>.*DETAILS_AVAILABLE: <section index>.*Length alone is not a blocker.*Do not repeat the full report or completed work/s);
+  assert.match(SUBAGENT_COMPLETION_REMINDER, /exact format overrides default status wrapper.*"none observed" when this matters.*supplied instance IDs only.*do not infer them from persona labels.*Read omitted validation output before relying on it.*REJECTED results after success.*no reproduction does not show no bug.*Do not repeat unchanged failed work without an authorized discriminating retest/s);
+  assert.match(SUBAGENT_COMPLETION_REMINDER, /BLOCKED: <reason>, then NEEDS: <minimum requirement>.*DETAILS_AVAILABLE: <section index>.*Do not repeat completed work/s);
   for (const prompt of [SUBAGENT_COMPLETION_GUIDANCE, SUBAGENT_COMPLETION_REMINDER]) {
     assert.doesNotMatch(prompt, /Concrete Artifacts & Diffs|Discovered Constraints \/ Blockers|Handoff:/);
     assert.doesNotMatch(prompt, /(?:16 KiB|400 lines|250[–-]600 tokens)/);
@@ -140,11 +157,14 @@ test("Pi assembly applies full completion guidance to each lifetime and preserve
       purpose,
       lifetime: current.lifetime,
     });
-    const expected = formatSubagentContinuityPrompt(current.options.sessionName, purpose, current.lifetime);
+    const expected = formatSubagentContinuityPrompt(current.options.sessionName, purpose, current.lifetime, current.options.mode);
     assert.equal(appendedSystemPrompt(args), expected, `${current.name} uses its assembled continuity prompt`);
     assert.equal(occurrences(appendedSystemPrompt(args), SUBAGENT_COMPLETION_GUIDANCE), 1);
     assertCompletionProtocolOnce(appendedSystemPrompt(args));
     assert.equal(systemPrompt(args), `${persona.systemPrompt}\n`, `${current.name} does not change the persona prompt`);
+    if (current.options.mode === "fork") {
+      assert.match(appendedSystemPrompt(args), /Inherited parent history is background/);
+    }
   }
 
   const noPurpose = buildSubagentProcessArgs({ mode: "fresh", persona, sessionName: "name-only" });
@@ -204,19 +224,79 @@ test("Cursor bootstrap and follow-up retain completion guidance for fresh and fo
   }
 });
 
-test("Cursor completion prompts retain a UTF-8 request at the follow-up limit and reject bootstrap overflow", () => {
-  const requestMarker = "REQUEST-MARKER: inspect /workspace/é.ts before the UTF-8 boundary.";
-  const followUp = buildCursorCloudFollowUp(`${requestMarker}\n${"🙂".repeat(10_000)}`, "task");
-  const followUpBytes = Buffer.byteLength(followUp, "utf8");
+test("Cursor bootstrap retains the local parent-context packet without parsing Markdown headers", () => {
+  const packet = "## Parent-provided context\n\nGit base: ba7aa1e\n\n## Request\n\nThis parent context has an unescaped request header.\n\n## Request\n\nReview extensions/subagents only.";
+  const bootstrap = buildCursorCloudBootstrap({
+    mode: "fresh",
+    purpose: "Review delegated context",
+    lifetime: "task",
+    request: packet,
+  });
+  assert.ok(bootstrap.endsWith(`## Request\n\n${packet}`));
+  assert.equal((bootstrap.match(/## Parent-provided context/g) ?? []).length, 1);
+  assert.equal((bootstrap.match(/## Request/g) ?? []).length, 3);
+
+  const contextAtLimit = "é".repeat(2_048);
+  const requestAtLimit = "🙂".repeat(512);
+  assert.equal(Buffer.byteLength(contextAtLimit, "utf8"), 4 * 1024);
+  assert.equal(Buffer.byteLength(requestAtLimit, "utf8"), 2 * 1024);
+  const bounded = buildCursorCloudBootstrap({
+    mode: "fresh",
+    purpose: "Bound the handoff",
+    lifetime: "task",
+    parentContext: contextAtLimit,
+    request: requestAtLimit,
+  });
+  assert.ok(bounded.includes(contextAtLimit));
+  assert.ok(bounded.endsWith(`## Request\n\n${requestAtLimit}`));
+  assert.equal(Buffer.byteLength(contextAtLimit, "utf8") + Buffer.byteLength(requestAtLimit, "utf8"), MAX_CURSOR_PARENT_REQUEST_BYTES);
+
+  for (const { name, options, field } of [
+    {
+      name: "parent context",
+      options: { parentContext: `${contextAtLimit}a`, request: "Inspect the scope." },
+      field: "parent context",
+    },
+    {
+      name: "combined bootstrap request",
+      options: { parentContext: contextAtLimit, request: `${requestAtLimit}a` },
+      field: "initial request",
+    },
+    {
+      name: "single formatted packet",
+      options: { request: "🙂".repeat(1_537) },
+      field: "initial request",
+    },
+  ]) {
+    assert.throws(() => buildCursorCloudBootstrap({
+      mode: "fresh",
+      purpose: "Reject lost authority",
+      lifetime: "task",
+      ...options,
+    }), (error) => {
+      assert.equal(error.code, "BACKEND_FAILED", name);
+      assert.match(error.message, new RegExp(`Cursor Cloud ${field} is \\d+ UTF-8 bytes after redaction; limit is \\d+\\. Reduce it before dispatch\\.`));
+      return true;
+    });
+  }
+});
+
+test("Cursor completion prompts accept exact UTF-8 limits and reject oversized caller input", () => {
+  const followUpBudget = cursorFollowUpRequestBudget("task");
+  const requestAtLimit = utf8Text(followUpBudget);
+  const followUp = buildCursorCloudFollowUp(requestAtLimit, "task");
   assert.equal(MAX_CURSOR_FOLLOW_UP_BYTES, 6 * 1024);
-  assert.ok(followUpBytes <= MAX_CURSOR_FOLLOW_UP_BYTES);
-  assert.ok(followUpBytes >= MAX_CURSOR_FOLLOW_UP_BYTES - 16, `follow-up uses the request budget: ${followUpBytes} bytes`);
-  assert.ok(followUp.includes(requestMarker));
-  assert.match(followUp, /\[Content limited\]$/);
+  assert.equal(Buffer.byteLength(followUp, "utf8"), MAX_CURSOR_FOLLOW_UP_BYTES - MAX_CURSOR_CORRELATION_MARKER_BYTES);
+  assert.ok(followUp.endsWith(requestAtLimit));
   assert.doesNotMatch(followUp, /�/);
+  assert.throws(() => buildCursorCloudFollowUp(`${requestAtLimit}a`, "task"), (error) => {
+    assert.equal(error.code, "BACKEND_FAILED");
+    assert.match(error.message, new RegExp(`Cursor Cloud follow-up request is ${followUpBudget + 1} UTF-8 bytes after redaction; limit is ${followUpBudget}\\. Reduce it before dispatch\\.`));
+    return true;
+  });
 
   assert.equal(MAX_CURSOR_BOOTSTRAP_BYTES, 24 * 1024);
-  assert.throws(() => buildCursorCloudBootstrap({
+  const boundedBootstrap = buildCursorCloudBootstrap({
     mode: "fork",
     persona: {
       name: "over-budget",
@@ -225,14 +305,12 @@ test("Cursor completion prompts retain a UTF-8 request at the follow-up limit an
     },
     purpose: "q".repeat(1024),
     lifetime: "persistent",
-    parentContext: "c".repeat(8 * 1024),
+    parentContext: "context",
     forkHandoff: forkHandoff("h".repeat(16 * 1024)),
-    request: "r".repeat(16 * 1024),
-  }), (error) => {
-    assert.equal(error.code, "BACKEND_FAILED");
-    assert.match(error.message, /bootstrap exceeds its context limit/);
-    return true;
+    request: "request",
   });
+  assert.ok(Buffer.byteLength(boundedBootstrap, "utf8") <= MAX_CURSOR_BOOTSTRAP_BYTES);
+  assert.match(boundedBootstrap, /\[Content limited\]/);
 });
 
 test("blocker parser accepts required leading lines but not completion status labels", () => {

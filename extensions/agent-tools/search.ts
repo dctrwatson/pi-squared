@@ -28,26 +28,26 @@ const DEFAULT_FIND_LIMIT = 1_000;
 const DEFAULT_GREP_LIMIT = 100;
 
 const findParameters = Type.Object({
-  pattern: Type.String({ description: "Glob pattern to match files, for example '*.ts', '**/*.json', or 'src/**/*.spec.ts'" }),
-  path: Type.Optional(Type.String({ description: "Directory to search in; default: current directory" })),
-  limit: Type.Optional(Type.Number({ description: "Maximum number of results; default: 1000" })),
+  pattern: Type.String({ description: "Glob pattern, for example '*.ts', '**/*.json', or 'src/**/*.spec.ts'" }),
+  path: Type.Optional(Type.String({ description: "Search directory (default: current directory)" })),
+  limit: Type.Optional(Type.Number({ description: "Result limit (default: 1000)" })),
 });
 
 const grepParameters = Type.Object({
-  pattern: Type.String({ description: "Search pattern; regular expression by default" }),
-  path: Type.Optional(Type.String({ description: "Directory or file to search; default: current directory" })),
-  glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, for example '*.ts' or '**/*.spec.ts'" })),
-  ignore_case: Type.Optional(Type.Boolean({ description: "Use case-insensitive search; default: false" })),
-  literal: Type.Optional(Type.Boolean({ description: "Treat pattern as literal text; default: false" })),
-  context: Type.Optional(Type.Number({ description: "Number of lines before and after each match; default: 0" })),
-  limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return; default: 100" })),
+  pattern: Type.String({ description: "Regex by default; set literal=true for exact text" }),
+  path: Type.Optional(Type.String({ description: "Search file or directory (default: current directory)" })),
+  glob: Type.Optional(Type.String({ description: "File glob, for example '*.ts' or '**/*.spec.ts'" })),
+  ignore_case: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default false)" })),
+  literal: Type.Optional(Type.Boolean({ description: "Exact text instead of regex (default false)" })),
+  context: Type.Optional(Type.Number({ description: "Lines before and after each match (default 0)" })),
+  limit: Type.Optional(Type.Number({ description: "Match limit (default 100)" })),
 });
 
 export type AgentFindInput = Static<typeof findParameters>;
 export type AgentGrepInput = Static<typeof grepParameters>;
 
-const FIND_DESCRIPTION = "Find paths by glob pattern. Regular-file results are directly reusable by read. Respects .gitignore. The result-count default is 1,000. Text output is capped at 50 KiB. Truncated results expose a complete plain-text artifact when capture succeeds.";
-const GREP_DESCRIPTION = "Search file contents for a pattern. Patterns use regular expressions by default; set literal to true for exact text. The preview groups matches under session-resolvable paths that can be passed directly to read. Artifacts repeat the path on every record. Respects .gitignore. The match-count default is 100. Text output is capped at 50 KiB. Lines are capped at 500 characters. Truncated results expose a complete plain-text artifact when capture succeeds.";
+const FIND_DESCRIPTION = "Find paths by glob. Regular-file results work with read. Respects .gitignore. Default: 1,000 results. Preview cap: 50 KiB. Truncated results provide a complete plain-text artifact when capture succeeds.";
+const GREP_DESCRIPTION = "Search file contents with a regex; set literal=true for exact text. Results are grouped under paths usable by read; each artifact record includes its path. Respects .gitignore. Default: 100 matches. Preview cap: 50 KiB; line cap: 500 characters. Truncated results provide a complete plain-text artifact when capture succeeds.";
 
 type SearchCaptureState = "complete" | "incomplete";
 type SearchToolName = "find" | "grep";
@@ -859,7 +859,7 @@ export function createAgentFindTool(
     name: base.name,
     label: base.label,
     description: FIND_DESCRIPTION,
-    promptSnippet: "Find paths by glob pattern. Regular-file results can be passed directly to read.",
+    promptSnippet: "Find paths by glob; regular files work with read.",
     promptGuidelines: base.promptGuidelines,
     parameters: findParameters,
     prepareArguments: prepareFindArguments,
@@ -965,7 +965,7 @@ export function createAgentGrepTool(
     name: base.name,
     label: base.label,
     description: GREP_DESCRIPTION,
-    promptSnippet: "Search file contents grouped under paths that can be passed directly to read.",
+    promptSnippet: "Search text by regex or literal; results work with read.",
     promptGuidelines: base.promptGuidelines,
     parameters: grepParameters,
     prepareArguments: prepareGrepArguments,

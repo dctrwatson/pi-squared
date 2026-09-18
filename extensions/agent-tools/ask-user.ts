@@ -621,10 +621,10 @@ export function createAskUserTool(state: AskUserSessionState = {}): ToolDefiniti
   return {
     name: "ask_user",
     label: "ask_user",
-    description: "Ask one interactive question with free text, one option, or multiple options.",
+    description: "Ask one question in the interactive TUI, with free text, options, or both.",
     promptSnippet: "Ask the user for required information or a decision",
     promptGuidelines: [
-      "Use ask_user only when required information or a decision cannot be inferred safely.",
+      "Use ask_user only when required information or a decision cannot be safely inferred.",
       "Do not use ask_user to request passwords, access tokens, or other secrets.",
     ],
     parameters: askUserParameters,

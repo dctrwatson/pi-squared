@@ -67,6 +67,17 @@ for (const [name, createTool] of [
   });
 }
 
+test("git and gh share one named process-status guideline", () => {
+  const git = gitModule.createAgentGitTool();
+  const gh = ghModule.createAgentGhTool();
+  const shared = "With git or gh, check exit_code, signal, timed_out, and capture state before use. Read artifacts before rerunning when output is omitted.";
+
+  assert.equal(git.promptGuidelines[0], shared);
+  assert.equal(gh.promptGuidelines[0], shared);
+  assert.match(git.promptGuidelines.slice(1).join("\n"), /\bgit\b/);
+  assert.match(gh.promptGuidelines.slice(1).join("\n"), /\bgh\b/);
+});
+
 test("git renders status 1 without an error color only for normal boolean results", () => {
   const tool = gitModule.createAgentGitTool();
   const renderResult = (content) => tool.renderResult(

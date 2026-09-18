@@ -92,7 +92,9 @@ Managers may use the existing subagent extension. The Hari harness role extensio
 preserves caller task context and adds a bounded current handoff. It does not create
 a helper registry, spawner, or alternate persona system. Fresh helpers use the
 extension's own minimal resources. Sharing a checkout is an advisory ownership
-boundary, not a sandbox.
+boundary, not a sandbox. Required caller context is not truncated: the Hari
+character limit and the Cursor byte limits can each reject an oversized dispatch.
+The caller must narrow the task or context before retrying.
 
 ## Data boundaries
 

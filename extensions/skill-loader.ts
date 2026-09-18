@@ -302,7 +302,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("skill-loader", {
-		description: "Choose skills from configured roots",
+		description: "Choose temporary skills from configured roots",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) return;
 			// /reload creates a new extension instance, so use process-local state to

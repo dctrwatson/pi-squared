@@ -1,6 +1,6 @@
 ---
 name: address-pr-feedback
-description: "Handles GitHub PR feedback end-to-end: reviews comments and inline threads, decides whether to reply or change code, creates logical commits, pushes safe updates, and posts replies. Use when the user wants feedback addressed on a PR, not only analyzed or drafted."
+description: "Address GitHub pull-request feedback end-to-end: inspect comments and threads, make justified scoped changes, publish approved updates, and post replies. Use when the user asks to address feedback, not only analyze it or draft a response."
 compatibility: Requires Bash 5.3+, git, jq, GitHub CLI (`gh`), and a same-repository GitHub PR checkout on macOS or Linux.
 ---
 
@@ -10,7 +10,7 @@ Use this skill to execute or preview a complete feedback response. Follow [the w
 
 ## 1. Determine authority
 
-The default is execution: inspect feedback, make approved changes, push new commits, and post replies. Analysis-only, preview, and dry-run requests authorize no push or GitHub mutation.
+Only an explicit request to address feedback authorizes execution. Analysis-only, preview, and dry-run requests authorize no push or GitHub mutation.
 
 Do not treat an existing PR as standing permission for later pushes or replies. Never invoke `git push` directly. The publication helper can use an exact force-with-lease for an intentional PR branch rewrite. Never use plain `--force`.
 

@@ -21,6 +21,7 @@ import {
 import {
     buildCursorCloudFollowUp,
     MAX_CURSOR_BOOTSTRAP_BYTES,
+    MAX_CURSOR_CORRELATION_MARKER_BYTES,
     MAX_CURSOR_FOLLOW_UP_BYTES,
     redactCursorHandoffCredentials,
 } from "./cursor-context.ts";
@@ -420,15 +421,19 @@ function cursorCorrelationMarker(nonce: string): string {
     return `pi-correlation-${createHash("sha256").update(nonce).digest("hex").slice(0, 32)}`;
 }
 
-/** Append one fixed marker without exceeding the Cloud prompt byte limit. */
+/** Append one fixed marker without losing explicit caller input. */
 function appendCursorCorrelationMarker(text: string, marker: string, maximumBytes: number): string {
     const suffix = `\n\n[Pi request correlation: ${marker}]`;
     const suffixBytes = Buffer.byteLength(suffix, "utf8");
-    const source = Buffer.from(text, "utf8");
-    if (source.length + suffixBytes <= maximumBytes) return `${text}${suffix}`;
-    let end = Math.max(0, maximumBytes - suffixBytes);
-    while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
-    return `${source.subarray(0, end).toString("utf8")}${suffix}`;
+    const sourceBytes = Buffer.byteLength(text, "utf8");
+    if (suffixBytes !== MAX_CURSOR_CORRELATION_MARKER_BYTES || sourceBytes + suffixBytes > maximumBytes) {
+        throw new SubagentBackendError(
+            "BACKEND_FAILED",
+            `Cursor Cloud prompt plus correlation metadata exceeds its ${maximumBytes}-byte limit. Reduce it before dispatch.`,
+            "cursor-cloud",
+        );
+    }
+    return `${text}${suffix}`;
 }
 
 function storedModelSelection(resolved: ReturnType<typeof persistableCursorModelSelection>): StoredCursorSubagent["currentModel"] {

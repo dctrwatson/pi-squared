@@ -100,7 +100,9 @@ system prompt or automatically inject it as a snapshot each turn. Hari uses
 `hari_projects` for the current index or a selected project when needed, and
 retrieves other detail on demand. Missing, stale, or uncertain facts need
 retrieval before dependent coordination actions. Hari's memory does not override
-current records.
+current records. Large record previews name `hari_record_page` as the recovery
+path. Start that record at offset 0, then use the `nextOffset` in each page's
+visible footer with the same record arguments until `eof=true`.
 
 GitHub reads are on demand and read-only. A full issue URL or `owner/repository#123`
 identifies its repository. A bare `#123` or `123` needs an explicit repository or a
@@ -145,7 +147,10 @@ overlapping writes.
 
 The Hari harness role extension adds compact current authority and a bounded source
 summary to prompted helper dispatches while preserving the caller's task context.
-Oversized required handoffs block rather than silently truncate. Dormant helper
+Oversized required handoffs block rather than silently truncate. Cursor also
+checks its smaller byte limits after credential redaction, before dispatch.
+A rejected request needs a narrower task or context, not an unchanged retry.
+Dormant helper
 controls do not require a full context refresh. Fresh helpers use the existing
 helper profile, not a cloned Hari manager role profile.
 

@@ -10,8 +10,8 @@ Run `npm run check` to check root and Hari TypeScript. Run `npm run test:quick`
 for the generic extension quick suite. Run `npm run test:hari` for all Hari tests,
 including the bundled offline native integration. `npm test` includes Hari tests.
 
-See the [production audit gate](docs/production-audit.md).
-
+See the [production audit gate](docs/production-audit.md) and
+[model context map](docs/model-context.md).
 
 ## Hari harness
 
@@ -34,7 +34,6 @@ load or activate Hari.
 ## Skills
 
 - [**address-pr-feedback**](skills/address-pr-feedback/SKILL.md) — Handles GitHub PR feedback end-to-end: reviews comments and inline threads, makes or plans the appropriate changes, and posts replies on GitHub.
-- [**buildkite-pr-check-review**](skills/buildkite-pr-check-review/SKILL.md) — Investigates GitHub PR status checks that map to Buildkite builds/jobs, fetches Buildkite logs with the CLI, and summarizes failures.
 - [**create-pr**](skills/create-pr/SKILL.md) — Creates or updates a GitHub pull request, analyzes changes, and turns local `pi:` checkpoints into logical commits before it pushes.
 
 ## Manual skills

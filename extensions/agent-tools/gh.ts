@@ -217,12 +217,12 @@ export function createAgentGhTool(options: AgentGhToolOptions = {}): ToolDefinit
   return {
     name: "gh",
     label: "gh",
-    description: "Run GitHub CLI directly without a TTY, with bounded status and stream previews. Read artifacts for omitted bytes.",
-    promptSnippet: "Run GitHub CLI without a TTY or interactive UI",
+    description: "Run GitHub CLI without a TTY. Results have bounded status and stream previews; read artifacts for omitted bytes.",
+    promptSnippet: "Run GitHub CLI without a TTY",
     promptGuidelines: [
-      "Check exit_code, signal, timed_out, and capture state before use. Read artifacts before reruns with omitted output.",
-      "No TTY: pager=cat; prompts, editors, and browser are disabled. Avoid auth login, browse, --web, --editor, and incomplete create commands; use arguments or stdin.",
-      "Authentication failures are normal nonzero results. Normal aliases, extensions, configuration, and credentials apply.",
+      "With git or gh, check exit_code, signal, timed_out, and capture state before use. Read artifacts before rerunning when output is omitted.",
+      "gh has no TTY: pager=cat; prompts, editors, and browser are disabled. Avoid auth login, browse, --web, --editor, and incomplete create commands; use arguments or stdin.",
+      "With gh, authentication failures are normal nonzero results; aliases, extensions, configuration, and credentials still apply.",
     ],
     parameters: ghParameters,
     prepareArguments: prepareGhArguments,

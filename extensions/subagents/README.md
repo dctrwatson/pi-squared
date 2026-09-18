@@ -116,7 +116,7 @@ A persona can declare `context-requirements`. The first parent-owned model-tool 
 
 A successful fork satisfies the requirement because it has parent context. A Pi fork that falls back to fresh context does not satisfy it. Later prompts can include context updates when the goal, constraints, or Git base changes. The registry records only that required context was delivered. It does not record the context text.
 
-The model-tool `context` field is limited to 8,000 characters. The Cursor runtime formats parent context and request as one input. The extension redacts recognized credential fields in this input. It caps the combined value at 6 KiB. Redaction is mitigation. It is not a complete data-loss boundary. Give semantic intent. Do not give repository source or patch text that Cursor can inspect.
+The model-tool `context` field is limited to 8,000 characters. The Cursor runtime formats parent context and request as one input. The extension redacts recognized credential fields in this input. It rejects this input if the combined value exceeds 6 KiB after redaction; it does not truncate caller instructions. Redaction is mitigation, not a complete data-loss boundary. Give semantic intent. Do not give repository source or patch text that Cursor can inspect.
 
 ## Lifetimes
 
@@ -398,9 +398,9 @@ Parent `list` and `status` text includes reusable names, runtimes, statuses, lif
 The following limits apply:
 
 - Parent `context` input: 8,000 characters.
-- Cursor formatted context and request: 6 KiB after redaction, as one input.
+- Cursor formatted context and request: 6 KiB after redaction, as one input; larger caller input is rejected.
 - Cursor initial bootstrap: 24 KiB.
-- Cursor follow-up: 6 KiB, shared by operating instructions, the completion reminder, and request text.
+- Cursor follow-up: 6 KiB, shared by operating instructions, the completion reminder, correlation metadata, and request text; a larger request is rejected.
 - Panel transcript item: 100,000 characters.
 - Panel transcript: 200 items and 500,000 aggregate characters.
 - Panel details: 24,000 characters.

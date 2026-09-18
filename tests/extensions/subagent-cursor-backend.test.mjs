@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 const backendModule = await import("../../extensions/subagents/cursor-backend.ts");
 const { SubagentSessionController } = await import("../../extensions/subagents/controller.ts");
 const { SubagentPanel } = await import("../../extensions/subagents/ui.ts");
-const { buildCursorCloudFollowUp } = await import("../../extensions/subagents/cursor-context.ts");
+const { buildCursorCloudBootstrap, buildCursorCloudFollowUp } = await import("../../extensions/subagents/cursor-context.ts");
 
 function storedCursor(overrides = {}) {
   return {
@@ -204,6 +204,56 @@ test("controller routes only the first Cursor parent prompt through bootstrap an
   assert.notEqual(sends[0].options.idempotencyKey, sends[1].options.idempotencyKey, "new start and follow-up requests use distinct durable keys");
   assert.equal(controller.state.usage.turns, 2, "completed messages count as turns when usage is omitted");
   await controller.stop();
+});
+
+test("Cursor rejects oversized explicit input before SDK dispatch", async () => {
+  const events = [];
+  let initialSends = 0;
+  const initialAgent = {
+    agentId: "bc-no-oversized-initial-send",
+    async send() { initialSends++; throw new Error("oversized bootstrap must not dispatch"); },
+    close() {}, async listArtifacts() { return []; }, async getUsage() { return {}; },
+  };
+  const initial = new backendModule.CursorCloudBackend(backendOptions({
+    stored: storedCursor({ agentId: initialAgent.agentId }),
+    sdk: {
+      async createAgent() { return initialAgent; }, async resumeAgent() { return initialAgent; }, async getAgent() { return {}; },
+      async listRuns() { return []; }, async getRun() { throw new Error("must not inspect runs"); }, async cancelRun() {}, async archiveAgent() {}, async listModels() { return []; }, async listRepositories() { return []; },
+    },
+    async buildInitialPrompt(request) {
+      return buildCursorCloudBootstrap({ mode: "fresh", purpose: "Reject oversized input", lifetime: "task", request });
+    },
+    persist() {},
+  }, events));
+  await initial.start();
+  await assert.rejects(initial.prompt("🙂".repeat(1_537)), (error) => {
+    assert.equal(error.code, "BACKEND_FAILED");
+    assert.match(error.message, /Cursor Cloud initial request is \d+ UTF-8 bytes after redaction; limit is 6144\. Reduce it before dispatch\./);
+    return true;
+  });
+  assert.equal(initialSends, 0);
+
+  let followUpSends = 0;
+  const followUpAgent = {
+    agentId: "bc-no-oversized-follow-up-send",
+    async send() { followUpSends++; throw new Error("oversized follow-up must not dispatch"); },
+    close() {}, async listArtifacts() { return []; }, async getUsage() { return {}; },
+  };
+  const followUp = new backendModule.CursorCloudBackend(backendOptions({
+    stored: storedCursor({ agentId: followUpAgent.agentId, remoteCreated: true, remoteLifecycle: "idle" }),
+    sdk: {
+      async createAgent() { return followUpAgent; }, async resumeAgent() { return followUpAgent; }, async getAgent() { return {}; },
+      async listRuns() { return []; }, async getRun() { throw new Error("must not inspect runs"); }, async cancelRun() {}, async archiveAgent() {}, async listModels() { return []; }, async listRepositories() { return []; },
+    },
+    persist() {},
+  }, events));
+  await followUp.start();
+  await assert.rejects(followUp.followUp("🙂".repeat(10_000)), (error) => {
+    assert.equal(error.code, "BACKEND_FAILED");
+    assert.match(error.message, /Cursor Cloud follow-up request is \d+ UTF-8 bytes after redaction; limit is \d+\. Reduce it before dispatch\./);
+    return true;
+  });
+  assert.equal(followUpSends, 0);
 });
 
 test("a restored Cursor panel uses the authoritative Cloud run duration", async () => {

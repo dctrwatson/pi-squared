@@ -640,18 +640,18 @@ test("fork source bounds entries, blocks, text, IDs, and keeps the latest user r
   assert.doesNotMatch(text, /tool-output-secret|errorMessage|error-secret/);
 });
 
-test("fork handoff and follow-up respect UTF-8 byte limits", async () => {
+test("fork handoff truncates generated text but follow-up rejects oversized UTF-8 caller text", async () => {
   const oversized = "🙂".repeat(10_000);
   const handoff = await contextModule.createCursorForkHandoff([userEntry("utf8-user", "Summarize this.")], {
     async generate() { return oversized; },
   });
-  const followUp = contextModule.buildCursorCloudFollowUp(oversized, "task");
   assert.ok(Buffer.byteLength(handoff.summary, "utf8") <= contextModule.MAX_CURSOR_FORK_SUMMARY_BYTES);
-  assert.match(followUp, /Lifetime: task/);
-  assert.match(followUp, /Inspect and plan only\. Do not edit, commit, push/i);
-  assert.ok(Buffer.byteLength(followUp, "utf8") <= contextModule.MAX_CURSOR_FOLLOW_UP_BYTES);
   assert.match(handoff.summary, /\[Content limited\]$/);
-  assert.match(followUp, /\[Content limited\]$/);
+  assert.throws(() => contextModule.buildCursorCloudFollowUp(oversized, "task"), (error) => {
+    assert.equal(error.code, "BACKEND_FAILED");
+    assert.match(error.message, /Cursor Cloud follow-up request is \d+ UTF-8 bytes after redaction; limit is \d+\. Reduce it before dispatch\./);
+    return true;
+  });
 });
 
 test("fork context rejects blank, no-user, and empty-summary input", async () => {

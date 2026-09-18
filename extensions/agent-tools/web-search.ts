@@ -23,10 +23,9 @@ const MAX_QUERY_BYTES = 12 * 1024;
 const MAX_RESULT_BYTES = DEFAULT_MAX_BYTES - 1024;
 
 const EXTERNAL_SYSTEM_PROMPT = [
-  "You are a web-search worker.",
-  "Use web search to answer the user query.",
-  "Return only a concise factual summary with direct source URLs.",
-  "Do not use claims that the search results do not support.",
+  "Search the web.",
+  "Return a concise factual answer with direct source URLs.",
+  "Do not make unsupported claims.",
 ].join(" ");
 
 export const agentWebSearchParameters = Type.Object({
@@ -311,10 +310,10 @@ export function createAgentWebSearchTool(
   return {
     name: "web_search",
     label: "web_search",
-    description: "Search the public web for current information. The query runs in a separate Codex request and the response includes source URLs. Truncated results expose a complete plain-text artifact.",
+    description: "Search the public web for current or external information in a separate Codex request. Responses include source URLs. Truncated results have a complete plain-text artifact.",
     promptSnippet: "Search the public web for current information",
     promptGuidelines: [
-      "Use web_search for current or external information that local files cannot verify.",
+      "Use web_search for current or external facts that local files cannot verify.",
     ],
     parameters: agentWebSearchParameters,
     prepareArguments: prepareWebSearchArguments,

@@ -14,6 +14,8 @@ import type { SubagentContextMode, SubagentLifetime, SubagentPersona } from "./p
 
 export const MAX_CURSOR_BOOTSTRAP_BYTES = 24 * 1024;
 export const MAX_CURSOR_FOLLOW_UP_BYTES = 6 * 1024;
+/** The backend appends one fixed correlation suffix before an SDK send. */
+export const MAX_CURSOR_CORRELATION_MARKER_BYTES = Buffer.byteLength("\n\n[Pi request correlation: pi-correlation-00000000000000000000000000000000]", "utf8");
 export const MAX_CURSOR_FORK_SUMMARY_BYTES = 8 * 1024;
 export const MAX_CURSOR_FORK_SOURCE_ENTRIES = 96;
 export const MAX_CURSOR_FORK_SOURCE_BLOCKS = 128;
@@ -21,7 +23,8 @@ export const MAX_CURSOR_FORK_SOURCE_BYTES = 24 * 1024;
 export const MAX_CURSOR_FORK_SOURCE_IDS = MAX_CURSOR_FORK_SOURCE_ENTRIES;
 const MAX_PERSONA_BODY_BYTES = 6 * 1024;
 const MAX_PARENT_CONTEXT_BYTES = 4 * 1024;
-const MAX_REQUEST_BYTES = 6 * 1024;
+/** Parent context and the initial request share this Cloud handoff budget. */
+export const MAX_CURSOR_PARENT_REQUEST_BYTES = 6 * 1024;
 const MAX_FORK_SOURCE_TOKENS = 6_000;
 const MIN_FORK_SOURCE_TOKENS = 512;
 const MIN_FORK_SUMMARY_OVERHEAD_TOKENS = 16_384;
@@ -156,6 +159,20 @@ export function omitCursorRepositorySource(text: string): string {
 
 function sanitizeCloudText(text: string, maxBytes: number): string {
     return boundedText(redactCursorHandoffCredentials(text), maxBytes);
+}
+
+/** Explicit caller input must fit without losing authority or task instructions. */
+function requiredCloudText(text: string, maxBytes: number, field: string): string {
+    const sanitized = redactCursorHandoffCredentials(text).replace(/\u0000/g, "").trim();
+    const bytes = Buffer.byteLength(sanitized, "utf8");
+    if (bytes > maxBytes) {
+        throw new SubagentBackendError(
+            "BACKEND_FAILED",
+            `Cursor Cloud ${field} is ${bytes} UTF-8 bytes after redaction; limit is ${maxBytes}. Reduce it before dispatch.`,
+            "cursor-cloud",
+        );
+    }
+    return sanitized;
 }
 
 function sanitizeForkText(text: string, maxBytes: number): string {
@@ -421,18 +438,22 @@ export function buildCursorCloudBootstrap(options: CursorBootstrapOptions): stri
         : "Inspect the requested scope and return concise evidence.";
     const personaName = sanitizeCloudText(options.persona?.name ?? "Cursor Cloud subagent", 128) || "Cursor Cloud subagent";
     const purpose = sanitizeCloudText(options.purpose, 512) || "Investigate the requested scope.";
-    const request = sanitizeCloudText(options.request, MAX_REQUEST_BYTES);
+    const boundedParentContext = options.parentContext
+        ? requiredCloudText(options.parentContext, MAX_PARENT_CONTEXT_BYTES, "parent context")
+        : "";
+    const requestBudget = MAX_CURSOR_PARENT_REQUEST_BYTES - Buffer.byteLength(boundedParentContext, "utf8");
+    const request = requiredCloudText(options.request, requestBudget, "initial request");
     if (!request) throw new SubagentBackendError("BACKEND_FAILED", "Cursor Cloud requires a request before it can start.", "cursor-cloud");
     const expectedMcps = (options.persona?.cursorMcps ?? [])
         .map((name) => sanitizeCloudText(name, 64))
         .filter(Boolean)
         .slice(0, 8);
     const sections = [
-        "## Agent role",
+        "## Role",
         "",
         personaBody,
         "",
-        "## Purpose and operating instructions",
+        "## Assignment",
         "",
         `Persona: ${personaName}`,
         `Purpose: ${purpose}`,
@@ -448,12 +469,11 @@ export function buildCursorCloudBootstrap(options: CursorBootstrapOptions): stri
     if (options.mode === "fork") {
         sections.push("", "## Inherited Pi context", "", sanitizeForkText(options.forkHandoff!.summary, MAX_CURSOR_FORK_SUMMARY_BYTES));
     }
-    const parentContext = options.parentContext ? sanitizeCloudText(options.parentContext, MAX_PARENT_CONTEXT_BYTES) : "";
-    if (parentContext) sections.push("", "## Parent-provided context", "", parentContext);
+    if (boundedParentContext) sections.push("", "## Parent-provided context", "", boundedParentContext);
     sections.push("", "## Request", "", request);
     const bootstrap = sections.join("\n");
-    if (Buffer.byteLength(bootstrap, "utf8") > MAX_CURSOR_BOOTSTRAP_BYTES) {
-        throw new SubagentBackendError("BACKEND_FAILED", "Cursor Cloud bootstrap exceeds its context limit. Reduce persona context or the request.", "cursor-cloud");
+    if (Buffer.byteLength(bootstrap, "utf8") + MAX_CURSOR_CORRELATION_MARKER_BYTES > MAX_CURSOR_BOOTSTRAP_BYTES) {
+        throw new SubagentBackendError("BACKEND_FAILED", "Cursor Cloud bootstrap exceeds its context limit after correlation metadata. Reduce persona context or the request.", "cursor-cloud");
     }
     return bootstrap;
 }
@@ -461,14 +481,14 @@ export function buildCursorCloudBootstrap(options: CursorBootstrapOptions): stri
 /** Repeat bounded operating constraints because Cloud follow-ups share remote context. */
 export function buildCursorCloudFollowUp(text: string, lifetime: SubagentLifetime = "persistent"): string {
     const guidance = [
-        "## Current operating constraints",
+        "## Follow-up",
         `Lifetime: ${lifetime}`,
         "Inspect and plan only. Do not edit, commit, push, create branches, create pull requests, or use mutating MCP operations.",
         SUBAGENT_COMPLETION_REMINDER,
-        "## Follow-up request",
+        "## Request",
     ].join("\n");
-    const requestLimit = MAX_CURSOR_FOLLOW_UP_BYTES - Buffer.byteLength(guidance, "utf8") - 2;
-    const prompt = sanitizeCloudText(text, Math.max(1, requestLimit));
+    const requestLimit = MAX_CURSOR_FOLLOW_UP_BYTES - Buffer.byteLength(guidance, "utf8") - 1 - MAX_CURSOR_CORRELATION_MARKER_BYTES;
+    const prompt = requiredCloudText(text, Math.max(1, requestLimit), "follow-up request");
     if (!prompt) throw new SubagentBackendError("BACKEND_FAILED", "Cursor Cloud follow-up requires a request.", "cursor-cloud");
     return `${guidance}\n${prompt}`;
 }

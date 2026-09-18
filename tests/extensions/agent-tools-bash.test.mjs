@@ -492,3 +492,87 @@ test("bash stops at the full-capture limit", async () => {
     assert.match(result.text, /^\[bash error: OUTPUT_LIMIT;/);
   });
 });
+
+test("bash retains the output-limit result when SIGTERM races a finished group", async () => {
+  await withDirectory(async (directory) => {
+    const originalKill = process.kill;
+    let injected = false;
+    process.kill = (pid, signal) => {
+      if (!injected && typeof pid === "number" && pid < 0 && signal === "SIGTERM") {
+        injected = true;
+        const error = new Error("synthetic group-exit race");
+        error.code = "EPERM";
+        throw error;
+      }
+      return originalKill(pid, signal);
+    };
+    try {
+      const result = await execute(
+        bashModule.createAgentBashTool(),
+        { command: "head -c 67108865 /dev/zero; sleep 0.1" },
+        directory,
+      );
+      assert.equal(injected, true);
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, "OUTPUT_LIMIT");
+    } finally {
+      process.kill = originalKill;
+    }
+  });
+});
+
+test("bash retains process-control failure when SIGTERM cannot stop a live group", async () => {
+  await withDirectory(async (directory) => {
+    const originalKill = process.kill;
+    let groupId;
+    let primaryError;
+    const groupGone = async () => {
+      const deadline = Date.now() + 1_000;
+      while (true) {
+        try {
+          originalKill(-groupId, 0);
+        } catch (error) {
+          if (error.code === "ESRCH") return true;
+          if (error.code !== "EPERM") throw error;
+        }
+        if (Date.now() >= deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    process.kill = (pid, signal) => {
+      if (groupId === undefined && typeof pid === "number" && pid < 0 && signal === "SIGTERM") {
+        groupId = -pid;
+        const error = new Error("synthetic persistent group-control failure");
+        error.code = "EPERM";
+        throw error;
+      }
+      return originalKill(pid, signal);
+    };
+    try {
+      const result = await execute(
+        bashModule.createAgentBashTool({ cleanupLimitMs: 200 }),
+        { command: "head -c 67108865 /dev/zero; sleep 30" },
+        directory,
+      );
+      assert.equal(Number.isSafeInteger(groupId), true);
+      assert.equal(result.ok, false);
+      assert.equal(result.error.code, "PROCESS_CONTROL_FAILED");
+      assert.doesNotThrow(() => originalKill(-groupId, 0));
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      process.kill = originalKill;
+      try {
+        if (groupId !== undefined) {
+          try { originalKill(-groupId, "SIGKILL"); } catch (error) {
+            if (error.code !== "ESRCH") throw error;
+          }
+          assert.equal(await groupGone(), true, "Synthetic process group did not exit after SIGKILL");
+        }
+      } catch (error) {
+        if (primaryError === undefined) throw error;
+      }
+    }
+  });
+});

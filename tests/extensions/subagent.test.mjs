@@ -243,32 +243,32 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.deepEqual(Object.keys(tools[0].parameters.properties), [
     "action", "id", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
   ]);
-  assert.equal(tools[0].parameters.properties.purpose.description, "Task domain");
+  assert.equal(tools[0].parameters.properties.purpose.description, "Stable objective for creation and reuse");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
-  assert.match(tools[0].parameters.properties.persona.description, /required for Pi.*optional for Cursor Cloud/i);
+  assert.match(tools[0].parameters.properties.persona.description, /exact listed persona.*required for Pi/i);
   for (const field of ["profile", "model", "thinking"]) {
     assert.equal(Object.hasOwn(tools[0].parameters.properties, field), false);
   }
-  assert.match(tools[0].parameters.properties.runtime.description, /Pi default.*persona-less requires explicit Cursor Cloud/i);
+  assert.match(tools[0].parameters.properties.runtime.description, /persona runtime.*persona-less create requires cursor-cloud/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
   assert.match(tools[0].parameters.properties.lifetime.description, /task default.*one-shot needs prompt/i);
   assert.deepEqual(tools[0].parameters.properties.mode.enum, ["fresh", "fork"]);
   assert.match(tools[0].parameters.properties.mode.description, /fresh default.*fork parent history/i);
   assert.equal(tools[0].parameters.properties.skills.items.maxLength, 64);
-  assert.equal(tools[0].parameters.properties.skills.description, "Exact parent skill names");
-  assert.equal(tools[0].parameters.properties.prompt.description, "Request that starts work; required when context is set");
+  assert.equal(tools[0].parameters.properties.skills.description, "Exact discovered parent skill names (Pi only)");
+  assert.equal(tools[0].parameters.properties.prompt.description, "Current request; starts create or prompt");
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
-  assert.equal(tools[0].parameters.properties.context.description, "Background sent with prompt; not valid alone; required by listed persona on its first prompt");
+  assert.equal(tools[0].parameters.properties.context.description, "Concise background sent only with prompt; required by some personas first");
   assert.deepEqual(tools[0].promptGuidelines, [
-    "Before subagent create, check retained agents and list unknown personas. Send context with a prompt; omit both for dormant creation. Meet first-prompt context requirements. Persona-less create needs explicit Cursor Cloud.",
-    "Select subagents by output, not tool use. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned changes or state-changing workflows. If unclear, use explorer without changes.",
-    "Default to task subagents; one-shot only when continuity cannot help, persistent for open-ended work. Run at most 4; idle agents use no work slots. Satisfy NEEDS.",
-    "Reuse task/persistent subagents for follow-ups, integration, validation, and related turns. Do not stop at result or turn end. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated agent.",
-    "Give subagents objective, scope, and output. Delegate substantive isolated work; keep coordination and integration in the parent. Avoid adjacent work.",
-    "For DETAILS_AVAILABLE or a progressive-discovery notice, use subagent action prompt for an overview/index or named sections from the same instance. Do not repeat the underlying task.",
-    "For new subagents, prefer fresh context; fork when parent history matters. Inspect only enough to partition work. Parallelize only separate contexts or specialties.",
+    "Before subagent create, check retained agents and list unknown personas. Select by output. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned owned changes or workflows.",
+    "For subagent create, send concise context with a prompt; omit both for dormant creation. Meet persona first-prompt context requirements. Persona-less create requires cursor-cloud.",
+    "Default to task subagents; use one-shot only when continuity cannot help, persistent for open-ended work. Run at most 4; idle subagents use no work slots. Satisfy NEEDS instead of blind retry.",
+    "Reuse relevant task or persistent subagents for follow-ups, integration, and validation. Do not stop after a result. Stop only on request, when context is no longer useful, or to free capacity from an idle unrelated subagent.",
+    "Give each subagent objective, scope, and output. The parent owns coordination and integration. Parallelize only distinct scopes with non-overlapping worker ownership.",
+    "For a new subagent, prefer fresh context when a concise handoff works; fork only when parent history matters.",
+    "For DETAILS_AVAILABLE or a progressive-discovery notice, prompt the same subagent for an overview or named sections. Do not repeat the task.",
   ]);
-  assert.equal(tools[0].description, "Retain up to 20; run up to 4 subagents at once. Pi shares local authority; Cursor Cloud inspects pushed repositories with MCPs.");
+  assert.equal(tools[0].description, "Delegate isolated work. Retain up to 20; run up to 4. Pi shares local authority; Cursor Cloud sees pushed commits and configured MCPs.");
   assert.match(`${tools[0].description}\n${tools[0].promptSnippet}`, /isolat/i);
   assert.ok(tools[0].promptGuidelines.every((guideline) => guideline.includes("subagent")));
   const modelFacingDefinition = JSON.stringify({
@@ -744,9 +744,9 @@ test("subagents receive purpose-aware progressive-disclosure guidance", () => {
     "auth-scout",
     "Authentication architecture and token lifecycle",
   );
-  assert.match(guidance, /persistent subagent "auth-scout"/);
-  assert.match(guidance, /Purpose: Authentication architecture and token lifecycle/);
-  assert.match(guidance, /Retain context for related requests within this purpose\./);
+  assert.match(guidance, /subagent "auth-scout" \(lifetime: persistent\)/);
+  assert.match(guidance, /Objective: Authentication architecture and token lifecycle/);
+  assert.match(guidance, /Retain context for related work within this objective\./);
   assert.ok(guidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const oneShotGuidance = formatSubagentContinuityPrompt(
@@ -754,13 +754,13 @@ test("subagents receive purpose-aware progressive-disclosure guidance", () => {
     "Review one bounded change",
     "one-shot",
   );
-  assert.match(oneShotGuidance, /one-shot subagent/);
-  assert.match(oneShotGuidance, /This instance normally stops after this response; use DETAILS_AVAILABLE when further sections are needed\./);
+  assert.match(oneShotGuidance, /lifetime: one-shot/);
+  assert.match(oneShotGuidance, /Return a self-contained result\. Use DETAILS_AVAILABLE only when follow-up sections are needed\./);
   assert.ok(oneShotGuidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const taskGuidance = formatSubagentContinuityPrompt("reviewer", "Review and validate fixes", "task");
-  assert.match(taskGuidance, /task-scoped subagent/);
-  assert.match(taskGuidance, /Retain context for follow-up and validation of this objective\./);
+  assert.match(taskGuidance, /lifetime: task/);
+  assert.match(taskGuidance, /Retain context for follow-up, integration, and validation of this objective\./);
   assert.ok(taskGuidance.endsWith(SUBAGENT_COMPLETION_GUIDANCE));
 
   const args = buildSubagentProcessArgs({
@@ -3260,48 +3260,40 @@ test("bundled personas provide focused defaults and user personas override by na
       role: systemPrompt.split("\n", 1)[0],
     })),
     [
-      { name: "doc-auditor", role: "You are a repository documentation auditor. Verify that documentation about the repository or implemented code matches actual behavior and gives its intended audience enough information to use the documented functionality correctly." },
-      { name: "explorer", role: "You are an explorer for the primary agent. Investigate the requested scope and answer requested questions with concise, evidence-based summaries and direct answers. Explain behavior, diagnose issues, compare options, or give advice when requested. Do not apply changes or state-changing workflows." },
-      { name: "reviewer", role: "You are a code reviewer, not an implementation agent." },
-      { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Assess testability, test coverage, and regression cases for a defined change. Do not define product requirements, determine feature scope, or make design decisions. For a design document, assess only whether its stated behavior is precise and observable enough to derive tests." },
-      { name: "worker", role: "You are a worker for the primary agent. Apply explicitly assigned implementation changes or state-changing production workflows within explicit ownership." },
+      { name: "doc-auditor", role: "You are a repository documentation auditor. Verify that documentation for current repository behavior is accurate and sufficient for its audience. Do not audit plans, proposals, requirements, or future designs, except to verify a requested claim about current code. If the request is outside this scope, say so and stop." },
+      { name: "explorer", role: "You are an explorer for the primary agent. Investigate the requested scope and give direct, concise, evidence-based answers. Explain, diagnose, compare options, or advise only as requested. Cite relevant paths and line ranges. Separate observed facts, inference, and unknowns." },
+      { name: "reviewer", role: "You are a code reviewer, not an implementation agent. Treat the caller's stated focus as a hard boundary. Inspect Git status, the relevant diff, surrounding code, and existing tests as needed. Do not edit files or run tests." },
+      { name: "test-analyst", role: "You are a test analyst, not an implementation agent. Assess testability, coverage, and regression cases for the defined change. Do not define requirements, feature scope, or design decisions." },
+      { name: "worker", role: "You are a worker for the primary agent. Apply only explicitly assigned implementation changes or state-changing workflows within explicit ownership." },
     ],
   );
   const bundledPrompts = Object.fromEntries(
     bundled.personas.map(({ name, systemPrompt }) => [name, systemPrompt]),
   );
-  assert.match(bundledPrompts.explorer, /available evidence.*source code, documentation, configuration, tests, history, project records, artifacts, and declared third-party dependencies/);
-  assert.match(bundledPrompts.explorer, /Lead with direct answers and a concise summary/);
-  assert.match(bundledPrompts.explorer, /Do not edit or write project files.*use Bash to inspect.*dependencies/s);
-  assert.match(bundledPrompts.explorer, /Explain behavior, diagnose issues, compare options, or give advice when requested/);
-  assert.match(bundledPrompts.explorer, /Do not evaluate change quality or propose changes unless requested/);
-  assert.match(bundledPrompts.explorer, /Do not apply changes or state-changing workflows/);
-  assert.match(bundledPrompts["doc-auditor"], /Do not audit plans, design documents, proposals, requirements.*intended or future work/s);
-  assert.match(bundledPrompts["doc-auditor"], /Do not provide a generic document critique.*outside this scope.*stop/s);
-  assert.match(bundledPrompts["doc-auditor"], /Report only actionable findings.*documentation and implementation evidence/s);
-  assert.match(bundledPrompts["doc-auditor"], /Do not draft replacement prose.*or edit files/s);
-  assert.match(
-    bundledPrompts.reviewer,
-    /stated review focus as a hard boundary.*specific guideline.*report only findings that directly answer it.*Do not expand.*general review/s,
-  );
-  assert.match(bundledPrompts.reviewer, /Report only actionable findings.*only within the review scope.*failure scenario and impact/s);
-  assert.match(bundledPrompts.reviewer, /Do not suggest fixes, remediation, replacement code, or implementation directions/);
-  assert.match(bundledPrompts.reviewer, /Do not edit files or run tests.*Base the review on the changes and repository evidence/s);
-  assert.match(bundledPrompts["test-analyst"], /recommend focused tests.*setup, action, and assertions/s);
-  assert.match(bundledPrompts["test-analyst"], /Do not edit files.*Run focused tests when useful.*commands and outcomes you actually observed/s);
+  assert.match(bundledPrompts.explorer, /Inspect only evidence needed to answer: source, docs, configuration, tests, history, records, artifacts, and declared dependencies/);
+  assert.match(bundledPrompts.explorer, /Cite relevant paths and line ranges\. Separate observed facts, inference, and unknowns/);
+  assert.match(bundledPrompts.explorer, /Do not edit files or run state-changing workflows\. Bash is for inspection only/);
+  assert.match(bundledPrompts["doc-auditor"], /Do not audit plans, proposals, requirements, or future designs.*outside this scope.*stop/s);
+  assert.match(bundledPrompts["doc-auditor"], /Report only actionable discrepancies.*documentation and implementation paths and line ranges/s);
+  assert.match(bundledPrompts["doc-auditor"], /Do not draft prose, prescribe structure, or edit files/);
+  assert.match(bundledPrompts.reviewer, /stated focus as a hard boundary.*Inspect Git status.*Do not edit files or run tests/s);
+  assert.match(bundledPrompts.reviewer, /actionable, evidence-backed defects.*failure scenario, and impact/s);
+  assert.match(bundledPrompts.reviewer, /Do not suggest fixes, replacement code, or implementation directions/);
+  assert.match(bundledPrompts["test-analyst"], /essential setup, action, and assertions/s);
+  assert.match(bundledPrompts["test-analyst"], /Do not edit files\. Run focused tests only when useful; report only observed commands and outcomes/);
   assert.match(bundledPrompts.worker, /BLOCKED: No explicitly assigned change or state-changing workflow\.\nNEEDS: Use explorer or a fitting specialist/);
-  assert.match(bundledPrompts.worker, /Do not infer permission from tool use or a request for advice/);
-  assert.match(bundledPrompts.worker, /investigate the repository only as needed to support an assigned implementation or workflow/);
-  assert.match(bundledPrompts.worker, /You are not alone in the worktree.*Do not revert, overwrite, or reformat unrelated work/s);
-  assert.match(bundledPrompts.worker, /ownership overlaps.*stop and return `BLOCKED` and `NEEDS`.*minimum boundary change/s);
+  assert.match(bundledPrompts.worker, /Do not infer authority from tools or requests for advice/);
+  assert.match(bundledPrompts.worker, /Investigate only enough to perform assigned work/);
+  assert.match(bundledPrompts.worker, /Preserve concurrent work and adapt to compatible concurrent changes\. Do not revert, overwrite, reformat, or fix unrelated work/);
+  assert.match(bundledPrompts.worker, /ownership overlaps.*stop with `BLOCKED` and `NEEDS`.*minimum required boundary change/s);
   assert.match(bundledPrompts.worker, /Run focused validation.*Do not commit, change branches, rewrite Git state, or remove files/s);
   assert.equal(
     bundled.personas.find(({ name }) => name === "explorer").contextRequirements,
-    "Provide the objective, questions, relevant scope, and constraints.",
+    "Provide the objective, questions, scope, and constraints.",
   );
   assert.equal(
     bundled.personas.find(({ name }) => name === "worker").contextRequirements,
-    "Provide the objective, acceptance criteria, owned files or responsibilities, constraints, concurrent work, and required validation.",
+    "Provide the objective, acceptance criteria, ownership, constraints, concurrent work, and required validation.",
   );
   assert.deepEqual(
     bundled.personas.map(({ name, model, thinking }) => ({ name, model, thinking })),
@@ -3315,7 +3307,7 @@ test("bundled personas provide focused defaults and user personas override by na
   );
   assert.match(
     bundled.personas.find(({ name }) => name === "reviewer").contextRequirements,
-    /review focus or question.*objective.*scope.*Git comparison scope\/base.*if applicable/i,
+    /review focus.*expected behavior.*scope.*constraints.*Git base when relevant/i,
   );
 
   const root = await mkdtemp(join(tmpdir(), "pi-persona-override-"));
@@ -3338,11 +3330,11 @@ test("bundled persona lists expose output and action boundaries without full pro
   const { personas, diagnostics } = loadSubagentPersonas(BUNDLED_PERSONA_DIRECTORY);
   assert.deepEqual(diagnostics, []);
   const descriptions = Object.fromEntries(personas.map(({ name, description }) => [name, description]));
-  assert.match(descriptions.explorer, /explain, diagnose, compare options, or advise when requested.*do not apply changes/);
-  assert.match(descriptions.worker, /explicitly assigned changes or state-changing workflows within ownership/);
-  assert.match(descriptions.reviewer, /implementation changes.*defects only.*do not suggest fixes, edit files, or run tests/);
-  assert.match(descriptions["test-analyst"], /testability and coverage.*recommend focused tests.*may run focused tests.*do not edit files/);
-  assert.match(descriptions["doc-auditor"], /implemented behavior.*exclude future designs.*do not rewrite or edit files/);
+  assert.match(descriptions.explorer, /investigate and answer with evidence.*do not apply changes/i);
+  assert.match(descriptions.worker, /explicitly assigned owned changes or state-changing workflows.*preserve concurrent work.*validate/i);
+  assert.match(descriptions.reviewer, /implementation changes.*actionable defects only.*do not suggest fixes, edit files, or run tests/i);
+  assert.match(descriptions["test-analyst"], /testability and focused coverage.*may run tests.*do not edit files/i);
+  assert.match(descriptions["doc-auditor"], /documentation defects for implemented behavior.*exclude future designs.*do not rewrite or edit files/i);
   for (const persona of personas) {
     const listed = formatPersonaForModel(persona);
     assert.ok(listed.includes(persona.description));

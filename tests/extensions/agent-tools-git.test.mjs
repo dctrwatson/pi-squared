@@ -178,10 +178,10 @@ test("git exposes typed snake_case inputs and concise host-behavior guidance", (
   assert.equal("timeout" in tool.parameters.properties, false);
   assert.equal(typeof tool.prepareArguments, "function");
   assert.deepEqual(tool.promptGuidelines, [
-    "Check exit_code, signal, timed_out, and capture state before use. Read artifacts before reruns with omitted output.",
-    "No TTY: pagers, prompts, askpass, editors, and browser use are disabled. Avoid UI modes and hooks that need input; use flags for messages and choices.",
-    "Output baseline: color is off, columns are off, and diagnostics use the C locale. Use command options for stable formats.",
-    "Normal configuration, aliases, hooks, helpers, and credentials still apply unless this baseline overrides them.",
+    "With git or gh, check exit_code, signal, timed_out, and capture state before use. Read artifacts before rerunning when output is omitted.",
+    "git has no TTY: pagers, prompts, askpass, editors, and browser use are disabled. Avoid interactive modes and input-dependent hooks; use flags for messages and choices.",
+    "git disables color and columns, and uses the C locale for diagnostics. Use options for stable formats.",
+    "Other git configuration, aliases, hooks, helpers, and credentials still apply.",
   ]);
 });
 
