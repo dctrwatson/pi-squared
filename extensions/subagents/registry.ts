@@ -68,7 +68,7 @@ const LIFETIMES = new Set<SubagentLifetime>(SUBAGENT_LIFETIMES);
 // New personas and records use model and thinking.
 const LEGACY_PROFILE_DEFAULTS = {
     fast: { model: "gpt-6-luna", thinking: "high" },
-    balanced: { model: "gpt-6-sol", thinking: "xhigh" },
+    balanced: { model: "gpt-6.1-sol", thinking: "xhigh" },
     deep: { model: "gpt-6-astra", thinking: "xhigh" },
 } as const;
 

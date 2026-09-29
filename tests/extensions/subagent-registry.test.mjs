@@ -537,7 +537,7 @@ test("registry restores legacy Cursor defaults without replacing TUI model choic
   t.after(() => rm(root, { recursive: true, force: true }));
   const expected = [
     ["fast", "gpt-6-luna", "high"],
-    ["balanced", "gpt-6-sol", "xhigh"],
+    ["balanced", "gpt-6.1-sol", "xhigh"],
     ["deep", "gpt-6-astra", "xhigh"],
   ];
   for (const [profile, model, thinking] of expected) {

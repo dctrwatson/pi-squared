@@ -8,13 +8,13 @@ const MAX_MODEL_PARAMETERS = 16;
 const MAX_PARAMETER_VALUES = 32;
 const MAX_MODEL_TEXT_CHARS = 256;
 
-export const DEFAULT_CURSOR_MODEL = "gpt-6-sol";
+export const DEFAULT_CURSOR_MODEL = "gpt-6.1-sol";
 export const DEFAULT_CURSOR_THINKING: SubagentThinkingLevel = "xhigh";
 
 /** Known model identities retain their standard-speed canonical variants. */
 const CURSOR_COMPATIBILITY_TARGETS = [
     { target: "GPT-6 Astra", ids: ["gpt-6-astra"] },
-    { target: "GPT-6 Sol", ids: ["gpt-6-sol"] },
+    { target: "GPT-6.1 Sol", ids: ["gpt-6.1-sol"] },
     { target: "GPT-6 Luna", ids: ["gpt-6-luna"] },
 ] as const;
 
