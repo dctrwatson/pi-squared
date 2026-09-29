@@ -150,6 +150,7 @@ The bundled personas use these initial settings:
 
 ## Completion reports
 
+Pi and Cursor Cloud subagents receive shared completion guidance from `completion.ts`. Pi adds it to the system prompt at process start, including restored sessions and sessions without a purpose. Cursor adds the full contract at bootstrap and a shorter reminder on each follow-up. This guidance does not require a memory tool.
 
 The default report starts with a short task/status line and the requested result. Include supplied identity and the evidence needed for the next decision:
 
@@ -170,7 +171,9 @@ Use progressive discovery for extensive reports. Return an overview with decisiv
 
 The tool delivers a whole response inline when it fits within 16 KiB and 400 lines, including delivery metadata. Otherwise it returns a continuation notice without a cut-off report body. The parent uses `action: "prompt"` with the same subagent to request an overview/index, then the sections it needs. It does not repeat the investigation. A one-shot stays available as a task when its report needs progressive discovery or offers further sections.
 
+These thresholds control inline delivery, not report generation. Existing backend capture limits still apply and incomplete results remain explicit. The parent does not receive private transcripts. Keep the subagent until the parent has the required evidence.
 
+See the [completion contract](completion-contract.md) for evidence rules and an example. Reload or restart the parent Pi session to rebuild Pi subagent processes with the new guidance. A resumed Cursor agent receives the reminder on its next follow-up. Existing results are not rewritten.
 
 ## Blocked subagents
 

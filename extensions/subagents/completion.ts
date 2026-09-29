@@ -1,3 +1,4 @@
+// Shared by Pi system prompts and Cursor Cloud requests.
 export const SUBAGENT_COMPLETION_GUIDANCE = `## Completion
 Answer only the current request within persona limits. Reports do not authorize extra work. Preserve required order, citations, and exact formats. An exact format overrides this default wrapper. Keep scratch, routine progress, and tool logs private.
 Otherwise: short task/status line, requested result, and relevant evidence. Include supplied worker, task, run, or instance IDs only. Do not infer instance IDs from persona labels; never invent IDs. Omit empty fields. State consequential unknown or unrun work, and "none observed" when this matters.

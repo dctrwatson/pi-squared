@@ -16,6 +16,8 @@ skill, prompt-template, theme, and context-file discovery.
 
 | Role | Explicit resource order | Active responsibility |
 | --- | --- | --- |
+| Hari in the Prime Radiant | Hari workspace-creation adapter, Hari harness role extension | Compact coordination and prepared-workspace creation |
+| Manager | Full native workspace extension, existing subagent extension, Hari harness role extension | Assigned source work, reports, and optional bounded helpers |
 
 The global adapter invokes the native workspace extension factory but passes
 through only the unchanged `create_workspace` tool. The adapter drops the
@@ -67,7 +69,7 @@ guidance. Its `before_agent_start` hook replaces Pi's prompt, but does not read 
 embed the live project index, priorities, or decisions. Existing tools such as
 `hari_projects` retrieve current facts on demand. The harness adds no recurring
 snapshot message. Coordination changes therefore leave its stable system prefix
-concerns.
+unchanged. Provider cache behavior remains a separate concern.
 
 Manager system instructions contain no live assignment or source snapshot.
 `manager_context` returns the full current assignment, criteria, constraints,
@@ -100,15 +102,16 @@ The caller must narrow the task or context before retrying.
 
 The **Prime Radiant** at `~/Projects/primeradiant` is Hari's durable home. The
 global Hari-harness launch runs there, with Hari's coordinator sessions under
-Radiant also holds his structured coordination knowledge and manager reports under
+`.hari/sessions`. Prime Radiant also holds his structured coordination knowledge
+and manager reports under
 `projects/.../reports`.
 
 Pi owns native session mechanics. The workspace extension owns manager workspace
 session and lease mechanics at prepared source workspaces. Project source,
 credentials, external evidence, and manager sessions are not relocated into the
-diagnostic logs can also remain outside it. Those logs are diagnostics, not Hari's
-durable memory, and no relocation is implied. Generic Hari harness code, docs, and
-skills under `harnesses/hari` are software resources, not Hari's private memory.
+Prime Radiant. Host-managed credentials can remain outside it. Generic Hari
+harness code, docs, and skills under `harnesses/hari` are software resources,
+not Hari's private records.
 Company-specific guidance belongs in the Prime Radiant and is not automatically
 loaded, written, or checkpointed by the harness. The current Git tool handles
 recognized structured coordination records, not arbitrary company guidance.

@@ -11,6 +11,7 @@ option has been validated in interactive use.
 Hari is the named global coordination agent for projects that contain one or more
 issues. His harness is software under `harnesses/hari` in pi-squared. His durable
 home is the **Prime Radiant** at `~/Projects/primeradiant`, where his coordinator
+conversations and durable coordination knowledge live.
 
 Hari keeps a compact cross-project view of priorities, decisions, dependencies,
 blockers, and manager reports. He uses judgment within agreed authority to
@@ -97,16 +98,17 @@ do not need a budget worksheet.
 ## Current state and continuity
 
 Hari is the sole agent writer for the small file-backed shared index, inbox, and
-project records in the Prime Radiant. His coordinator
-concise reports under the Prime Radiant project records, while their native source
-workspace sessions remain at their prepared workspaces.
+project records in the Prime Radiant. His coordinator conversations live there as
+well. Managers own concise reports under the Prime Radiant project records, while
+their native source workspace sessions remain at their prepared workspaces.
 
 Source repositories, GitHub, runtime observations, and approved decisions remain
 authorities for their own facts. The Prime Radiant is Hari's durable home, not a
 copy of every project source, credential, external record, or manager session.
 Prefer references and concise provenance to copied live-state mirrors.
 
-context. They are historical context, not current authority. Managers use
+Native Pi history and workspace state preserve useful context. They are
+historical context, not current authority. Managers use
 `manager_context` for current assignment, decisions, guidance, and source state.
 Their system instructions remain separate and stable. A missing full view or a
 changed boundary blocks guarded source actions, delegation, and reports until a
@@ -119,8 +121,7 @@ background.
 ## Learning and placement
 
 Hari learns through his own interactions, existing coordination records, and
-normal manager reports. The harness reuses native Pi history and observational
-memory rather than adding a separate history pool. Generalized harness behavior,
+normal manager reports. The harness reuses native Pi history rather than adding a separate history pool. Generalized harness behavior,
 code, docs, skills, and glossary material belong under `harnesses/hari`. They are
 software resources, not Hari's private memory.
 Company-specific knowledge, skills, conventions, and glossary material belong in

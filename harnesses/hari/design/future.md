@@ -20,15 +20,13 @@ Multi-checkout coordination may be added when a manager's approved work needs
 concurrent non-overlapping writers. Neither option should create a project-manager
 tier or replace native workspace lifecycle.
 
-## Context and terminals
+## Terminals
 
-Stricter role-specific memory projection and bounded recall may be warranted if
-context. Linux terminal launching remains deferred.
+Linux terminal launching remains deferred.
 
 ## Persistent limits
 
 Automatic manager waking, background coordination, GitHub publication, source
 pushes, deployment, and live-system mutation are not current grants. Future work
 must retain manager-owned acceptance, explicit authority, inspection of uncertain
-outcomes before retry, and the distinction between Hari's historical memory and
-current records.
+outcomes before retry, and the distinction between conversation history and current records.

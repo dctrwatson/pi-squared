@@ -59,17 +59,6 @@ function hasWorkspaceMetadata(entries: unknown): boolean {
         && (entry as { customType?: unknown }).customType === WORKSPACE_SESSION_TYPE);
 }
 
-    if (!Array.isArray(entries)) return false;
-    let mode: unknown;
-    for (const entry of entries) {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-        const custom = entry as { type?: unknown; customType?: unknown; data?: unknown };
-        const data = custom.data as { sessionId?: unknown; source?: unknown; mode?: unknown };
-        if (data.sessionId === sessionId && data.source === "workspace") mode = data.mode;
-    }
-    return mode === "active";
-}
-
 function recency(timestamp: number | undefined): string {
     if (!timestamp) return "no session";
     const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1_000));
@@ -716,8 +705,6 @@ export default function workspaceExtension(
             const record = await service.registerCurrent(session, true);
             if (!record) return;
             owned = { branch: record.branch, session: record.session };
-            const sessionId = ctx.sessionManager.getSessionId?.();
-            }
             if (await service.git.isManagedWorktree(record.cwd)) {
                 pmPath = await managedWorkspacePmPath(service, record.cwd);
                 if (!pmPath) ctx.ui.notify("Workspace PM repository is unavailable; PM guidance is disabled.", "warning");

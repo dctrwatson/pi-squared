@@ -47,6 +47,7 @@ function sameIdentity(left: HariManagerSessionIdentity, right: HariManagerSessio
 /**
  * Accept only the exact four-entry public Pi workspace placeholder format:
  * session header, automatic session name, workspace-name marker, workspace
+ * metadata. Any conversation, manager-identity, or unknown entry
  * disqualifies it. The workspace seam separately validates its metadata.
  */
 function observePristineWorkspaceEntry(state: PristineWorkspaceState, entry: JsonRecord): void {

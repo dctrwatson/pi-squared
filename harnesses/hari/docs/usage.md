@@ -24,7 +24,7 @@ The Hari harness needs:
 - Root dependencies installed with `npm ci`
 - `gh` access only for requested GitHub observations
 
-by default. Setup validates them before use. It does not use `piw` on `PATH` or
+The harness uses bundled workspace and subagent resources by default. Setup validates them before use. It does not use `piw` on `PATH` or
 sibling-checkout discovery. The workspace launcher must provide the required public
 pre-activation capability. Missing required resources or tools block the affected
 role rather than falling back to an ambient Pi configuration.
@@ -43,7 +43,7 @@ refuses unrelated nonempty content, source repositories, nested Git repositories
 and linked worktrees rather than overwriting them.
 
 Use `hari init --pi-squared <checkout>` only to explicitly override bundled
-also advanced resource settings. Existing saved resource settings remain in use.
+resource resolution. `--pi` and `--workspace-launcher` are also advanced resource settings. Existing saved resource settings remain in use.
 Init does not silently replace or migrate them. None selects another Prime Radiant
 location.
 
@@ -64,8 +64,8 @@ The Hari harness creates no Prime Radiant remote and does not fetch, pull, or pu
 └── .hari/
 ```
 
-The Prime Radiant holds Hari's coordinator conversations and their
-knowledge and local checkpoints. The index and project records hold authoritative
+The Prime Radiant holds Hari's coordinator conversations under `.hari/sessions`,
+plus structured coordination knowledge and local checkpoints. The index and project records hold authoritative
 JSON metadata and a checked generated Markdown view. Use the update tools rather
 than editing that view by hand. Manual edits are detected, not silently
 overwritten. Managers own their reports at `projects/<project>/reports/<manager>.md`.

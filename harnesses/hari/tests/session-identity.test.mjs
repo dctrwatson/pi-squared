@@ -32,6 +32,7 @@ test("only the exact public Pi workspace placeholder is pristine", async () => {
     JSON.stringify({ type: "custom", customType: "pi-workspace", data: { repository: "/tmp/checkout/.git", branch: "feature/prepared", cwd: "/tmp/checkout" } }),
   ].join("\n"));
   assert.deepEqual(await inspectHariManagerSession(session), { pristineWorkspace: true });
+  await writeFile(session, `${await readFile(session, "utf8")}\n${JSON.stringify({ type: "custom", customType: "unrelated-extension-entry", data: {} })}`);
   assert.deepEqual(await inspectHariManagerSession(session), {});
 });
 

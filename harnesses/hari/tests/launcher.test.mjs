@@ -30,9 +30,8 @@ test("Hari resource profiles are explicit and the manager suppresses ambient pro
     workspaceLauncher: "/resources/workspace/launcher.ts",
   };
   const args = resourceArguments(config);
-  assert.deepEqual(args.slice(0, 7), [
+  assert.deepEqual(args.slice(0, 5), [
     "--no-extensions",
-    "-e",
     "-e",
     workspaceCreateEntry,
     "-e",
@@ -136,6 +135,7 @@ test("manager planning uses pre-activation candidate validation and binds only t
     const start = JSON.parse(await readFile(log, "utf8"));
     assert.deepEqual(start.args.slice(0, 3), ["--profile", "hari", "feature/manager-launch"]);
     assert.equal(start.args[3], "--");
+    assert.deepEqual(start.args.slice(4, 11), ["--no-extensions", "-e", join(root, "index.ts"), "-e", join(root, "..", "subagents", "index.ts"), "-e", hariEntry]);
     assert.equal((await readProject(coordination, project.id)).managers[0].session, session);
 
     await writeFile(session, identity(coordination, project.id, "manager"));

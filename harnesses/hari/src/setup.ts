@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -22,10 +22,6 @@ export async function validateResources(config: LauncherConfig): Promise<void> {
     } catch {
       throw new CoordinationError(`Missing pi-squared extension: ${path}. Run hari init --pi-squared <complete-local-checkout>`);
     }
-  }
-  if (!Array.isArray(manifest.pi?.extensions) || manifest.pi.extensions.length === 0) {
-  }
-  for (const entry of manifest.pi.extensions) {
   }
   const launcher = await import(pathToFileURL(config.workspaceLauncher).href) as {
     WORKSPACE_LAUNCH_CAPABILITIES?: { beforeActivate?: boolean }; resolveLaunch?: unknown;

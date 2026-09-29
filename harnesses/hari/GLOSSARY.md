@@ -17,7 +17,8 @@ It is not Hari himself or his private memory.
 ## Prime Radiant
 
 Hari's durable home at `~/Projects/primeradiant`. His own durable agent data
-coordination knowledge, and local checkpoints. Prime Radiant is separate from the
+includes coordinator conversations, structured coordination knowledge, and local
+checkpoints. Prime Radiant is separate from the
 harness source and is not a selectable instance or a copy of every project source,
 credential, external record, or manager session.
 

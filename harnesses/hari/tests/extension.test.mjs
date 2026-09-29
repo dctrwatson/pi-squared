@@ -123,11 +123,11 @@ test("Hari role exposes narrow file-backed tools and makes the inbox writer dura
   delete process.env.HARI_COORDINATION_DIR;
   try {
     const pi = fakePi();
-    pi.tools.set("recall", { name: "recall" });
+    pi.tools.set("extra_tool", { name: "extra_tool" });
     hariExtension(pi);
     await pi.handlers.get("session_start")({}, { ui: { setStatus() {} } });
     assert.ok(pi.active.includes("hari_capture_inbox"));
-    assert.ok(pi.active.includes("recall"), "active Hari memory exposes exact-source recall when memory provides it");
+    assert.ok(!pi.active.includes("extra_tool"), "Hari does not enable unrelated tools");
     assert.ok(!pi.active.includes("bash"));
     await pi.tools.get("hari_capture_inbox").execute("call", { text: "Remember this" });
     assert.equal((await readInbox(coordination)).items[0].text, "Remember this");
@@ -254,14 +254,14 @@ test("manager identity blocks native switching and gates changed authority until
   process.env.HARI_MANAGER_ID = "manager";
   try {
     const pi = fakePi();
-    pi.tools.set("recall", { name: "recall" });
+    pi.tools.set("extra_tool", { name: "extra_tool" });
     hariExtension(pi);
     const ctx = sessionContext(checkout, session);
     await pi.handlers.get("session_start")({}, ctx);
     const started = await pi.handlers.get("before_agent_start")({}, ctx);
     assert.match(started.systemPrompt, /# Hari manager/);
     assert.ok(pi.active.includes("manager_report"));
-    assert.ok(pi.active.includes("recall"), "manager receives exact-source memory recall, not memory mode alone");
+    assert.ok(!pi.active.includes("extra_tool"), "manager does not enable unrelated tools");
     assert.ok(!pi.active.includes("hari_projects"));
     assert.ok(!pi.tools.has("hari_git"), "only Hari checkpoints the shared coordination repository");
     assert.equal(pi.entries.filter((entry) => entry.type === "hari-manager-identity").length, 1);

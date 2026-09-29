@@ -28,11 +28,9 @@ async function fixture(t) {
   const log = join(root, "launch.json");
   const settings = join(home, ".config", "hari", "config.json");
   const coordination = join(home, "Projects", "primeradiant");
-  for (const directory of [home, other, memory, join(dependency, "extensions", "workspace"), join(dependency, "extensions", "subagents"), bin, runtimeBin]) await mkdir(directory, { recursive: true });
+  for (const directory of [home, other, join(dependency, "extensions", "workspace"), join(dependency, "extensions", "subagents"), bin, runtimeBin]) await mkdir(directory, { recursive: true });
   await writeFile(join(dirname(launcher), "index.ts"), "export default function () {}\n");
   await writeFile(join(dependency, "extensions", "subagents", "index.ts"), "export default function () {}\n");
-  await writeFile(join(memory, "package.json"), JSON.stringify({ pi: { extensions: ["index.ts"] } }));
-  await writeFile(join(memory, "index.ts"), "export default function () {}\n");
   await writeFile(launcher, "export const WORKSPACE_LAUNCH_CAPABILITIES = { beforeActivate: true }; export async function resolveLaunch() { throw new Error('must not activate during init'); }\n");
   await writeFile(fakePi, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
@@ -46,7 +44,7 @@ writeFileSync(process.env.HARI_TEST_LAUNCH_LOG, JSON.stringify({ args: process.a
   const run = (...args) => spawnSync(rootHariBin, args, { cwd: other, env, encoding: "utf8", timeout: 30_000 });
   const runFrom = (command, cwd, ...args) => spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 30_000 });
   const git = (...args) => execFileSync("git", ["-C", coordination, ...args], { env, encoding: "utf8" }).trim();
-  return { root, home, other, dependency, memory, launcher, bin, fakePi, log, settings, coordination, env, run, runFrom, git };
+  return { root, home, other, dependency, launcher, bin, fakePi, log, settings, coordination, env, run, runFrom, git };
 }
 
 function succeeded(result) { assert.equal(result.status, 0, result.stderr || String(result.error)); }
@@ -82,6 +80,7 @@ test("root hari initializes bundled resources and runs from arbitrary and symlin
   assert.equal(launched.manager, undefined);
   assert.ok(launched.args.includes("--continue"));
   assert.equal(launched.args[launched.args.indexOf("--session-dir") + 1], join(f.coordination, ".hari", "sessions"));
+  assert.deepEqual(launched.args.slice(launched.args.indexOf("--no-extensions"), launched.args.indexOf("--no-extensions") + 5), ["--no-extensions", "-e", workspaceCreateEntry, "-e", hariEntry]);
   const nested = join(f.other, "nested", "cwd");
   const linkedHari = join(f.root, "hari-link");
   await mkdir(nested, { recursive: true });
@@ -134,6 +133,7 @@ test("environment selection cannot redirect initialization, launch or role assem
 
 test("file-only coordination already at the global location is adopted without replacing records", async t => {
   const f = await fixture(t);
+  await initializeCoordination(f.coordination, { version: 1, workspaceLauncher: f.launcher, piCommand: f.fakePi });
   await captureInbox(f.coordination, "Retained from first cut");
   succeeded(f.run("init"));
   assert.equal((await readInbox(f.coordination)).items[0].text, "Retained from first cut");

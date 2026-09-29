@@ -299,6 +299,8 @@ export async function readLauncherConfig(coordinationDir: string): Promise<Launc
   } catch (error) {
     throw new CoordinationError(`Invalid ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
   }
+  if (config.version !== 1 || !config.workspaceLauncher) {
+    throw new CoordinationError(`${CONFIG_FILE} needs version and workspaceLauncher`);
   }
   return config;
 }
@@ -309,6 +311,8 @@ export async function initializeCoordination(
 ): Promise<{ created: string[] }> {
   const root = resolve(coordinationDir);
   await mkdir(root, { recursive: true });
+  if (!config.workspaceLauncher) {
+    throw new CoordinationError("Initialization requires a workspace launcher path");
   }
   const files: Array<[string, string]> = [
     [join(root, INDEX_FILE), renderIndex({ version: 1, projects: [], priorities: [], decisions: [] })],

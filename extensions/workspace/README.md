@@ -62,6 +62,7 @@ piw --profile hari feature/example -- --no-extensions -e /path/to/hari
 piw --expect-session /absolute/path/to/session.jsonl feature/example
 ```
 
+Put Pi arguments after `--`. All `piw` lanes reject forwarded session options. The ordinary lane also rejects extension-disable options. `piw new <branch>` creates a branch workspace. Add `--worktree` to create it in a managed worktree. Bare `piw` uses the branch checked out in its current directory. Run `piw` from any repository path to resume that branch workspace. A plain `pi` session remains independent and does not change workspace bindings unless you run `/ws`.
 
 ### Profile forwarding
 

@@ -1,11 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { InMemoryCredentialStore, fauxProvider } from "@earendil-works/pi-ai";
 import {
   DefaultResourceLoader,
@@ -17,19 +14,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 const COMPOSED_PROMPT_CHAR_BUDGET = 8_000;
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      && specifier.startsWith(".")
-      && specifier.endsWith(".js")
-    ) {
-      const sourceUrl = new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL);
-      if (existsSync(fileURLToPath(sourceUrl))) return { url: sourceUrl.href, shortCircuit: true };
-    }
-    return nextResolve(specifier, context);
-  },
-});
-
 const agentToolsModule = await import("../../extensions/agent-tools/index.ts");
 const subagentsModule = await import("../../extensions/subagents/index.ts");
 
@@ -84,14 +68,14 @@ ${skillBody}
   agentToolsModule.default(registration.api);
   subagentsModule.default(registration.api, { personaDirectory });
   assert.deepEqual([...registration.tools.keys()].sort(), [
-    "ask_user", "bash", "find", "gh", "git", "grep", "read", "recall", "subagent", "web_search",
+    "ask_user", "bash", "find", "gh", "git", "grep", "read", "subagent", "web_search",
   ]);
   assert.ok(registration.commands.has("subagent:context-persona"), "the test persona was loaded");
 
   const { skills, diagnostics } = loadSkillsFromDir({ dir: skillDirectory, source: "path" });
   assert.deepEqual(diagnostics, []);
   assert.equal(skills.length, 1);
-  const selectedTools = ["read", "git", "gh", "subagent", "recall"];
+  const selectedTools = ["read", "git", "gh", "subagent"];
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({
     cwd: root,

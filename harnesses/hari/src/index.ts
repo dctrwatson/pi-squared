@@ -764,6 +764,8 @@ export default function hariExtension(pi: ExtensionAPI) {
     const allowed = runtimeError
       ? config.role === "manager" ? ["manager_context"] : []
       : config.role === "hari"
+        ? ["read", "grep", "find", ...HARI_TOOLS]
+        : [...MANAGER_BUILTINS, ...MANAGER_TOOLS];
     if (runtimeError) ctx.ui.notify(`Hari blocked: ${runtimeError}`, "error");
     pi.setActiveTools(allowed.filter((name) => available.has(name)));
     ctx.ui.setStatus("hari-role", runtimeError ? "Hari blocked" : config.role === "hari" ? "Hari coordination" : `Hari manager: ${config.projectId}/${config.managerId}`);

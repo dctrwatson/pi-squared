@@ -7,6 +7,7 @@ import test from "node:test";
 import { addManager, captureInbox, createProject, initializeCoordination, readInbox, writeManagerReport } from "../src/coordination.ts";
 import { checkpointCoordination, initializeCoordinationRepository, inspectCoordinationGit, preflightCoordinationRepository, requireCoordinationRepository } from "../src/coordination-git.ts";
 
+const resources = { version: 1, workspaceLauncher: "/resources/launcher.ts" };
 const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 async function directory(t) {
   const root = await mkdtemp(join(tmpdir(), "hari-local-git-"));

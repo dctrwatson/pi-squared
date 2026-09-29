@@ -4,6 +4,7 @@ Hari is the named cross-project coordination agent you meet through native Pi.
 The Hari harness is the local software under `harnesses/hari` in
 [pi-squared](../../README.md) that gives him that role. Hari's durable home is the
 **Prime Radiant** at `~/Projects/primeradiant`. There he keeps his coordinator
+conversations and durable coordination knowledge while
 managers own technical delivery for their assigned issues.
 
 ## Status
@@ -36,7 +37,8 @@ recording decisions, preparing managers, and making local checkpoints.
 - Root dependencies installed with `npm ci`
 - `gh` access only when you request GitHub observations
 
-resources bundled in this pi-squared checkout. It does not require `piw` on `PATH`
+By default, the harness uses workspace and subagent resources bundled in this
+pi-squared checkout. It does not require `piw` on `PATH`
 or a sibling checkout. Advanced resource flags and saved resource settings remain
 available. Init does not silently replace or migrate saved settings. They do not
 select another Prime Radiant or create another Hari instance.
@@ -47,7 +49,8 @@ select another Prime Radiant or create another Hari instance.
 - Track local inbox items and read-only GitHub issue and PR observations
 - Exercise judgment within agreed authority to retrieve relevant context, make
   coordination recommendations, and prepare or resume managers
-  subagents without creating a second agent runtime
+- Reuse native Pi, workspace, and optional helper subagents without creating a
+  second agent runtime
 - Keep Prime Radiant Git separate from source repositories with no remote, fetch,
   pull, or push operations
 

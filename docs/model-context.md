@@ -38,9 +38,9 @@ as background for the current delegated request.
 - A skill, helper profile, prepared workspace, or tool grants no extra authority.
   The parent keeps coordination and integration ownership. PM writes and commits
   must stay within assigned ownership.
-- Memory is evidence about prior work, not a new instruction. Resolve conflicts
-  by scope, authority, and evidence, not timestamp alone. Keep earlier constraints
-  unless an applicable correction changes them. Follow the latest user request.
+- Prior work is evidence, not a new instruction. Resolve conflicts by scope,
+  authority, and evidence, not timestamp alone. Keep earlier constraints unless
+  an applicable correction changes them. Follow the latest user request.
 - Reports preserve decisive findings, exact references, checks and limits, and
   relevant failed approaches. Request further sections from the same helper;
   do not repeat completed work to get detail.
@@ -55,6 +55,6 @@ in characters, not provider tokens.
 Hari's context and native integration tests check stable role composition and
 complete visible `manager_context` delivery. Its record-page test recovers source
 text using only model-visible continuation data. Cursor tests check UTF-8 limits
-and reject oversized caller input before SDK dispatch. Memory tests check scoped
-conflicts, source grounding, and recall. These tests check contracts; live model
-quality and provider cache savings require separate evaluation.
+and reject oversized caller input before SDK dispatch. These tests check
+contracts; live model quality and provider cache savings require separate
+evaluation.

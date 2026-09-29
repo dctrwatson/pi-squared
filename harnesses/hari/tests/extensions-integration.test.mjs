@@ -276,7 +276,6 @@ test("ordinary Pi package discovery loads only bundled generic resources", async
 test("Hari loads real Pi SDK extensions offline without a launcher or subagents", async (t) => {
   const launcher = bundledWorkspaceLauncher;
   const workspaceDirectory = dirname(launcher);
-  const piExtensions = dirname(workspaceDirectory);
   const root = await mkdtemp(join(tmpdir(), "hari-real-sdk-smoke-"));
   const home = join(root, "home");
   const cwd = join(root, "fixture");
@@ -309,6 +308,7 @@ test("Hari loads real Pi SDK extensions offline without a launcher or subagents"
       cwd,
       agentDir,
       settingsManager,
+      additionalExtensionPaths: [workspaceCreateEntry, hariEntry],
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,
@@ -395,6 +395,8 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
     const hariResources = resourceArguments(config);
     const managerResources = resourceArguments(config, "manager");
     const extensionValues = (args) => args.flatMap((value, index) => args[index - 1] === "-e" ? [value] : []);
+    assert.deepEqual(extensionValues(hariResources), [coordinatorWorkspaceEntry, hariEntry]);
+    assert.deepEqual(extensionValues(managerResources), [workspaceEntry, subagentsEntry, hariEntry]);
     for (const resources of [hariResources, managerResources]) {
       assert.ok(resources.includes("--no-extensions"));
       assert.ok(resources.includes("--no-skills"));
@@ -504,6 +506,7 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
       cwd: workspace.cwd,
       agentDir: managerAgentDir,
       settingsManager: managerSettings,
+      additionalExtensionPaths: [workspaceEntry, subagentsEntry, hariEntry],
       noExtensions: managerResources.includes("--no-extensions"),
       noSkills: managerResources.includes("--no-skills"),
       noPromptTemplates: managerResources.includes("--no-prompt-templates"),

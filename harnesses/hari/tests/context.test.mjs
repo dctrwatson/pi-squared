@@ -52,6 +52,7 @@ test("Hari prompt is independent of coordination record contents, size, and avai
   assert.doesNotMatch(changed.prompt, /On-demand|acme\/on-demand|Current cross-project view/);
   assert.match(changed.prompt, /hari_projects/);
   assert.match(changed.prompt, /retrieve any needed facts that are missing, stale, or uncertain/);
+  assert.match(changed.prompt, /conversation does not override current records/);
   assert.match(changed.prompt, /Reuse still-applicable results rather than rereading or restating unchanged records on every turn/);
 
   await rm(join(coordination, "PROJECTS.md"));
@@ -127,14 +128,15 @@ test("runtime learning guidance uses existing records and normal manager reports
   assert.match(hari.prompt, /Use judgment to identify priorities, connect related work/);
   assert.match(hari.prompt, /carry out authorized coordination without waiting for command-by-command instructions/);
   assert.match(hari.prompt, /The Prime Radiant at ~\/Projects\/primeradiant is your durable home/);
+  assert.match(hari.prompt, /your conversations and coordination records live there/);
   assert.match(hari.prompt, /Do not publish, push, merge, deploy, close issues, or automatically wake\/resume managers/);
   assert.match(hari.prompt, /The user controls manager continuation/);
   assert.match(hari.prompt, /Improve how you work from actual use, not hypothetical needs/);
   assert.match(hari.prompt, /your own interactions and manager reports/);
   assert.match(hari.prompt, /existing inbox\/project records in the Prime Radiant/);
-  assert.match(hari.prompt, /Your memory and company-specific glossary, skills, conventions, and knowledge belong there/);
+  assert.match(hari.prompt, /Company-specific glossary, skills, conventions, and knowledge belong there/);
   assert.match(hari.prompt, /Keep reusable harness code, skills, and maintainer guidance in the harness implementation repository/);
-  assert.match(hari.prompt, /do not copy private memory into those shared resources/);
+  assert.match(hari.prompt, /do not copy private records into those shared resources/);
   assert.match(hari.prompt, /existing workspace\/manager workflow/);
   assert.match(hari.prompt, /retain what helps, and revise or remove what does not/);
   assert.match(hari.prompt, /Do not turn every correction into a permanent rule, add a learning subsystem, or silently change active agreements/);

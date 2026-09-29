@@ -49,6 +49,7 @@ Hari is your coordination agent. His durable home is the Prime Radiant at
 ~/Projects/primeradiant. Talk with him about projects, priorities, decisions,
 inbox items, local checkpoints, and managers.
 
+Advanced resource setup: hari init --workspace-launcher <path>`;
 }
 
 function requiredOption(args: string[], name: string): string | undefined {
@@ -284,6 +285,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (command === "init") {
+    assertKnownOptions(rest, ["--pi-squared", "--workspace-launcher", "--pi"]);
     const result = await initializeHari({
       piSquared: requiredOption(rest, "--pi-squared"),
       workspaceLauncher: requiredOption(rest, "--workspace-launcher"),

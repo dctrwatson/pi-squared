@@ -126,18 +126,12 @@ test("session start leaves plain Pi sessions unbound", async () => {
     let sessionShutdown;
     let beforeAgentStart;
     const appended = [];
-    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
         if (event === "session_start") sessionStart = handler;
         if (event === "session_shutdown") sessionShutdown = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
-      },
-      events: {
-        emit(name, payload) {
-          modeEvents.push({ name, payload });
-        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -168,7 +162,6 @@ test("session start leaves plain Pi sessions unbound", async () => {
     assert.equal(await state.getWorkspace("main"), undefined);
     assert.deepEqual(appended, []);
     assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }), undefined);
-    assert.deepEqual(modeEvents, []);
     assert.deepEqual(notifications, []);
   } finally {
     await removeRepository(root);
@@ -183,18 +176,12 @@ test("session start warns when a known workspace session does not own its lease"
     const { record } = await mapWorkspace(service, sessions, "main", root);
     let sessionStart;
     let beforeAgentStart;
-    const modeEvents = [];
     const notifications = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
         if (event === "session_start") sessionStart = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
-      },
-      events: {
-        emit(name, payload) {
-          modeEvents.push({ name, payload });
-        },
       },
       appendEntry() {},
       setSessionName() {},
@@ -213,7 +200,6 @@ test("session start warns when a known workspace session does not own its lease"
 
     await sessionStart({}, ctx);
 
-    assert.deepEqual(modeEvents, []);
     assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }), undefined);
     assert.deepEqual(notifications, [[
       "Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.",
@@ -235,7 +221,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
     let resourcesDiscover;
     let beforeAgentStart;
     const appended = [];
-    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
@@ -243,11 +228,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
         if (event === "session_shutdown") sessionShutdown = handler;
         if (event === "resources_discover") resourcesDiscover = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
-      },
-      events: {
-        emit(name, payload) {
-          modeEvents.push({ name, payload });
-        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -259,7 +239,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
       cwd: created.record.cwd,
       sessionManager: {
         getSessionFile: () => created.record.session,
-        getSessionId: () => "workspace-session",
         getEntries: () => appended.map((entry) => entry.type === "session_info"
           ? { type: "session_info", name: entry.data }
           : { type: "custom", customType: entry.type, data: entry.data }),
@@ -279,10 +258,7 @@ test("an active managed workspace appends stable guidance and exposes PM", async
     assert.deepEqual(beforeAgentStart({ systemPrompt: "Pi base\n\nUser addendum" }, ctx), {
       systemPrompt: "Pi base\n\nUser addendum\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
     });
-    assert.deepEqual(appended.at(-1)?.data, { sessionId: "workspace-session", source: "workspace", mode: "active" });
-    assert.deepEqual(modeEvents, [{
-      payload: { mode: "active", source: "workspace" },
-    }]);
+    assert.equal(appended.at(-1)?.type, "pi-workspace");
     assert.deepEqual(notifications, []);
 
     await sessionShutdown({}, ctx);
@@ -294,6 +270,7 @@ test("an active managed workspace appends stable guidance and exposes PM", async
   }
 });
 
+test("managed workspace reload preserves its lease", async () => {
   const root = await repository();
   try {
     let sessionStart;
@@ -301,7 +278,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
     let resourcesDiscover;
     let beforeAgentStart;
     const appended = [];
-    const modeEvents = [];
     workspaceExtension({
       registerCommand() {},
       on(event, handler) {
@@ -309,11 +285,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
         if (event === "session_shutdown") sessionShutdown = handler;
         if (event === "resources_discover") resourcesDiscover = handler;
         if (event === "before_agent_start") beforeAgentStart = handler;
-      },
-      events: {
-        emit(name, payload) {
-          modeEvents.push({ name, payload });
-        },
       },
       appendEntry(type, data) {
         appended.push({ type, data });
@@ -342,7 +313,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
       sessionManager: {
         getCwd: () => root,
         getSessionFile: () => session,
-        getSessionId: () => "workspace-session",
         getEntries: () => appended.map((entry) => entry.type === "session_info"
           ? { type: "session_info", name: entry.data }
           : { type: "custom", customType: entry.type, data: entry.data }),
@@ -360,15 +330,12 @@ test("an active managed workspace appends stable guidance and exposes PM", async
 
     await sessionStart({}, ctx);
 
-    assert.equal(appended.length, 4);
+    assert.equal(appended.length, 3);
     assert.deepEqual(appended[0], { type: "session_info", data: "main" });
     assert.deepEqual(appended[1], { type: "pi-workspace-session-name", data: { branch: "main" } });
     assert.equal(appended[2].type, "pi-workspace");
     assert.equal(appended[2].data.branch, "main");
     assert.equal((await state.getWorkspace("main"))?.session, session);
-    assert.deepEqual(modeEvents, [{
-      payload: { mode: "active", source: "workspace" },
-    }]);
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [] });
     assert.deepEqual(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), {
       systemPrompt: "Base prompt\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.",
@@ -387,11 +354,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
         if (event === "session_start") reloadedSessionStart = handler;
         if (event === "session_shutdown") reloadedSessionShutdown = handler;
       },
-      events: {
-        emit(name, payload) {
-          modeEvents.push({ name, payload });
-        },
-      },
       appendEntry(type, data) {
         appended.push({ type, data });
       },
@@ -400,8 +362,6 @@ test("an active managed workspace appends stable guidance and exposes PM", async
       },
     });
     await reloadedSessionStart({}, ctx);
-    assert.deepEqual(modeEvents, [
-    ]);
     assert.equal((await state.readLease(session))?.session, session);
 
     await reloadedSessionShutdown({ reason: "quit" }, ctx);
