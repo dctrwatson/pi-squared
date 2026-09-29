@@ -142,10 +142,10 @@ The bundled personas use these initial settings:
 
 | Persona | Pi model | Thinking |
 | --- | --- | --- |
-| `explorer` | `openai-codex/gpt-5.6-luna` | `high` |
+| `explorer` | `openai-codex/gpt-6-luna` | `high` |
 | `reviewer` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
 | `test-analyst` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
-| `worker` | `openai-codex/gpt-5.6-terra` | `xhigh` |
+| `worker` | `openai-codex/gpt-6-sol` | `xhigh` |
 | `doc-auditor` | `fireworks/accounts/fireworks/models/glm-5p3-flash` | `high` |
 
 ## Completion reports
@@ -191,11 +191,11 @@ Supply the missing context or capability. Then prompt the same task again. A blo
 
 A persona can set optional `model` and `thinking` defaults. The extension uses them only when it creates a fresh or forked subagent.
 
-Pi model IDs include the provider, for example `openai-codex/gpt-5.6-terra`. Cursor Cloud accepts an exact account-catalog ID, name, or alias without a provider prefix, for example `gpt-5.6-terra`. `thinking` must be one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+Pi model IDs include the provider, for example `openai-codex/gpt-6-sol`. Cursor Cloud accepts an exact account-catalog ID, name, or alias without a provider prefix, for example `gpt-6-sol`. `thinking` must be one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 
-When a persona omits these fields, Pi uses `openai-codex/gpt-5.6-terra` with `xhigh`; Cursor Cloud uses `gpt-5.6-terra` with `xhigh`. A human persona-less `/subagent` keeps the parent Pi session model and thinking settings.
+When a persona omits these fields, Pi uses `openai-codex/gpt-6-sol` with `xhigh`; Cursor Cloud uses `gpt-6-sol` with `xhigh`. A human persona-less `/subagent` keeps the parent Pi session model and thinking settings.
 
-For Cursor Cloud, the extension resolves the selected model and thinking value through the account catalog. For GPT-5.6 Luna, Terra, and Sol, it prefers a catalog-supported standard-speed `272k` context variant with `fast=false`. Other models use their catalog-supported thinking parameters or variants. The extension refreshes the catalog once after a miss. It returns an error when the exact model ID, name, or alias, or the supported thinking value, is unavailable. It does not substitute another model.
+For Cursor Cloud, the extension resolves the selected model and thinking value through the account catalog. For GPT-6 Astra, Sol, and Luna, it prefers a catalog-supported standard-speed `272k` context variant with `fast=false`. Other models use their catalog-supported thinking parameters or variants. The extension refreshes the catalog once after a miss. It returns an error when the exact model ID, name, or alias, or the supported thinking value, is unavailable. It does not substitute another model.
 
 A restored Pi session keeps its selected model and thinking settings. The extension does not pass persona defaults or initial runtime settings when it restores the session. The Pi panel can change a model or thinking setting only while Pi is idle. The change applies to the Pi session.
 
@@ -214,7 +214,7 @@ description: Explore product requirements and tradeoffs
 runtime: pi
 context-requirements: >
   Provide the desired outcome, users, constraints, and relevant product scope.
-model: openai-codex/gpt-5.6-terra
+model: openai-codex/gpt-6-sol
 thinking: xhigh
 extensions:
   - ../extensions/product-context.ts
@@ -233,7 +233,7 @@ name: incident-investigator
 description: Investigate production incidents
 runtime: cursor-cloud
 context-requirements: Provide the incident impact, time range, and affected service.
-model: gpt-5.6-terra
+model: gpt-6-sol
 thinking: xhigh
 cursor-mcps:
   - datadog

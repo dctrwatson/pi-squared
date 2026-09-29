@@ -21,7 +21,7 @@ function storedCursor(overrides = {}) {
     localLifecycle: "available",
     remoteCreated: false,
     repositories: [{ url: "https://github.com/example/project", startingRef: "a".repeat(40) }],
-    requestedModel: "gpt-5.6-terra",
+    requestedModel: "gpt-6-sol",
     requestedThinking: "xhigh",
     currentModel: { id: "cursor-terra", parameters: [{ id: "reasoning_effort", value: "xhigh" }], resolvedAt: 1 },
     pendingOperations: [],
@@ -811,9 +811,9 @@ test("Cursor creation uses direct settings and preserves a current TUI selection
     async resolveCreation(model, thinking) {
       resolutions.push({ model, thinking });
       return {
-        requested: model ?? "gpt-5.6-terra",
-        model: { id: model ?? "gpt-5.6-terra", name: model ?? "gpt-5.6-terra", aliases: [], parameters: [], variantsPresent: false, variantsComplete: true, variants: [] },
-        selection: { id: model ?? "gpt-5.6-terra", parameters: [{ id: "reasoning_effort", value: thinking ?? "xhigh" }] },
+        requested: model ?? "gpt-6-sol",
+        model: { id: model ?? "gpt-6-sol", name: model ?? "gpt-6-sol", aliases: [], parameters: [], variantsPresent: false, variantsComplete: true, variants: [] },
+        selection: { id: model ?? "gpt-6-sol", parameters: [{ id: "reasoning_effort", value: thinking ?? "xhigh" }] },
         resolvedAt: 2,
       };
     },

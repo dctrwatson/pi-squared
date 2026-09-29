@@ -200,7 +200,7 @@ export function resolveSubagentCreationSettings(
     runtime: SubagentRuntime = persona?.runtime ?? "pi",
 ): { model: string; thinking: SubagentThinkingLevel } {
     return {
-        model: persona?.model ?? (runtime === "cursor-cloud" ? DEFAULT_CURSOR_MODEL : "openai-codex/gpt-5.6-terra"),
+        model: persona?.model ?? (runtime === "cursor-cloud" ? DEFAULT_CURSOR_MODEL : "openai-codex/gpt-6-sol"),
         thinking: persona?.thinking ?? (runtime === "cursor-cloud" ? DEFAULT_CURSOR_THINKING : "xhigh"),
     };
 }

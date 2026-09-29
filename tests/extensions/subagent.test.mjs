@@ -294,7 +294,7 @@ test("extension exposes one concise subagent tool and persistent-session command
   );
   assert.match(emptyPersonaPage.content[0].text, /No subagent personas at this offset/);
   assert.deepEqual(resolveSubagentCreationSettings(), {
-    model: "openai-codex/gpt-5.6-terra", thinking: "xhigh",
+    model: "openai-codex/gpt-6-sol", thinking: "xhigh",
   });
   assert.deepEqual(commands.filter((name) => ["subagent", "subagents"].includes(name)), [
     "subagent", "subagents",
@@ -2362,7 +2362,7 @@ Implement the requested change.
   await writeFile(join(personaDirectory, "worker.md"), `---
 name: worker
 description: Execute a bounded production task
-model: openai-codex/gpt-5.6-terra
+model: openai-codex/gpt-6-sol
 thinking: xhigh
 ---
 Execute the assigned work.
@@ -2460,7 +2460,7 @@ Execute the assigned work.
   assert.equal(withoutSkills.content[0].text, "Created workflow-without-skills.");
   assert.equal(withoutSkills.details.subagent.persona, "worker");
   assert.equal(withoutSkills.details.subagent.lifetime, "task");
-  assert.equal(withoutSkills.details.subagent.model, "openai-codex/gpt-5.6-terra");
+  assert.equal(withoutSkills.details.subagent.model, "openai-codex/gpt-6-sol");
   assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", withoutSkills.details.subagent.id).selectedSkillPaths, []);
   await tool.execute("stop-worker-without-skills", {
     action: "stop",
@@ -2478,7 +2478,7 @@ Execute the assigned work.
   }, signal, undefined, context);
   assert.equal(fresh.content[0].text, "Created workflow-fresh.");
   assert.equal(fresh.details.subagent.persona, "worker");
-  assert.equal(fresh.details.subagent.model, "openai-codex/gpt-5.6-terra");
+  assert.equal(fresh.details.subagent.model, "openai-codex/gpt-6-sol");
   assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", fresh.details.subagent.id).selectedSkillPaths, [
     "/parent/skills/create-pr/SKILL.md",
     "/parent/skills/writing-style/SKILL.md",
@@ -3089,7 +3089,7 @@ Inspect the project without changing it.
       persona: "test-scout",
       purpose: `Retain context for project area ${index}`,
     }, signal, undefined, context);
-    assert.equal(created.details.subagent.model, "openai-codex/gpt-5.6-terra");
+    assert.equal(created.details.subagent.model, "openai-codex/gpt-6-sol");
     assert.equal(created.details.subagent.thinking, "xhigh");
   }
   const duplicate = await subagentTool.execute("create-duplicate-purpose", {
@@ -3310,10 +3310,10 @@ test("bundled personas provide focused defaults and user personas override by na
     bundled.personas.map(({ name, model, thinking }) => ({ name, model, thinking })),
     [
       { name: "doc-auditor", model: "fireworks/accounts/fireworks/models/glm-5p3-flash", thinking: "high" },
-      { name: "explorer", model: "openai-codex/gpt-5.6-luna", thinking: "high" },
+      { name: "explorer", model: "openai-codex/gpt-6-luna", thinking: "high" },
       { name: "reviewer", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
       { name: "test-analyst", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
-      { name: "worker", model: "openai-codex/gpt-5.6-terra", thinking: "xhigh" },
+      { name: "worker", model: "openai-codex/gpt-6-sol", thinking: "xhigh" },
     ],
   );
   assert.match(
@@ -3776,7 +3776,7 @@ test("public Cursor one-shot oversized results retain a task and dispatch a new 
     async getRun(id) { return runs.get(id); }, async cancelRun() { throw new Error("terminal results must not cancel"); },
     async archiveAgent() { archives++; },
     async listModels() {
-      return [{ id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }];
+      return [{ id: "gpt-6-sol", displayName: "GPT-6 Sol", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }];
     }, async listRepositories() { return []; },
   };
   const catalog = new CursorModelCatalog(sdk);
@@ -3923,7 +3923,7 @@ test("public Cursor tool actions use the injected real backend without a loader 
     async getRun(id) { return runs.get(id); },
     async cancelRun() { cancels++; },
     async archiveAgent() { archives++; },
-    async listModels() { return [{ id: "gpt-5.6-terra", displayName: "GPT-5.6 Terra", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }]; },
+    async listModels() { return [{ id: "gpt-6-sol", displayName: "GPT-6 Sol", parameters: [{ id: "reasoning_effort", values: [{ value: "xhigh", displayName: "Extra high" }] }] }]; },
     async listRepositories() { return []; },
   };
   const catalog = new CursorModelCatalog(sdk);

@@ -25,7 +25,7 @@ test("cursor persona frontmatter validates and normalizes runtime metadata", asy
   await writePersona(personas, "cursor-valid", `name: cursor-valid
 description: Inspect Cloud evidence
 runtime: cursor-cloud
-model: gpt-5.6-terra
+model: gpt-6-sol
 thinking: xhigh
 cursor-mcps:
   - datadog
@@ -50,7 +50,7 @@ cursor-repos:
   await writePersona(personas, "cursor-malformed-model", "name: cursor-malformed-model\nmodel: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-empty-model", "name: cursor-empty-model\nmodel:\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-long-model", `name: cursor-long-model\nmodel: gpt-${"x".repeat(253)}\nruntime: cursor-cloud`);
-  await writePersona(personas, "cursor-control-model", "name: cursor-control-model\nmodel: \"gpt-5.6-terra\u007f\"\nruntime: cursor-cloud");
+  await writePersona(personas, "cursor-control-model", "name: cursor-control-model\nmodel: \"gpt-6-sol\u007f\"\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-malformed-thinking", "name: cursor-malformed-thinking\nthinking: 42\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-empty-thinking", "name: cursor-empty-thinking\nthinking:\nruntime: cursor-cloud");
   await writePersona(personas, "cursor-invalid-thinking", "name: cursor-invalid-thinking\nthinking: extreme\nruntime: cursor-cloud");
@@ -82,11 +82,11 @@ cursor-repos:
   assert.equal(Object.hasOwn(cursorDefault, "model"), false);
   assert.equal(Object.hasOwn(cursorDefault, "thinking"), false);
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(cursorDefault), {
-    model: "gpt-5.6-terra",
+    model: "gpt-6-sol",
     thinking: "xhigh",
   });
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(discovery.personas.find(({ name }) => name === "pi-default")), {
-    model: "openai-codex/gpt-5.6-terra",
+    model: "openai-codex/gpt-6-sol",
     thinking: "xhigh",
   });
   assert.deepEqual(discovery.personas.find(({ name }) => name === "duplicate-heavy-mcps")?.cursorMcps, ["datadog"]);
@@ -98,7 +98,7 @@ cursor-repos:
     description: "Inspect Cloud evidence",
     systemPrompt: "Inspect the requested scope.",
     runtime: "cursor-cloud",
-    model: "gpt-5.6-terra",
+    model: "gpt-6-sol",
     thinking: "xhigh",
     extensions: [],
     skills: [],
@@ -236,11 +236,11 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
   assert.doesNotMatch(personaList.content[0].text, /MCP|datadog|sentry|logs/i);
 
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(undefined), {
-    model: "openai-codex/gpt-5.6-terra",
+    model: "openai-codex/gpt-6-sol",
     thinking: "xhigh",
   });
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings(undefined, "cursor-cloud"), {
-    model: "gpt-5.6-terra",
+    model: "gpt-6-sol",
     thinking: "xhigh",
   });
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings({
@@ -254,7 +254,7 @@ test("runtime-aware tool metadata keeps prompt-less Cursor creation local withou
     runtime: "cursor-cloud",
     thinking: "high",
   }), {
-    model: "gpt-5.6-terra",
+    model: "gpt-6-sol",
     thinking: "high",
   });
   assert.deepEqual(subagentsModule.resolveSubagentCreationSettings({

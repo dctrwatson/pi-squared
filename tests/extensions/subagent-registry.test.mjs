@@ -526,7 +526,7 @@ test("stored persona lifetime preferences restore as inert legacy data", async (
   assert.equal(restored.lifetime, "task");
   assert.equal(Object.hasOwn(restored.persona, "preferredLifetime"), false);
   assert.equal(Object.hasOwn(restored.persona, "preferredProfile"), false);
-  assert.equal(restored.persona.model, "openai-codex/gpt-5.6-luna");
+  assert.equal(restored.persona.model, "openai-codex/gpt-6-luna");
   assert.equal(restored.persona.thinking, "high");
   assert.equal(restored.model, "saved-provider/saved-model");
   assert.equal(restored.thinking, "low");
@@ -536,9 +536,9 @@ test("registry restores legacy Cursor defaults without replacing TUI model choic
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-legacy-models-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const expected = [
-    ["fast", "gpt-5.6-luna", "high"],
-    ["balanced", "gpt-5.6-terra", "xhigh"],
-    ["deep", "gpt-5.6-sol", "xhigh"],
+    ["fast", "gpt-6-luna", "high"],
+    ["balanced", "gpt-6-sol", "xhigh"],
+    ["deep", "gpt-6-astra", "xhigh"],
   ];
   for (const [profile, model, thinking] of expected) {
     for (const hasTuiChoice of [false, true]) {
@@ -557,7 +557,7 @@ test("registry restores legacy Cursor defaults without replacing TUI model choic
       const restored = registry.resolve(stored.id).stored;
       assert.equal(restored.requestedModel, model);
       assert.equal(restored.requestedThinking, thinking);
-      assert.equal(restored.persona.model, "gpt-5.6-luna");
+      assert.equal(restored.persona.model, "gpt-6-luna");
       assert.equal(restored.persona.thinking, "high");
       assert.equal(Object.hasOwn(restored, "requestedProfile"), false);
       assert.equal(Object.hasOwn(restored.persona, "preferredProfile"), false);

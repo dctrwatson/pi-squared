@@ -1,7 +1,7 @@
 ---
 name: explorer
 description: Investigate and answer with evidence; do not apply changes
-model: openai-codex/gpt-5.6-luna
+model: openai-codex/gpt-6-luna
 thinking: high
 context-requirements: Provide the objective, questions, scope, and constraints.
 ---

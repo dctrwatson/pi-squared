@@ -67,9 +67,9 @@ const LIFETIMES = new Set<SubagentLifetime>(SUBAGENT_LIFETIMES);
 // Keep this conversion for old registry entries, including inactive branches.
 // New personas and records use model and thinking.
 const LEGACY_PROFILE_DEFAULTS = {
-    fast: { model: "gpt-5.6-luna", thinking: "high" },
-    balanced: { model: "gpt-5.6-terra", thinking: "xhigh" },
-    deep: { model: "gpt-5.6-sol", thinking: "xhigh" },
+    fast: { model: "gpt-6-luna", thinking: "high" },
+    balanced: { model: "gpt-6-sol", thinking: "xhigh" },
+    deep: { model: "gpt-6-astra", thinking: "xhigh" },
 } as const;
 
 function legacyModelDefaults(value: unknown, runtime: SubagentRuntime): { model: string; thinking: SubagentThinkingLevel } | undefined {
