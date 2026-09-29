@@ -98,3 +98,33 @@ test("git renders status 1 without an error color only for normal boolean result
     { type: "text", text: "[stderr: capture=complete; preview=complete]\nfatal: bad revision" },
   ]), /^error:/);
 });
+
+test("git and gh keep partial wrapper failures marked as errors", () => {
+  const details = {
+    ok: false,
+    error: { code: "OUTPUT_LIMIT", message: "limit" },
+    process: { exit_code: 1, signal: null, timed_out: false, stop_reason: "output_limit", cleanup: "complete" },
+  };
+  const content = [{ type: "text", text: "[git error: OUTPUT_LIMIT; limit]\n[git: exit_code=1]" }];
+  assert.equal(gitModule.gitExitIsExpected(details, content), false);
+  for (const create of [gitModule.createAgentGitTool, ghModule.createAgentGhTool]) {
+    const rendered = create().renderResult({ details, content }, { expanded: true, isPartial: false }, {
+      fg: (color, text) => `${color}:${text}`, bold: (text) => text,
+    }, { isError: false }).render(200).join("\n");
+    assert.match(rendered, /^error:/);
+  }
+});
+
+test("process call renderers show the whole-result output budget safely", async () => {
+  const { createAgentBashTool } = await import("../../extensions/agent-tools/bash.ts");
+  for (const create of [createAgentBashTool, gitModule.createAgentGitTool, ghModule.createAgentGhTool]) {
+    const tool = create();
+    const required = tool.name === "bash" ? { command: "true" } : { args: ["--version"] };
+    const render = (max_output_bytes) => tool.renderCall({ ...required, max_output_bytes }, plainTheme, {
+      isPartial: false, isError: false,
+    }).render(300).join("\n");
+    assert.match(render(8192), /\(output 8192 bytes\)/);
+    assert.match(render("2048\u001b"), /output 2048\\u001b bytes/);
+    assert.doesNotMatch(render("2048\u001b"), /\u001b/);
+  }
+});

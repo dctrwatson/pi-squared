@@ -68,7 +68,7 @@ ${skillBody}
   agentToolsModule.default(registration.api);
   subagentsModule.default(registration.api, { personaDirectory });
   assert.deepEqual([...registration.tools.keys()].sort(), [
-    "ask_user", "bash", "find", "gh", "git", "grep", "read", "subagent", "web_search",
+    "ask_user", "bash", "bash_job", "find", "gh", "git", "grep", "read", "subagent", "web_search",
   ]);
   assert.ok(registration.commands.has("subagent:context-persona"), "the test persona was loaded");
 

@@ -1,364 +1,222 @@
-import { writeFile } from "node:fs/promises";
 import { hasApi, type Usage } from "@earendil-works/pi-ai";
-import {
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  truncateHead,
-  type ExtensionContext,
-  type ToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import type { ToolFailureDetails, ToolSuccessDetails } from "./tool-result.ts";
-import {
-  createProcessArtifact,
-  removeProcessArtifact,
-  writeProcessArtifactMetadata,
-  type ProcessArtifact,
-} from "./process-artifacts.ts";
+import { omitNullOptionalFields } from "./optional-input.ts";
+import type { ToolFailureDetails } from "./tool-result.ts";
+import type { ProcessArtifact } from "./process-artifacts.ts";
 import { renderPreview, renderTruncatedToolCall, safeRenderArgument, textContent } from "./tool-render.ts";
+import {
+  boundedJoin, errorMessage, errorText, isRecord, jsonBytes, linePrefix, textLines, utf8Prefix,
+  WEB_ARTIFACT_LIMIT, WebArtifactLimitError, writeWebTextArtifact, type WebTextArtifactDetails,
+} from "./web-common.ts";
+import { createNativeWebEvidenceCollector, type NativeWebSearchRecord, type NativeUrlCitation } from "./web-search-evidence.ts";
+export { createNativeWebEvidenceCollector } from "./web-search-evidence.ts";
+export type { NativeWebSearchRecord, NativeUrlCitation } from "./web-search-evidence.ts";
 
-const CODEX_PROVIDER = "openai-codex";
-const MAX_QUERY_BYTES = 12 * 1024;
-const MAX_RESULT_BYTES = DEFAULT_MAX_BYTES - 1024;
-
-const EXTERNAL_SYSTEM_PROMPT = [
-  "Search the web.",
-  "Return a concise factual answer with direct source URLs.",
-  "Do not make unsupported claims.",
-].join(" ");
-
+const EXTERNAL_SYSTEM_PROMPT = "Search the web. Return a concise factual answer with direct source URLs. Do not make unsupported claims.";
 export const agentWebSearchParameters = Type.Object({
   query: Type.String({ description: "Focused query for current or external information" }),
-});
-
+}, { additionalProperties: false });
 export type AgentWebSearchInput = Static<typeof agentWebSearchParameters>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export type WebSearchArtifactDetails = WebTextArtifactDetails;
+export type WebSearchErrorCode = "INVALID_INPUT" | "MODEL_UNAVAILABLE" | "CANCELLED" | "REQUEST_FAILED" |
+  "EMPTY_RESPONSE" | "ARTIFACT_FAILED" | "INTERNAL_ERROR" | "RETRIEVAL_UNVERIFIED" | "EVIDENCE_LIMIT";
+export class WebSearchToolError extends Error {
+  readonly code: WebSearchErrorCode;
+  constructor(code: WebSearchErrorCode, message: string) { super(message); this.code = code; }
 }
-
-function prepareWebSearchArguments(rawInput: unknown): AgentWebSearchInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { query: "\0" };
-  if (typeof prepared.query !== "string") prepared.query = "\0";
-  return prepared as AgentWebSearchInput;
-}
-
-export interface WebSearchArtifactDetails {
-  path: string;
-  metadata_path: string;
-  format: "text";
-  capture: "complete";
-  captured_bytes: number;
-  captured_lines: number;
-  expires_at: number;
-}
-
-export type WebSearchErrorCode =
-  | "INVALID_INPUT"
-  | "MODEL_UNAVAILABLE"
-  | "CANCELLED"
-  | "REQUEST_FAILED"
-  | "EMPTY_RESPONSE"
-  | "ARTIFACT_FAILED"
-  | "INTERNAL_ERROR";
-
-export interface WebSearchSuccessDetails extends ToolSuccessDetails<"web_search"> {
+export interface WebSearchSuccessDetails {
+  ok: true;
+  tool: "web_search";
   external_session: true;
   provider: string;
   model: string;
-  response_truncated?: {
-    by: "lines" | "bytes";
-    total_lines: number;
-    total_bytes: number;
-  };
-  artifact?: WebSearchArtifactDetails;
+  retrieved_at: string;
+  native_search_count: number;
+  citation_count: number;
+  uncited_summary: boolean;
+  searches: NativeWebSearchRecord[];
+  citations: NativeUrlCitation[];
+  response_truncated?: { by: "lines" | "bytes"; total_lines: number; total_bytes: number };
+  artifact?: WebTextArtifactDetails;
 }
-
-export type AgentWebSearchToolDetails =
-  | WebSearchSuccessDetails
-  | ToolFailureDetails<"web_search", WebSearchErrorCode>;
-
-export interface AgentWebSearchToolOptions {
-  onArtifactCreated?: (artifact: ProcessArtifact) => void;
+interface WebSearchProgressDetails {
+  ok: true;
+  tool: "web_search";
+  external_session: true;
+  provider: string;
+  model: string;
 }
-
-class WebSearchToolError extends Error {
-  readonly code: WebSearchErrorCode;
-
-  constructor(code: WebSearchErrorCode, message: string) {
-    super(message);
-    this.code = code;
+export type AgentWebSearchToolDetails = WebSearchSuccessDetails | WebSearchProgressDetails | ToolFailureDetails<"web_search", WebSearchErrorCode>;
+export interface AgentWebSearchToolOptions { onArtifactCreated?: (artifact: ProcessArtifact) => void }
+export function normalizeWebSearchInput(rawInput: unknown): AgentWebSearchInput {
+  const input = omitNullOptionalFields(rawInput, []);
+  if (!isRecord(input)) throw new WebSearchToolError("INVALID_INPUT", "web_search input must be an object");
+  const unknown = Object.keys(input).find((key) => key !== "query");
+  if (unknown !== undefined) throw new WebSearchToolError("INVALID_INPUT", `Unknown input field: ${unknown}`);
+  if (typeof input.query !== "string") throw new WebSearchToolError("INVALID_INPUT", "web_search query must be a string");
+  validateQuery(input.query);
+  return { query: input.query };
+}
+export function validateQuery(query: string): void {
+  const bytes = Buffer.byteLength(query);
+  if (!bytes || bytes > 12_288 || !/\S/.test(query) || query.includes("\0")) {
+    throw new WebSearchToolError("INVALID_INPUT", "web_search query must contain 1 through 12288 UTF-8 bytes and non-whitespace text");
   }
 }
-
-function normalizeWebSearchInput(rawInput: unknown): AgentWebSearchInput {
-  if (!isRecord(rawInput)) throw new WebSearchToolError("INVALID_INPUT", "web_search input must be an object");
-  const unknown = Object.keys(rawInput).find((key) => key !== "query");
-  if (unknown) throw new WebSearchToolError("INVALID_INPUT", `Unknown input field: ${unknown}`);
-  if (typeof rawInput.query !== "string") throw new WebSearchToolError("INVALID_INPUT", "web_search query must be a string");
-  return rawInput as AgentWebSearchInput;
+export function addWebSearchTool(payload: unknown): unknown {
+  if (!isRecord(payload)) throw new Error("Cannot prepare the external web-search request");
+  return { ...payload, tools: [{ type: "web_search" }], tool_choice: "required", parallel_tool_calls: false };
 }
-
-function validateQuery(query: string): void {
-  const bytes = Buffer.byteLength(query, "utf8");
-  if (bytes === 0 || bytes > MAX_QUERY_BYTES || !/\S/.test(query) || query.includes("\0")) {
-    throw new WebSearchToolError(
-      "INVALID_INPUT",
-      "web_search query must contain 1 through 12288 UTF-8 bytes and non-whitespace text",
-    );
-  }
+export function supportsNativeWebSearch(model: NonNullable<ExtensionContext["model"]>): boolean {
+  return model.provider === "openai-codex" && hasApi(model, "openai-codex-responses") && model.compat?.supportsAdditionalTools === true;
 }
-
-function addWebSearchTool(payload: unknown): unknown {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-    throw new Error("Cannot prepare the external web-search request");
-  }
-  return {
-    ...payload,
-    tools: [{ type: "web_search" }],
-    tool_choice: "auto",
-    parallel_tool_calls: false,
-  };
-}
-
-function responseText(content: readonly unknown[]): string {
-  return content
-    .filter((item): item is { type: "text"; text: string } => (
-      typeof item === "object"
-      && item !== null
-      && "type" in item
-      && item.type === "text"
-      && "text" in item
-      && typeof item.text === "string"
-    ))
-    .map((item) => item.text)
-    .join("\n");
-}
-
-interface TruncatedWebSearchResponse {
-  content: string;
-  response_truncated: NonNullable<WebSearchSuccessDetails["response_truncated"]>;
-}
-
-function truncateResponse(text: string): { text: string; truncated?: TruncatedWebSearchResponse } {
-  const truncation = truncateHead(text, {
-    maxBytes: MAX_RESULT_BYTES,
-    maxLines: DEFAULT_MAX_LINES,
-  });
-  if (!truncation.truncated) return { text };
-
-  return {
-    text: truncation.content,
-    truncated: {
-      content: truncation.content,
-      response_truncated: {
-        by: truncation.truncatedBy ?? "bytes",
-        total_lines: truncation.totalLines,
-        total_bytes: truncation.totalBytes,
-      },
-    },
-  };
-}
-
-function capturedLines(text: string): number {
-  if (text.length === 0) return 0;
-  return text.split("\n").length;
-}
-
-async function writeWebSearchArtifact(
-  text: string,
-  response: { provider: string; model: string },
-  truncated: TruncatedWebSearchResponse,
-  signal: AbortSignal | undefined,
-  onArtifactCreated: ((artifact: ProcessArtifact) => void) | undefined,
-): Promise<WebSearchArtifactDetails> {
-  let artifact: ProcessArtifact | undefined;
-  try {
-    artifact = await createProcessArtifact();
-    onArtifactCreated?.(artifact);
-    await writeFile(artifact.stdout_path, text, signal ? { signal } : undefined);
-    await writeProcessArtifactMetadata(artifact, {
-      id: artifact.id,
-      tool: "web_search",
-      format: "text",
-      capture: "complete",
-      captured_bytes: Buffer.byteLength(text),
-      captured_lines: capturedLines(text),
-      provider: response.provider,
-      model: response.model,
-      response_truncated: truncated.response_truncated,
-    });
-    if (signal?.aborted) throw new Error("Operation aborted");
-    return {
-      path: artifact.stdout_path,
-      metadata_path: artifact.metadata_path,
-      format: "text",
-      capture: "complete",
-      captured_bytes: Buffer.byteLength(text),
-      captured_lines: capturedLines(text),
-      expires_at: artifact.expires_at,
-    };
-  } catch (error) {
-    if (artifact && !await removeProcessArtifact(artifact.directory)) {
-      throw new Error("Cannot remove the incomplete web-search artifact");
-    }
-    throw new Error(`Cannot write web-search artifact: ${String(error)}`);
-  }
-}
-
-function truncatedResponseText(truncated: TruncatedWebSearchResponse, artifact: WebSearchArtifactDetails): string {
-  const notice = `[web_search: preview=truncated; lines=${capturedLines(truncated.content)}/${truncated.response_truncated.total_lines}; bytes=${Buffer.byteLength(truncated.content)}/${truncated.response_truncated.total_bytes}; capture=${artifact.capture}; artifact=${artifact.path}]`;
-  return truncated.content.length > 0 ? `${truncated.content}\n\n${notice}` : notice;
-}
-
-function singleLineErrorMessage(message: string): string {
-  return message.replace(/[\u0000-\u001f\u007f-\u009f\[\]]/g, (character) => {
-    if (character === "\n") return "\\n";
-    if (character === "\r") return "\\r";
-    if (character === "\t") return "\\t";
-    if (character === "[") return "\\[";
-    if (character === "]") return "\\]";
-    return `\\u${(character.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`;
-  });
-}
-
-function webSearchFailure(error: unknown, signal: AbortSignal | undefined): { text: string; details: ToolFailureDetails<"web_search", WebSearchErrorCode> } {
-  const code = error instanceof WebSearchToolError
-    ? error.code
-    : signal?.aborted
-      ? "CANCELLED"
-      : "REQUEST_FAILED";
-  const message = error instanceof Error ? error.message : String(error);
-  const boundedMessage = Buffer.byteLength(message) <= 4_096
-    ? message
-    : `${Buffer.from(message).subarray(0, 4_093).toString("utf8")}...`;
-  return {
-    text: `[web_search error: ${code}; ${singleLineErrorMessage(boundedMessage)}]`,
-    details: { ok: false, tool: "web_search", error: { code, message: boundedMessage } },
-  };
-}
-
-function supportsNativeWebSearch(model: NonNullable<ExtensionContext["model"]>): boolean {
-  return model.provider === CODEX_PROVIDER
-    && hasApi(model, "openai-codex-responses")
-    && model.compat?.supportsAdditionalTools === true;
-}
-
-function selectWebSearchModel(ctx: ExtensionContext): NonNullable<ExtensionContext["model"]> {
-  if (ctx.model && supportsNativeWebSearch(ctx.model)) return ctx.model;
+export function selectWebSearchModel(ctx: ExtensionContext): NonNullable<ExtensionContext["model"]> {
   const models = ctx.modelRegistry.getAvailable().filter(supportsNativeWebSearch);
-  const model = models.find((candidate) => candidate.id === "gpt-6-luna")
-    ?? models.find((candidate) => candidate.id === "gpt-5.6-luna")
-    ?? models[0];
-  if (!model) {
-    throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an available openai-codex model with native tool support");
-  }
+  const model = models.find((entry) => entry.provider === ctx.model?.provider && entry.id === ctx.model?.id)
+    ?? models.find((entry) => entry.id === "gpt-6-luna") ?? models.find((entry) => entry.id === "gpt-5.6-luna") ?? models[0];
+  if (!model) throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an available openai-codex model with native tool support");
   return model;
 }
-
-async function runWebSearch(
-  input: AgentWebSearchInput,
-  ctx: ExtensionContext,
-  model: NonNullable<ExtensionContext["model"]>,
-  signal: AbortSignal | undefined,
-  options: AgentWebSearchToolOptions,
-): Promise<{ text: string; details: WebSearchSuccessDetails; usage: Usage }> {
-  input = normalizeWebSearchInput(input);
-  validateQuery(input.query);
-
-  const response = await ctx.modelRegistry.complete(
-    model,
-    {
-      systemPrompt: EXTERNAL_SYSTEM_PROMPT,
-      messages: [{
-        role: "user",
-        content: [{ type: "text", text: input.query }],
-        timestamp: Date.now(),
-      }],
-    },
-    {
-      signal,
-      reasoningEffort: "minimal",
-      textVerbosity: "low",
-      onPayload: addWebSearchTool,
-    },
-  );
-  if (response.stopReason === "aborted") throw new WebSearchToolError("CANCELLED", "web_search was cancelled");
-  if (response.stopReason === "error" || response.stopReason === "toolUse") {
-    throw new WebSearchToolError("REQUEST_FAILED", response.errorMessage ?? "The external web-search request failed");
+const evidenceLimit = () => new WebSearchToolError("EVIDENCE_LIMIT", "Web evidence exceeds a retention limit");
+function evidenceParts(summary: string, details: WebSearchSuccessDetails) {
+  try {
+    jsonBytes(details.provider, WEB_ARTIFACT_LIMIT);
+    jsonBytes(details.model, WEB_ARTIFACT_LIMIT);
+  } catch (error) { if (error instanceof RangeError) throw evidenceLimit(); throw error; }
+  const warning = details.uncited_summary ? "\nWarning: Native search completed, but the provider returned no URL citations. This summary is uncited." : "";
+  const prefix = boundedJoin([
+    "[web_search: provider=", JSON.stringify(details.provider), "; model=", JSON.stringify(details.model),
+    `; native_searches=${details.native_search_count}; citations=${details.citation_count}; retrieved_at=${details.retrieved_at}]`,
+    warning, "\n\nSummary (auxiliary model; not source text):\n",
+  ], WEB_ARTIFACT_LIMIT, evidenceLimit);
+  const citations: string[] = [];
+  let remaining = WEB_ARTIFACT_LIMIT - Buffer.byteLength(prefix) - Buffer.byteLength(summary) - Buffer.byteLength("\n\nNative URL citations:\n");
+  for (const [index, record] of details.citations.entries()) {
+    const label = `[${index + 1}] `;
+    const value = { url: record.url, title: record.title };
+    try { remaining -= jsonBytes(value, Math.max(0, remaining)); }
+    catch (error) { if (error instanceof RangeError) throw evidenceLimit(); throw error; }
+    remaining -= Buffer.byteLength(label) + (index ? 1 : 0);
+    if (remaining < 0) throw evidenceLimit();
+    citations.push(label + JSON.stringify(value));
   }
-
-  const text = responseText(response.content);
-  if (!/\S/.test(text)) throw new WebSearchToolError("EMPTY_RESPONSE", "The external web-search request returned no text");
-  const truncated = truncateResponse(text);
-  const artifact = truncated.truncated
-    ? await writeWebSearchArtifact(text, response, truncated.truncated, signal, options.onArtifactCreated)
-    : undefined;
-  return {
-    text: truncated.truncated && artifact
-      ? truncatedResponseText(truncated.truncated, artifact)
-      : truncated.text,
-    details: {
-      ok: true,
-      tool: "web_search",
-      external_session: true,
-      provider: response.provider,
-      model: response.model,
-      ...(truncated.truncated ? { response_truncated: truncated.truncated.response_truncated } : {}),
-      ...(artifact ? { artifact } : {}),
-    },
-    usage: response.usage,
-  };
+  const suffix = boundedJoin(["\n\nNative URL citations:\n", citations.length ? citations.join("\n") : "none"], WEB_ARTIFACT_LIMIT, evidenceLimit);
+  return { prefix, summary, suffix, citations };
 }
-
-export function createAgentWebSearchTool(
-  options: AgentWebSearchToolOptions = {},
-): ToolDefinition<typeof agentWebSearchParameters, AgentWebSearchToolDetails> {
+export async function writeWebSearchArtifact(
+  text: string, query: string, details: WebSearchSuccessDetails, signal: AbortSignal | undefined,
+  onArtifactCreated?: (artifact: ProcessArtifact) => void,
+): Promise<WebTextArtifactDetails> {
+  if (Buffer.byteLength(text) > WEB_ARTIFACT_LIMIT) throw evidenceLimit();
+  try {
+    return await writeWebTextArtifact(text, (artifact) => ({
+      id: artifact.id, tool: "web_search", format: "text", capture: "complete",
+      captured_bytes: Buffer.byteLength(text), captured_lines: textLines(text), query,
+      provider: details.provider, model: details.model, retrieved_at: details.retrieved_at,
+      native_search_count: details.native_search_count, citation_count: details.citation_count,
+      uncited_summary: details.uncited_summary, searches: details.searches, citations: details.citations,
+      response_truncated: details.response_truncated!,
+    }), signal, onArtifactCreated, (message, cancelled) => new WebSearchToolError(cancelled ? "CANCELLED" : "ARTIFACT_FAILED", message));
+  } catch (error) { if (error instanceof WebArtifactLimitError) throw evidenceLimit(); throw error; }
+}
+export async function renderWebSearchEvidence(
+  summary: string, query: string, details: WebSearchSuccessDetails, signal: AbortSignal | undefined, options: AgentWebSearchToolOptions,
+): Promise<string> {
+  const parts = evidenceParts(summary, details);
+  const full = boundedJoin([parts.prefix, summary, parts.suffix], WEB_ARTIFACT_LIMIT, evidenceLimit);
+  if (Buffer.byteLength(full) <= 16_384 && textLines(full) <= 200) return full;
+  const bytePrefix = utf8Prefix(full, 16_384);
+  const linesPrefix = linePrefix(full, 200);
+  details.response_truncated = {
+    by: bytePrefix.length <= linesPrefix.length ? "bytes" : "lines", total_bytes: Buffer.byteLength(full), total_lines: textLines(full),
+  };
+  const artifact = await writeWebSearchArtifact(full, query, details, signal, options.onArtifactCreated);
+  const notice = `\n\n[web_search: preview=truncated; omitted_text=true; capture=complete; artifact=${artifact.path}]`;
+  const citationHeading = "\n\nNative URL citations:\n";
+  const omission = "[citation records omitted; see artifact]";
+  let records = "";
+  for (const record of parts.citations) {
+    const next = records ? `${records}\n${record}` : record;
+    const reserve = parts.prefix + citationHeading + next + "\n" + omission + notice;
+    if (Buffer.byteLength(reserve) > 16_384 || textLines(reserve) > 200) break;
+    records = next;
+  }
+  const displayed = records ? textLines(records) : 0;
+  const citationText = parts.citations.length === 0 ? "none"
+    : displayed === parts.citations.length ? records : `${records}${records ? "\n" : ""}${omission}`;
+  const fixed = parts.prefix + citationHeading + citationText + notice;
+  if (Buffer.byteLength(fixed) > 16_384 || textLines(fixed) > 200) throw new WebSearchToolError("ARTIFACT_FAILED", "Web provenance and artifact path do not fit the preview");
+  const excerpt = utf8Prefix(linePrefix(summary, Math.max(1, 201 - textLines(fixed))), 16_384 - Buffer.byteLength(fixed));
+  details.artifact = artifact;
+  return parts.prefix + excerpt + citationHeading + citationText + notice;
+}
+export async function runWebSearch(
+  input: AgentWebSearchInput, ctx: ExtensionContext, model: NonNullable<ExtensionContext["model"]>,
+  signal: AbortSignal | undefined, options: AgentWebSearchToolOptions, onUsage: (usage: Usage) => void,
+): Promise<{ text: string; details: WebSearchSuccessDetails; usage: Usage }> {
+  const collector = createNativeWebEvidenceCollector();
+  const response = await ctx.modelRegistry.complete(model, {
+    systemPrompt: EXTERNAL_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: [{ type: "text", text: input.query }], timestamp: Date.now() }],
+  }, { signal, reasoningEffort: "minimal", textVerbosity: "low", onPayload: addWebSearchTool, onProviderStreamEvent: collector.observe });
+  onUsage(response.usage);
+  const retrieved_at = new Date().toISOString();
+  if (signal?.aborted || response.stopReason === "aborted") throw new WebSearchToolError("CANCELLED", "web_search was cancelled");
+  if (response.stopReason !== "stop") throw new WebSearchToolError("REQUEST_FAILED", response.errorMessage ?? "The external web-search request failed");
+  if (collector.limitExceeded()) throw evidenceLimit();
+  function* textParts() {
+    let first = true;
+    for (const item of response.content) {
+      if (isRecord(item) && item.type === "text" && typeof item.text === "string") {
+        if (!first) yield "\n";
+        first = false;
+        yield item.text;
+      }
+    }
+  }
+  const summary = boundedJoin(textParts(), 1_048_576, evidenceLimit);
+  const searches = collector.searches();
+  const citations = collector.citations();
+  if (!searches.length) throw new WebSearchToolError("RETRIEVAL_UNVERIFIED", "The provider returned no completed native web search");
+  if (!/\S/.test(summary)) throw new WebSearchToolError("EMPTY_RESPONSE", "The external web-search request returned no text");
+  const details: WebSearchSuccessDetails = {
+    ok: true, tool: "web_search", external_session: true, provider: response.provider, model: response.model,
+    retrieved_at, native_search_count: searches.length, citation_count: citations.length, uncited_summary: !citations.length, searches, citations,
+  };
+  const text = await renderWebSearchEvidence(summary, input.query, details, signal, options);
+  return { text, details, usage: response.usage };
+}
+export function createAgentWebSearchTool(options: AgentWebSearchToolOptions = {}): ToolDefinition<typeof agentWebSearchParameters, AgentWebSearchToolDetails> {
   return {
-    name: "web_search",
-    label: "web_search",
-    description: "Search the public web for current or external information in a separate Codex request. Responses include source URLs. Truncated results have a complete plain-text artifact.",
+    name: "web_search", label: "web_search",
+    description: "Search the public web in a separate Codex request. Report native search and citation counts. Citations can be absent. Truncated results have a complete text artifact.",
     promptSnippet: "Search the public web for current information",
-    promptGuidelines: [
-      "Use web_search for current or external facts that local files cannot verify.",
-    ],
-    parameters: agentWebSearchParameters,
-    prepareArguments: prepareWebSearchArguments,
+    promptGuidelines: ["Use web_search for current or external facts that local files cannot verify.", "A search summary is not source text."],
+    parameters: agentWebSearchParameters, prepareArguments: normalizeWebSearchInput,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      let usage: Usage | undefined;
       try {
+        const input = normalizeWebSearchInput(params);
         const model = selectWebSearchModel(ctx);
-        onUpdate?.({
-          content: [{ type: "text", text: "Searching the web…" }],
-          details: {
-            ok: true,
-            tool: "web_search",
-            external_session: true,
-            provider: model.provider,
-            model: model.id,
-          },
-        });
-        const result = await runWebSearch(params, ctx, model, signal, options);
-        return {
-          content: [{ type: "text", text: result.text }],
-          details: result.details,
-          usage: result.usage,
-        };
+        onUpdate?.({ content: [{ type: "text", text: "Searching the web…" }], details: {
+          ok: true, tool: "web_search", external_session: true, provider: model.provider, model: model.id,
+        } });
+        const result = await runWebSearch(input, ctx, model, signal, options, (value) => { usage = value; });
+        return { content: [{ type: "text", text: result.text }], details: result.details, usage };
       } catch (error) {
-        const failure = webSearchFailure(error, signal);
-        return {
-          content: [{ type: "text", text: failure.text }],
-          details: failure.details,
-        };
+        const code = error instanceof WebSearchToolError ? error.code : signal?.aborted ? "CANCELLED" : "REQUEST_FAILED";
+        const message = errorMessage(error);
+        return { content: [{ type: "text", text: errorText("web_search", code, message) }],
+          details: { ok: false, tool: "web_search", error: { code, message } }, isError: true, ...(usage ? { usage } : {}) };
       }
     },
     renderCall(args, theme, context) {
-      const call = `${theme.fg("toolTitle", theme.bold("web_search"))} ${theme.fg("muted", safeRenderArgument(args.query))}`;
-      return renderTruncatedToolCall(call, theme, context.isPartial, context.isError);
+      return renderTruncatedToolCall(`${theme.fg("toolTitle", theme.bold("web_search"))} ${theme.fg("muted", safeRenderArgument(args.query))}`, theme, context.isPartial, context.isError);
     },
     renderResult(result, options, theme, context) {
-      const color = context.isError ? "error" : "toolOutput";
-      return new Text(theme.fg(color, renderPreview(textContent(result), options.expanded)), 0, 0);
+      return new Text(theme.fg(context.isError ? "error" : "toolOutput", renderPreview(textContent(result), options.expanded)), 0, 0);
     },
   };
 }

@@ -165,7 +165,7 @@ if (mode === "inspect") {
 }
 
 async function removeArtifact(result) {
-  if (result.artifact) await rm(result.artifact.directory, { recursive: true, force: true });
+  if ((result.process ?? result).artifact) await rm((result.process ?? result).artifact.directory, { recursive: true, force: true });
 }
 
 test("git exposes typed snake_case inputs and concise host-behavior guidance", () => {
@@ -282,7 +282,7 @@ test("git streams bounded incomplete progress updates", async () => {
     );
     try {
       assert.ok(updates.length >= 2);
-      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) < 48 * 1024));
+      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) <= 8192));
       assert.equal(updates[0].details.stdout.capture, "incomplete");
       assert.ok(updates.some((update) => /start\n/.test(update.content[0].text)));
       assert.equal(toolResult.details.stdout.capture, "complete");
@@ -366,28 +366,28 @@ test("git tolerates an early standard-input close", async () => {
   });
 });
 
-test("git creates artifacts only above the initial preview limit", async () => {
+test("git retains artifacts when the total preview budget omits output", async () => {
   await withFakeGit(async (directory) => {
     const artifacts = [];
     const tool = gitModule.createAgentGitTool({ onArtifactCreated: (artifact) => artifacts.push(artifact) });
-    const exact = await execute(tool, { args: ["output", "18432", "0"] }, directory);
+    const exact = await execute(tool, { args: ["output", "4096", "0"] }, directory);
     assert.equal(exact.stdout.preview, "complete");
-    assert.equal(exact.stdout.preview_bytes, 18_432);
+    assert.equal(exact.stdout.preview_bytes, 4096);
     assert.equal(exact.artifact, undefined);
-    assert.ok(Buffer.byteLength(exact.text) < 48 * 1024);
+    assert.ok(Buffer.byteLength(exact.text) <= 8192);
     await assert.rejects(stat(artifacts[0].directory), { code: "ENOENT" });
 
-    const truncated = await execute(tool, { args: ["output", "18433", "0"] }, directory);
+    const truncated = await execute(tool, { args: ["output", "8193", "0"] }, directory);
     try {
       assert.equal(truncated.stdout.preview, "truncated");
-      assert.equal(truncated.stdout.captured_raw_bytes, 18_433);
+      assert.equal(truncated.stdout.captured_raw_bytes, 8193);
       assert.ok(truncated.stdout.omitted_captured_raw_bytes > 0);
       assert.equal(truncated.stdout.artifact, truncated.artifact.stdout_path);
       assert.match(truncated.text, /\[process preview omitted: \d+ captured raw bytes\]/);
       assert.match(truncated.text, new RegExp(`artifact=${truncated.artifact.stdout_path}`));
       assert.equal((await stat(truncated.artifact.directory)).mode & 0o777, 0o700);
       assert.equal((await stat(truncated.artifact.stdout_path)).mode & 0o777, 0o600);
-      assert.equal((await readFile(truncated.artifact.stdout_path)).length, 18_433);
+      assert.equal((await readFile(truncated.artifact.stdout_path)).length, 8193);
     } finally {
       await removeArtifact(truncated);
     }
@@ -414,7 +414,7 @@ test("git dynamically bounds two large multibyte streams", async () => {
       assert.match(streamPreview(result, "stdout"), /TAIL\n$/);
       assert.match(streamPreview(result, "stderr"), /^ERR_HEAD\n/);
       assert.match(streamPreview(result, "stderr"), /ERR_TAIL\n$/);
-      assert.ok(Buffer.byteLength(result.text) < 48 * 1024);
+      assert.ok(Buffer.byteLength(result.text) <= 8192);
       assert.equal(await readFile(result.artifact.stdout_path, "utf8"), stdout);
       assert.equal(await readFile(result.artifact.stderr_path, "utf8"), stderr);
     } finally {
@@ -523,7 +523,9 @@ test("git cancellation returns a stable wrapper failure", async () => {
     const result = await pending;
     assert.equal(result.ok, false);
     assert.deepEqual(result.error, { code: "CANCELLED", message: "Git command was cancelled." });
-    assert.equal(result.text, "[git error: CANCELLED; Git command was cancelled.]");
+    assert.match(result.text, /^\[git error: CANCELLED;/);
+    assert.equal(result.process.stop_reason, "cancelled");
+    assert.equal(result.process.cleanup, "complete");
     assert.equal(result.artifact, undefined);
     await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
   });
@@ -539,6 +541,9 @@ test("git stops at the full-capture limit", async () => {
     assert.equal(result.ok, false);
     assert.equal(result.error.code, "OUTPUT_LIMIT");
     assert.match(result.text, /^\[git error: OUTPUT_LIMIT;/);
-    await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
+    assert.equal(result.process.stop_reason, "output_limit");
+    assert.equal(result.process.cleanup, "complete");
+    assert.equal((await readFile(artifact.stdout_path)).length, 67_108_864);
+    await removeArtifact(result);
   });
 });

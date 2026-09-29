@@ -73,7 +73,15 @@ export function formatDirectProcessCall(executable: string, args: unknown): stri
 /** Report whether a process status represents an unsuccessful invocation. */
 export function hasUnsuccessfulProcessStatus(details: unknown): boolean {
   if (!isRecord(details)) return false;
-  if (details.ok === false || details.timed_out === true) return true;
+  if (details.ok === false) return true;
+  if (isRecord(details.job)) {
+    if (details.output !== undefined) return false;
+    const job = details.job;
+    if (job.state === "starting" || job.state === "running" || job.state === "stopping") return false;
+    if (job.state === "stop_failed" || isRecord(job.error)) return true;
+    return hasUnsuccessfulProcessStatus(job.process);
+  }
+  if (details.timed_out === true) return true;
   if (typeof details.exit_code === "number" && details.exit_code !== 0) return true;
   return details.signal !== undefined && details.signal !== null;
 }

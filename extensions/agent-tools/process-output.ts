@@ -6,15 +6,30 @@ export const MAX_PROCESS_TOTAL_BYTES = 134_217_728;
 export const MAX_PROCESS_RESULT_BYTES = 48 * 1024;
 export const PROCESS_PREVIEW_FRAGMENT_BYTES = 65_536;
 
-const INITIAL_PREVIEW_BYTES = 18_432;
-const MIN_PREVIEW_BYTES = 512;
+export const DEFAULT_PROCESS_OUTPUT_BYTES = 8192;
+export const MIN_PROCESS_OUTPUT_BYTES = 2048;
+export const MAX_PROCESS_OUTPUT_BYTES = 40960;
+const MAX_ERROR_MESSAGE_BYTES = 512;
+
+export class ProcessResultBudgetError extends Error {
+  constructor() {
+    super("Process output exceeds max_output_bytes");
+  }
+}
+
+function validateOutputBudget(bytes: number): void {
+  if (!Number.isSafeInteger(bytes) || bytes < MIN_PROCESS_OUTPUT_BYTES || bytes > MAX_PROCESS_OUTPUT_BYTES) {
+    throw new ProcessResultBudgetError();
+  }
+}
 
 export type ProcessToolName = "bash" | "git" | "gh";
 export type ProcessCaptureState = "complete" | "incomplete";
 export type ProcessPreviewState = "complete" | "truncated";
 
 export interface CapturedProcessStream {
-  path: string;
+  path?: string;
+  savedRawBytes?: number;
   totalBytes: number;
   lineFeeds: number;
   endsWithNewline: boolean;
@@ -22,17 +37,23 @@ export interface CapturedProcessStream {
   tail: Buffer<ArrayBufferLike>;
 }
 
+export type ProcessStopReason = null | "timeout" | "cancelled" | "output_limit" |
+  "capture_failed" | "artifact_failed" | "cleanup_failed" | "shutdown";
+
 export interface ProcessStatus {
   exit_code: number | null;
   signal: string | null;
   timed_out: boolean;
   duration_ms: number;
+  stop_reason: ProcessStopReason;
+  cleanup: "pending" | "complete" | "failed";
 }
 
 export interface ProcessStreamDetails {
   capture: ProcessCaptureState;
   preview: ProcessPreviewState;
   captured_raw_bytes: number;
+  saved_raw_bytes?: number;
   captured_lines: number;
   preview_bytes: number;
   head_preview_bytes?: number;
@@ -41,13 +62,36 @@ export interface ProcessStreamDetails {
   artifact?: string;
 }
 
-export interface ProcessSuccessDetails extends ProcessStatus, ToolSuccessDetails<ProcessToolName> {
+export interface ProcessSnapshot extends ProcessStatus {
   stdout: ProcessStreamDetails;
   stderr: ProcessStreamDetails;
   artifact?: ProcessArtifact;
 }
 
-export interface ProcessFailureDetails extends ToolFailureDetails<ProcessToolName> {}
+export interface ProcessSuccessDetails extends ProcessSnapshot, ToolSuccessDetails<ProcessToolName> {}
+
+export interface ProcessFailureDetails extends ToolFailureDetails<ProcessToolName> {
+  process?: ProcessSnapshot;
+}
+
+/** Copy process evidence without its tool envelope. */
+export function nestedProcessSnapshot(details: ProcessSuccessDetails): ProcessSnapshot {
+  const { ok: _ok, tool: _tool, stdout, stderr, artifact, ...status } = details;
+  return {
+    ...status,
+    stdout: { ...stdout },
+    stderr: { ...stderr },
+    ...(artifact ? { artifact: { ...artifact } } : {}),
+  };
+}
+
+export interface ProcessEvidence {
+  status: ProcessStatus;
+  artifact?: ProcessArtifact;
+  stdout: CapturedProcessStream;
+  stderr: CapturedProcessStream;
+  capture: { stdout: ProcessCaptureState; stderr: ProcessCaptureState };
+}
 
 export type ProcessToolDetails = ProcessSuccessDetails | ProcessFailureDetails;
 
@@ -144,68 +188,62 @@ function fittingSuffix(data: Buffer, maxBytes: number): Buffer {
   return data.subarray(trimSuffixBoundary(data, data.length - low));
 }
 
-function omissionText(head: string, omittedBytes: number, tail: string): string {
-  const before = head.length > 0 && !head.endsWith("\n") ? "\n" : "";
-  const after = tail.length > 0 ? "\n" : "";
-  return `${head}${before}[process preview omitted: ${omittedBytes} captured raw bytes]${after}${tail}`;
-}
-
-function buildPreview(
-  capture: CapturedProcessStream,
-  captureState: ProcessCaptureState,
-  limit: number,
-): PreviewResult {
-  const artifactRequired = captureState === "incomplete";
-  const common = {
-    capture: captureState,
+function streamDetails(capture: CapturedProcessStream, state: ProcessCaptureState): ProcessStreamDetails {
+  return {
+    capture: state,
+    preview: "complete",
     captured_raw_bytes: capture.totalBytes,
     captured_lines: capturedProcessLines(capture),
-  } as const;
+    preview_bytes: 0,
+    ...(capture.savedRawBytes !== undefined ? { saved_raw_bytes: capture.savedRawBytes } : {}),
+  };
+}
 
-  if (
-    capture.totalBytes <= capture.head.length
-    && decodedByteLength(capture.head.subarray(0, capture.totalBytes)) <= limit
-  ) {
+function fullDecodedBytes(capture: CapturedProcessStream): number {
+  return capture.totalBytes <= capture.head.length
+    ? decodedByteLength(capture.head.subarray(0, capture.totalBytes))
+    : Infinity;
+}
+
+/** Fit source fragments and omission text inside one stream's share. */
+export function buildPreview(
+  capture: CapturedProcessStream,
+  state: ProcessCaptureState,
+  limit: number,
+  unsuccessful = false,
+): PreviewResult {
+  const details = streamDetails(capture, state);
+  if (fullDecodedBytes(capture) <= limit) {
     const text = capture.head.subarray(0, capture.totalBytes).toString("utf8");
-    return {
-      text,
-      details: {
-        ...common,
-        preview: "complete",
-        preview_bytes: Buffer.byteLength(text),
-        ...(artifactRequired ? { artifact: capture.path } : {}),
-      },
-    };
+    details.preview_bytes = Buffer.byteLength(text);
+    if (state === "incomplete" && capture.path) details.artifact = capture.path;
+    return { text, details };
   }
 
-  const headLength = Math.min(capture.head.length, Math.floor(capture.totalBytes / 2));
-  const tailLength = Math.min(capture.tail.length, capture.totalBytes - headLength);
-  const headSource = capture.head.subarray(0, headLength);
-  const tailSource = capture.tail.subarray(capture.tail.length - tailLength);
-  let head: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-  let tail: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-  let omittedBytes = capture.totalBytes;
-  let text = omissionText("", omittedBytes, "");
-
-  for (let pass = 0; pass < 4; pass += 1) {
-    const generatedBytes = Buffer.byteLength(omissionText("", omittedBytes, ""));
-    const available = Math.max(0, limit - generatedBytes - 2);
-    head = fittingPrefix(headSource, Math.floor(available / 2));
-    tail = fittingSuffix(tailSource, available - decodedByteLength(head));
-    omittedBytes = Math.max(0, capture.totalBytes - head.length - tail.length);
-    text = omissionText(head.toString("utf8"), omittedBytes, tail.toString("utf8"));
-  }
-
+  const marker = (omitted: number): string => `[process preview omitted: ${omitted} captured raw bytes]`;
+  const markerBytes = Buffer.byteLength(marker(capture.totalBytes));
+  const sourceSpace = Math.max(0, limit - markerBytes - 2);
+  const headShare = unsuccessful ? Math.floor(sourceSpace / 3) : Math.floor(sourceSpace / 2);
+  const head = markerBytes <= limit ? fittingPrefix(capture.head, headShare) : Buffer.alloc(0);
+  const tailLength = Math.min(capture.tail.length, Math.max(0, capture.totalBytes - head.length));
+  const tail = markerBytes <= limit
+    ? fittingSuffix(capture.tail.subarray(capture.tail.length - tailLength), sourceSpace - headShare)
+    : Buffer.alloc(0);
+  const omitted = Math.max(0, capture.totalBytes - head.length - tail.length);
+  const text = markerBytes <= limit
+    ? [head.toString("utf8"), marker(omitted), tail.toString("utf8")].filter((part) => part.length > 0).join("\n")
+    : "";
+  if (Buffer.byteLength(text) > limit) throw new ProcessResultBudgetError();
   return {
     text,
     details: {
-      ...common,
+      ...details,
       preview: "truncated",
       preview_bytes: Buffer.byteLength(text),
       head_preview_bytes: decodedByteLength(head),
-      omitted_captured_raw_bytes: omittedBytes,
+      omitted_captured_raw_bytes: omitted,
       tail_preview_bytes: decodedByteLength(tail),
-      artifact: capture.path,
+      ...(capture.path ? { artifact: capture.path } : {}),
     },
   };
 }
@@ -213,93 +251,154 @@ function buildPreview(
 function formatStatusHeader(tool: ProcessToolName, status: ProcessStatus, compact: boolean): string {
   if (compact) return `[${tool}: ok; duration_ms=${status.duration_ms}]`;
   const exitCode = status.exit_code === null ? "null" : String(status.exit_code);
-  return `[${tool}: exit_code=${exitCode}; signal=${status.signal ?? "none"}; timed_out=${status.timed_out}; duration_ms=${status.duration_ms}]`;
+  return `[${tool}: exit_code=${exitCode}; signal=${status.signal ?? "none"}; timed_out=${status.timed_out}; stop_reason=${status.stop_reason}; cleanup=${status.cleanup}; duration_ms=${status.duration_ms}]`;
 }
 
-function formatStreamHeader(
-  name: "stdout" | "stderr",
-  details: ProcessStreamDetails,
-  compact: boolean,
-): string {
+function formatStreamHeader(name: "stdout" | "stderr", details: ProcessStreamDetails, compact: boolean): string {
   if (compact) return `[${name}: preview_bytes=${details.preview_bytes}]`;
   const fields = [
     `capture=${details.capture}`,
     `preview=${details.preview}`,
     `captured_raw_bytes=${details.captured_raw_bytes}`,
-    `captured_lines=${details.captured_lines}`,
-    `preview_bytes=${details.preview_bytes}`,
   ];
-  if (details.preview === "truncated") {
-    fields.push(`head_preview_bytes=${details.head_preview_bytes}`);
-    fields.push(`omitted_captured_raw_bytes=${details.omitted_captured_raw_bytes}`);
-    fields.push(`tail_preview_bytes=${details.tail_preview_bytes}`);
-  }
+  if (details.saved_raw_bytes !== undefined) fields.push(`saved_raw_bytes=${details.saved_raw_bytes}`);
   if (details.artifact) fields.push(`artifact=${details.artifact}`);
   return `[${name}: ${fields.join("; ")}]`;
 }
 
-function streamSection(
-  name: "stdout" | "stderr",
-  preview: PreviewResult,
-  compact: boolean,
-): string | undefined {
-  if (
-    preview.details.captured_raw_bytes === 0
-    && preview.details.capture === "complete"
-    && preview.details.preview === "complete"
-  ) {
-    return undefined;
-  }
-  const header = formatStreamHeader(name, preview.details, compact);
-  return preview.text.length > 0 ? `${header}\n${preview.text}` : header;
+/** Reserve the largest process headers before an OS spawn. */
+export function reserveProcessMetadataBytes(
+  tool: ProcessToolName,
+  paths: { stdout_path: string; stderr_path: string },
+): number {
+  const status: ProcessStatus = {
+    exit_code: -2147483648,
+    signal: "S".repeat(32),
+    timed_out: false,
+    duration_ms: Number.MAX_SAFE_INTEGER,
+    stop_reason: "artifact_failed",
+    cleanup: "complete",
+  };
+  const statusText = formatStatusHeader(tool, status, false);
+  const heading = (name: "stdout" | "stderr", path: string): string => formatStreamHeader(name, {
+    capture: "incomplete", preview: "truncated", captured_raw_bytes: 67108864,
+    saved_raw_bytes: 67108864, captured_lines: 0, preview_bytes: 0, artifact: path,
+  }, false);
+  return Buffer.byteLength([
+    `[${tool} error: RESULT_BUDGET_TOO_SMALL; ${"x".repeat(MAX_ERROR_MESSAGE_BYTES)}]`,
+    statusText,
+    heading("stdout", paths.stdout_path),
+    heading("stderr", paths.stderr_path),
+  ].join("\n")) + 2;
 }
 
-/** Format one normal process result with bounded unescaped previews. */
+function includedStream(preview: PreviewResult): boolean {
+  return preview.details.captured_raw_bytes > 0 || preview.details.capture === "incomplete";
+}
+
+function renderProcessText(
+  tool: ProcessToolName,
+  status: ProcessStatus,
+  stdout: PreviewResult,
+  stderr: PreviewResult,
+  compact: boolean,
+  wrapperError?: string,
+): string {
+  const sections = [wrapperError, formatStatusHeader(tool, status, compact)];
+  for (const [name, preview] of [["stdout", stdout], ["stderr", stderr]] as const) {
+    if (!includedStream(preview)) continue;
+    const header = formatStreamHeader(name, preview.details, compact);
+    sections.push(preview.text.length > 0 ? `${header}\n${preview.text}` : header);
+  }
+  return sections.filter((section): section is string => section !== undefined).join("\n");
+}
+
+function processResult(
+  tool: ProcessToolName, status: ProcessStatus, artifact: ProcessArtifact | undefined,
+  stdout: PreviewResult, stderr: PreviewResult, text: string, budget: number,
+): FormattedProcessResult {
+  if (Buffer.byteLength(text) > budget || Buffer.byteLength(text) > MAX_PROCESS_RESULT_BYTES) {
+    throw new ProcessResultBudgetError();
+  }
+  return {
+    text,
+    details: {
+      ok: true, tool, ...status, stdout: stdout.details, stderr: stderr.details,
+      ...(artifact && status.cleanup === "complete" ? { artifact: { ...artifact } } : {}),
+    },
+    needsArtifact: stdout.details.capture === "incomplete" || stderr.details.capture === "incomplete"
+      || stdout.details.preview === "truncated" || stderr.details.preview === "truncated",
+  };
+}
+
+/** Allocate one total byte budget for process status, paths, and source previews. */
 export function formatProcessResult(
   tool: ProcessToolName,
   status: ProcessStatus,
-  artifact: ProcessArtifact,
+  artifact: ProcessArtifact | undefined,
   stdout: CapturedProcessStream,
   stderr: CapturedProcessStream,
   capture: { stdout: ProcessCaptureState; stderr: ProcessCaptureState },
+  maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES,
+  wrapperError?: string,
 ): FormattedProcessResult {
-  let previewLimit = INITIAL_PREVIEW_BYTES;
-  while (true) {
-    const stdoutPreview = buildPreview(stdout, capture.stdout, previewLimit);
-    const stderrPreview = buildPreview(stderr, capture.stderr, previewLimit);
-    const compact = status.exit_code === 0
-      && status.signal === null
-      && status.timed_out === false
-      && stdoutPreview.details.capture === "complete"
-      && stdoutPreview.details.preview === "complete"
-      && stderrPreview.details.capture === "complete"
-      && stderrPreview.details.preview === "complete";
-    const sections = [
-      formatStatusHeader(tool, status, compact),
-      streamSection("stdout", stdoutPreview, compact),
-      streamSection("stderr", stderrPreview, compact),
-    ].filter((section): section is string => section !== undefined);
-    const text = sections.join("\n");
-    const details: ProcessSuccessDetails = {
-      ok: true,
-      tool,
-      ...status,
-      stdout: stdoutPreview.details,
-      stderr: stderrPreview.details,
-      artifact,
-    };
-    if (Buffer.byteLength(text) < MAX_PROCESS_RESULT_BYTES) {
-      return {
-        text,
-        details,
-        needsArtifact: stdoutPreview.details.artifact !== undefined || stderrPreview.details.artifact !== undefined,
-      };
+  validateOutputBudget(maxOutputBytes);
+  const unsuccessful = !!wrapperError || (typeof status.exit_code === "number" && status.exit_code !== 0)
+    || status.signal !== null || status.timed_out || status.stop_reason !== null;
+  const publishPaths = !!wrapperError || status.cleanup === "pending";
+  const previews = (stdoutShare: number, stderrShare: number): [PreviewResult, PreviewResult] => {
+    const out = buildPreview(stdout, capture.stdout, stdoutShare, unsuccessful);
+    const err = buildPreview(stderr, capture.stderr, stderrShare, unsuccessful);
+    if (publishPaths) {
+      if (stdout.path) out.details.artifact = stdout.path;
+      if (stderr.path) err.details.artifact = stderr.path;
     }
-    if (previewLimit <= MIN_PREVIEW_BYTES) {
-      throw new Error(`Cannot create a bounded ${tool} result`);
+    return [out, err];
+  };
+  const [fullOut, fullErr] = previews(maxOutputBytes, maxOutputBytes);
+  if (fullOut.details.preview === "complete" && fullErr.details.preview === "complete") {
+    const compact = !unsuccessful && status.cleanup === "complete" && status.stop_reason === null
+      && capture.stdout === "complete" && capture.stderr === "complete";
+    const candidate = renderProcessText(tool, status, fullOut, fullErr, compact, wrapperError);
+    if (Buffer.byteLength(candidate) <= maxOutputBytes) {
+      return processResult(tool, status, artifact, fullOut, fullErr, candidate, maxOutputBytes);
     }
-    previewLimit = Math.max(MIN_PREVIEW_BYTES, Math.floor(previewLimit / 2));
   }
+
+  const reservations = [
+    { ...streamDetails(stdout, capture.stdout), preview: "truncated" as const, ...(stdout.path ? { artifact: stdout.path } : {}) },
+    { ...streamDetails(stderr, capture.stderr), preview: "truncated" as const, ...(stderr.path ? { artifact: stderr.path } : {}) },
+  ];
+  const included = [stdout.totalBytes > 0 || capture.stdout === "incomplete", stderr.totalBytes > 0 || capture.stderr === "incomplete"];
+  const headers = [wrapperError, formatStatusHeader(tool, status, false)];
+  if (included[0]) headers.push(formatStreamHeader("stdout", reservations[0]!, false));
+  if (included[1]) headers.push(formatStreamHeader("stderr", reservations[1]!, false));
+  const overhead = Buffer.byteLength(headers.filter((header): header is string => header !== undefined).join("\n"))
+    + Number(stdout.totalBytes > 0) + Number(stderr.totalBytes > 0);
+  if (overhead > maxOutputBytes) throw new ProcessResultBudgetError();
+  const available = maxOutputBytes - overhead;
+  const outNonempty = stdout.totalBytes > 0;
+  const errNonempty = stderr.totalBytes > 0;
+  let outShare = outNonempty ? (errNonempty ? Math.ceil(available / 2) : available) : 0;
+  let errShare = errNonempty ? (outNonempty ? Math.floor(available / 2) : available) : 0;
+  const outFull = fullDecodedBytes(stdout);
+  const errFull = fullDecodedBytes(stderr);
+  if (outNonempty && errNonempty) {
+    if (outFull <= outShare && errFull > errShare) {
+      errShare += outShare - outFull;
+      outShare = outFull;
+    } else if (errFull <= errShare && outFull > outShare) {
+      outShare += errShare - errFull;
+      errShare = errFull;
+    }
+  }
+  const [out, err] = previews(outShare, errShare);
+  for (const [index, name, preview] of [[0, "stdout", out], [1, "stderr", err]] as const) {
+    if (included[index] && Buffer.byteLength(formatStreamHeader(name, preview.details, false))
+      > Buffer.byteLength(formatStreamHeader(name, reservations[index]!, false))) throw new ProcessResultBudgetError();
+  }
+  return processResult(tool, status, artifact, out, err,
+    renderProcessText(tool, status, out, err, false, wrapperError), maxOutputBytes);
 }
 
 function singleLineErrorMessage(message: string): string {
@@ -314,35 +413,75 @@ function singleLineErrorMessage(message: string): string {
   });
 }
 
-function utf8Prefix(text: string, maxBytes: number): string {
-  let result = "";
+export function boundedProcessErrorMessage(message: string): string {
+  const sanitized = singleLineErrorMessage(message);
+  if (Buffer.byteLength(sanitized) <= MAX_ERROR_MESSAGE_BYTES) return sanitized;
+  let bounded = "";
   let bytes = 0;
-  for (const character of text) {
-    const characterBytes = Buffer.byteLength(character);
-    if (bytes + characterBytes > maxBytes) break;
-    result += character;
-    bytes += characterBytes;
+  for (const character of message) {
+    const escaped = singleLineErrorMessage(character);
+    const nextBytes = Buffer.byteLength(escaped);
+    if (bytes + nextBytes + 3 > MAX_ERROR_MESSAGE_BYTES) break;
+    bounded += escaped;
+    bytes += nextBytes;
   }
-  return result;
+  return `${bounded}…`;
 }
 
-/** Format one bounded wrapper failure with a stable code. */
+/** Keep verified evidence when an unexpected formatter invariant fails. */
+export function formatProcessBudgetFailure(
+  tool: ProcessToolName,
+  process: ProcessEvidence,
+): { text: string; details: ProcessFailureDetails } {
+  const message = "The process did run, but its preview exceeds max_output_bytes. Read its saved output. Do not rerun the command.";
+  const stream = (capture: CapturedProcessStream, state: ProcessCaptureState): ProcessStreamDetails => ({
+    ...streamDetails(capture, state),
+    ...(capture.totalBytes > 0 ? {
+      preview: "truncated", head_preview_bytes: 0, tail_preview_bytes: 0,
+      omitted_captured_raw_bytes: capture.totalBytes,
+    } : {}),
+    ...(capture.path ? { artifact: capture.path } : {}),
+  });
+  return {
+    text: `[${tool} error: RESULT_BUDGET_TOO_SMALL; ${message}]`,
+    details: {
+      ok: false, tool, error: { code: "RESULT_BUDGET_TOO_SMALL", message },
+      process: {
+        ...process.status,
+        stdout: stream(process.stdout, process.capture.stdout),
+        stderr: stream(process.stderr, process.capture.stderr),
+        ...(process.artifact && process.status.cleanup === "complete" ? { artifact: { ...process.artifact } } : {}),
+      },
+    },
+  };
+}
+
+/** Format a wrapper failure inside the same total process-output budget. */
 export function formatProcessFailure(
   tool: ProcessToolName,
   code: string,
   message: string,
+  process?: ProcessEvidence,
+  maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES,
 ): { text: string; details: ProcessFailureDetails } {
-  const prefix = `[${tool} error: ${code}; `;
-  const suffix = "]";
-  const sanitized = singleLineErrorMessage(message);
-  const available = MAX_PROCESS_RESULT_BYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix) - 1;
-  const boundedMessage = Buffer.byteLength(sanitized) <= available
-    ? sanitized
-    : `${utf8Prefix(sanitized, Math.max(0, available - Buffer.byteLength("…")))}…`;
-  return {
-    text: `${prefix}${boundedMessage}${suffix}`,
-    details: { ok: false, tool, error: { code, message: boundedMessage } },
-  };
+  validateOutputBudget(maxOutputBytes);
+  const boundedMessage = boundedProcessErrorMessage(message);
+  const errorText = `[${tool} error: ${code}; ${boundedMessage}]`;
+  if (process) {
+    try {
+      const formatted = formatProcessResult(
+        tool, process.status, process.artifact, process.stdout, process.stderr, process.capture, maxOutputBytes, errorText,
+      );
+      return {
+        text: formatted.text,
+        details: { ok: false, tool, error: { code, message: boundedMessage }, process: nestedProcessSnapshot(formatted.details) },
+      };
+    } catch {
+      return formatProcessBudgetFailure(tool, process);
+    }
+  }
+  if (Buffer.byteLength(errorText) > maxOutputBytes) throw new ProcessResultBudgetError();
+  return { text: errorText, details: { ok: false, tool, error: { code, message: boundedMessage } } };
 }
 
 /** Test whether process details report a wrapper failure. */

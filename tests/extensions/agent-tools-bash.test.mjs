@@ -41,8 +41,8 @@ async function withDirectory(callback) {
 }
 
 async function removeArtifact(result) {
-  if (result.ok && result.artifact) {
-    await rm(result.artifact.directory, { recursive: true, force: true });
+  if ((result.process ?? result).artifact) {
+    await rm((result.process ?? result).artifact.directory, { recursive: true, force: true });
   }
 }
 
@@ -76,7 +76,7 @@ test("bash treats null optional fields as defaults without changing the caller's
   assert.deepEqual(tool.prepareArguments(input), { command: "printf ok" });
   assert.deepEqual(validateToolArguments(tool, { id: "call", name: "bash", arguments: tool.prepareArguments(input) }), { command: "printf ok" });
   assert.equal(input.cwd, null);
-  assert.deepEqual(bashModule.normalizeInput(input), { command: "printf ok", timeoutSeconds: 120 });
+  assert.deepEqual(bashModule.normalizeInput(input), { command: "printf ok", timeoutSeconds: 120, maxOutputBytes: 8192, background: false });
   const result = await execute(tool, input, process.cwd());
   assert.equal(result.ok, true);
   assert.match(result.text, /ok/);
@@ -190,7 +190,7 @@ test("bash formats empty and separate streams", async () => {
       assert.equal(both.stdout.capture, "complete");
       assert.equal(both.stderr.capture, "complete");
       assert.equal(JSON.stringify(both.stdout).includes("out"), false);
-      assert.ok(Buffer.byteLength(both.text) < 48 * 1024);
+      assert.ok(Buffer.byteLength(both.text) <= 8192);
     } finally {
       await Promise.all([empty, stdout, stderr, both].map(removeArtifact));
     }
@@ -212,34 +212,16 @@ test("bash keeps terminal sequences in the tool result", async () => {
   });
 });
 
-test("bash retains owner-only exact artifacts but hides small paths from model content", async () => {
+test("bash removes small complete artifacts", async () => {
   await withDirectory(async (directory) => {
-    const result = await execute(
-      bashModule.createAgentBashTool(),
-      { command: "printf 'out\\n'; printf 'err\\n' >&2" },
-      directory,
-    );
-    try {
-      assert.doesNotMatch(result.text, new RegExp(result.artifact.directory));
-      assert.equal((await stat(result.artifact.directory)).mode & 0o777, 0o700);
-      assert.equal((await stat(result.artifact.stdout_path)).mode & 0o777, 0o600);
-      assert.equal(await readFile(result.artifact.stdout_path, "utf8"), "out\n");
-      assert.equal(await readFile(result.artifact.stderr_path, "utf8"), "err\n");
-      const metadata = JSON.parse(await readFile(result.artifact.metadata_path, "utf8"));
-      assert.equal(metadata.streams_complete, true);
-      assert.equal(metadata.stdout.bytes, 4);
-      assert.equal(metadata.stderr.bytes, 4);
-      assert.equal("command" in metadata, false);
-
-      const page = await executeTool(
-        readModule.createAgentReadTool(),
-        { path: result.artifact.stdout_path },
-        directory,
-      );
-      assert.equal(page.content[0].text, "out\n\n[lines 1-1; next_start_line=null; eof=true]");
-    } finally {
-      await removeArtifact(result);
-    }
+    let artifact;
+    const result = await execute(bashModule.createAgentBashTool({ onArtifactCreated: (created) => { artifact = created; } }),
+      { command: "printf 'out\n'; printf 'err\n' >&2" }, directory);
+    assert.equal(result.artifact, undefined);
+    assert.equal(result.stdout.artifact, undefined);
+    assert.equal(result.stop_reason, null);
+    assert.equal(result.cleanup, "complete");
+    await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
   });
 });
 
@@ -277,13 +259,22 @@ test("bash preserves head and tail with a bounded artifact-backed preview", asyn
       assert.match(result.text, /\[process preview omitted: \d+ captured raw bytes\]/);
       assert.match(result.text, /TAIL\n$/);
       assert.match(result.text, new RegExp(`artifact=${result.artifact.stdout_path}`));
-      assert.match(result.text, new RegExp(`preview_bytes=${result.stdout.preview_bytes}`));
-      assert.match(result.text, new RegExp(`head_preview_bytes=${result.stdout.head_preview_bytes}`));
-      assert.match(result.text, new RegExp(`tail_preview_bytes=${result.stdout.tail_preview_bytes}`));
-      assert.ok(Buffer.byteLength(result.text) < 48 * 1024);
+      assert.doesNotMatch(result.text, /head_preview_bytes=|tail_preview_bytes=|captured_lines=/);
+      assert.ok(result.stdout.head_preview_bytes > 0);
+      assert.ok(result.stdout.tail_preview_bytes > 0);
+      assert.ok(Buffer.byteLength(result.text) <= 8192);
       const exact = await readFile(result.artifact.stdout_path, "utf8");
       assert.match(exact, /^HEAD\n/);
       assert.match(exact, /TAIL\n$/);
+      const metadata = JSON.parse(await readFile(result.artifact.metadata_path, "utf8"));
+      assert.equal(metadata.streams_complete, true);
+      assert.equal(metadata.stdout.bytes, Buffer.byteLength(exact));
+      assert.equal(metadata.expires_at, result.artifact.expires_at);
+      assert.equal("command" in metadata, false);
+      const page = await executeTool(readModule.createAgentReadTool(), {
+        path: result.artifact.stdout_path, max_lines: 1, show_line_numbers: false,
+      }, directory);
+      assert.match(page.content[0].text, /^HEAD\n/);
     } finally {
       await removeArtifact(result);
     }
@@ -315,13 +306,13 @@ test("bash streams bounded incomplete progress updates", async () => {
     );
     try {
       assert.ok(updates.length >= 2);
-      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) < 48 * 1024));
+      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) <= 8192));
       assert.equal(updates[0].details.stdout.capture, "incomplete");
       assert.ok(updates.some((update) => /start\n/.test(update.content[0].text)));
       assert.equal(toolResult.details.stdout.capture, "complete");
       assert.match(toolResult.content[0].text, /start\nend\n$/);
     } finally {
-      await rm(toolResult.details.artifact.directory, { recursive: true, force: true });
+      await removeArtifact(toolResult.details);
     }
   });
 });
@@ -396,7 +387,7 @@ test("bash reports final incomplete capture per stream", async () => {
       assert.equal(result.stderr.capture, "complete");
       assert.equal(result.stdout.artifact, result.artifact.stdout_path);
       assert.equal(result.stderr.artifact, undefined);
-      assert.match(result.text, /\[stdout: capture=incomplete; preview=complete; captured_raw_bytes=0; captured_lines=0; preview_bytes=0; artifact=/);
+      assert.match(result.text, /\[stdout: capture=incomplete; preview=complete; captured_raw_bytes=0; artifact=/);
       assert.doesNotMatch(result.text, /\[stderr:/);
       assert.equal((await readFile(result.artifact.stdout_path)).length, 0);
     } finally {
@@ -434,7 +425,9 @@ test("bash returns stable failures for cancellation and validation", async () =>
     setTimeout(() => controller.abort(), 25);
     const cancelled = await pending;
     assert.deepEqual(cancelled.error, { code: "CANCELLED", message: "Bash command was cancelled" });
-    assert.equal(cancelled.text, "[bash error: CANCELLED; Bash command was cancelled]");
+    assert.match(cancelled.text, /^\[bash error: CANCELLED; Bash command was cancelled\]\n\[bash:/);
+    assert.equal(cancelled.process.stop_reason, "cancelled");
+    assert.equal(cancelled.process.cleanup, "complete");
 
     for (const [input, code] of [
       [{ command: "   " }, "INVALID_INPUT"],
@@ -454,7 +447,7 @@ test("bash enforces owner modes under a restrictive umask", async () => {
     const previous = process.umask(0o777);
     let result;
     try {
-      result = await execute(bashModule.createAgentBashTool(), { command: "true" }, directory);
+      result = await execute(bashModule.createAgentBashTool(), { command: "head -c 20000 /dev/zero" }, directory);
       assert.equal((await stat(result.artifact.directory)).mode & 0o777, 0o700);
       assert.equal((await stat(result.artifact.stdout_path)).mode & 0o777, 0o600);
       assert.equal((await stat(result.artifact.stderr_path)).mode & 0o777, 0o600);
@@ -469,7 +462,7 @@ test("bash enforces owner modes under a restrictive umask", async () => {
 test("bash clears cleanup timers after a fast command", () => {
   const moduleUrl = new URL("../../extensions/agent-tools/bash.ts", import.meta.url).href;
   const script = `
-    import { rm } from "node:fs/promises";
+    import assert from "node:assert/strict";
     const { createAgentBashTool } = await import(${JSON.stringify(moduleUrl)});
     const result = await createAgentBashTool().execute(
       "timer-test",
@@ -483,7 +476,7 @@ test("bash clears cleanup timers after a fast command", () => {
         sessionManager: { getSessionId: () => "timer-test", getSessionFile: () => undefined },
       },
     );
-    await rm(result.details.artifact.directory, { recursive: true, force: true });
+    assert.equal(result.details.artifact, undefined);
   `;
   const child = spawnSync(
     process.execPath,
@@ -504,6 +497,7 @@ test("bash stops at the full-capture limit", async () => {
     assert.equal(result.ok, false);
     assert.equal(result.error.code, "OUTPUT_LIMIT");
     assert.match(result.text, /^\[bash error: OUTPUT_LIMIT;/);
+    await removeArtifact(result);
   });
 });
 
@@ -529,6 +523,7 @@ test("bash retains the output-limit result when SIGTERM races a finished group",
       assert.equal(injected, true);
       assert.equal(result.ok, false);
       assert.equal(result.error.code, "OUTPUT_LIMIT");
+      await removeArtifact(result);
     } finally {
       process.kill = originalKill;
     }

@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { access, stat, writeFile } from "node:fs/promises";
 import path, { delimiter } from "node:path";
 import { Type, type Static } from "typebox";
+import { Text } from "@earendil-works/pi-tui";
+import { omitNullOptionalFields, prepareInputArguments } from "./optional-input.ts";
 import {
   createFindToolDefinition,
   createGrepToolDefinition,
@@ -24,14 +26,20 @@ import {
 
 const MAX_SEARCH_TEXT_BYTES = 50 * 1024;
 const MAX_SEARCH_CAPTURE_BYTES = 64 * 1024 * 1024;
-const DEFAULT_FIND_LIMIT = 1_000;
-const DEFAULT_GREP_LIMIT = 100;
+const DEFAULT_FIND_LIMIT = 100;
+const DEFAULT_GREP_LIMIT = 50;
+const DEFAULT_GREP_FILES_LIMIT = 100;
+const MAX_SEARCH_LIMIT = 2_147_483_647;
+const MAX_GREP_CONTEXT = 200;
+const FIND_OPTIONAL_FIELDS = ["path", "include_ignored", "limit"];
+const GREP_OPTIONAL_FIELDS = ["path", "glob", "ignore_case", "literal", "context", "limit", "mode", "include_ignored"];
 
 const findParameters = Type.Object({
   pattern: Type.String({ description: "Glob pattern, for example '*.ts', '**/*.json', or 'src/**/*.spec.ts'" }),
   path: Type.Optional(Type.String({ description: "Search directory (default: current directory)" })),
-  limit: Type.Optional(Type.Number({ description: "Result limit (default: 1000)" })),
-});
+  include_ignored: Type.Optional(Type.Boolean({ description: "Include ignored files, except .git descendants (default false)" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Preview limit (default: 100)" })),
+}, { additionalProperties: false });
 
 const grepParameters = Type.Object({
   pattern: Type.String({ description: "Regex by default; set literal=true for exact text" }),
@@ -39,18 +47,22 @@ const grepParameters = Type.Object({
   glob: Type.Optional(Type.String({ description: "File glob, for example '*.ts' or '**/*.spec.ts'" })),
   ignore_case: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default false)" })),
   literal: Type.Optional(Type.Boolean({ description: "Exact text instead of regex (default false)" })),
-  context: Type.Optional(Type.Number({ description: "Lines before and after each match (default 0)" })),
-  limit: Type.Optional(Type.Number({ description: "Match limit (default 100)" })),
-});
+  mode: Type.Optional(Type.Union([Type.Literal("content"), Type.Literal("files"), Type.Literal("count"), Type.Literal("exists")], { description: "Output mode (default: content)" })),
+  include_ignored: Type.Optional(Type.Boolean({ description: "Include ignored files, except .git descendants (default false)" })),
+  context: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_GREP_CONTEXT, description: "Content lines before and after each match (default 0)" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_SEARCH_LIMIT, description: "Preview limit (content: 50; files/count: 100); not valid for exists" })),
+}, { additionalProperties: false });
 
 export type AgentFindInput = Static<typeof findParameters>;
 export type AgentGrepInput = Static<typeof grepParameters>;
 
-const FIND_DESCRIPTION = "Find paths by glob. Regular-file results work with read. Respects .gitignore. Default: 1,000 results. Preview cap: 50 KiB. Truncated results provide a complete plain-text artifact when capture succeeds.";
-const GREP_DESCRIPTION = "Search file contents with a regex; set literal=true for exact text. Results are grouped under paths usable by read; each artifact record includes its path. Respects .gitignore. Default: 100 matches. Preview cap: 50 KiB; line cap: 500 characters. Truncated results provide a complete plain-text artifact when capture succeeds.";
+const FIND_DESCRIPTION = "Find paths by glob. Regular-file results work with read. Respects .gitignore. Default: 100 paths. Preview cap: 50 KiB. Truncated results provide a complete plain-text artifact when capture succeeds.";
+const GREP_DESCRIPTION = "Search by regex or literal text. Modes: content, files, count (matching lines), exists. Results use paths usable by read. Respects ignore files; include_ignored excludes only .git descendants. Defaults: 50 content matches; 100 files/count records. Preview cap: 50 KiB; line cap: 500 characters. Truncated results provide a complete plain-text artifact when capture succeeds.";
 
 type SearchCaptureState = "complete" | "incomplete";
 type SearchToolName = "find" | "grep";
+type GrepMode = "content" | "files" | "count" | "exists";
+type SearchOutputMode = "find" | Exclude<GrepMode, "exists">;
 
 export interface AgentFindToolOptions extends FindToolOptions {
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
@@ -94,10 +106,17 @@ export type AgentFindToolDetails = SearchSuccessDetails<"find"> & {
   result_limit?: number;
 };
 
-export type AgentGrepToolDetails = SearchSuccessDetails<"grep"> & {
-  match_limit?: number;
-  lines_truncated?: boolean;
-};
+export type AgentGrepToolDetails = SearchSuccessDetails<"grep"> & (
+  | { mode: "content"; match_limit?: number; lines_truncated?: boolean }
+  | { mode: "files" }
+  | {
+    mode: "count";
+    counts: { path: string; matching_lines: number }[];
+    total_matching_lines: number | null;
+    captured_matching_lines: number;
+  }
+  | { mode: "exists"; exists: boolean; termination: "match" | "eof" }
+);
 
 export type AgentFindResultDetails = AgentFindToolDetails | ToolFailureDetails<"find", SearchErrorCode>;
 export type AgentGrepResultDetails = AgentGrepToolDetails | ToolFailureDetails<"grep", SearchErrorCode>;
@@ -106,6 +125,7 @@ interface SearchRecord {
   text: string;
   readPath: string;
   match: boolean;
+  matchingLines?: number;
   sourceText?: string;
   lineNumber?: number;
   separator?: ":" | "-";
@@ -134,49 +154,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function prepareFindArguments(rawInput: unknown): AgentFindInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { pattern: "\0" };
-  if (typeof prepared.pattern !== "string") prepared.pattern = "\0";
-  if (prepared.path !== undefined && typeof prepared.path !== "string") prepared.path = "\0";
-  if (prepared.limit !== undefined && typeof prepared.limit !== "number") prepared.limit = -1;
-  return prepared as AgentFindInput;
+  return prepareInputArguments(rawInput, FIND_OPTIONAL_FIELDS, normalizeFindInput);
 }
 
 function prepareGrepArguments(rawInput: unknown): AgentGrepInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { pattern: "\0" };
-  if (typeof prepared.pattern !== "string") prepared.pattern = "\0";
-  if (prepared.path !== undefined && typeof prepared.path !== "string") prepared.path = "\0";
-  if (prepared.glob !== undefined && typeof prepared.glob !== "string") prepared.glob = "\0";
-  if (prepared.context !== undefined && typeof prepared.context !== "number") prepared.context = -1;
-  if (prepared.limit !== undefined && typeof prepared.limit !== "number") prepared.limit = -1;
-  for (const field of ["ignore_case", "literal"] as const) {
-    if (prepared[field] !== undefined && typeof prepared[field] !== "boolean") {
-      prepared[field] = false;
-      prepared.limit = -1;
-    }
-  }
-  return prepared as AgentGrepInput;
+  return prepareInputArguments(rawInput, GREP_OPTIONAL_FIELDS, normalizeGrepInput);
 }
 
 function normalizeFindInput(rawInput: unknown): AgentFindInput {
+  rawInput = omitNullOptionalFields(rawInput, FIND_OPTIONAL_FIELDS);
   if (!isRecord(rawInput)) throw new Error("Input must be an object");
-  const allowed = new Set(["pattern", "path", "limit"]);
+  const allowed = new Set(["pattern", ...FIND_OPTIONAL_FIELDS]);
   const unknown = Object.keys(rawInput).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`Unknown input field: ${unknown}`);
+  if (unknown !== undefined) throw new Error(`Unknown input field: ${unknown}`);
   if (typeof rawInput.pattern !== "string" || rawInput.pattern.includes("\0")) {
     throw new Error("pattern must be a string without NUL");
   }
   if (rawInput.path !== undefined && (typeof rawInput.path !== "string" || rawInput.path.includes("\0"))) {
     throw new Error("path must be a string without NUL");
   }
-  if (rawInput.limit !== undefined && typeof rawInput.limit !== "number") throw new Error("limit must be a number");
-  return rawInput as AgentFindInput;
+  if (rawInput.include_ignored !== undefined && typeof rawInput.include_ignored !== "boolean") {
+    throw new Error("include_ignored must be a boolean");
+  }
+  return { ...rawInput, include_ignored: rawInput.include_ignored ?? false, limit: normalizeLimit(rawInput.limit, DEFAULT_FIND_LIMIT) } as AgentFindInput;
 }
 
 function normalizeGrepInput(rawInput: unknown): AgentGrepInput {
+  rawInput = omitNullOptionalFields(rawInput, GREP_OPTIONAL_FIELDS);
   if (!isRecord(rawInput)) throw new Error("Input must be an object");
-  const allowed = new Set(["pattern", "path", "glob", "ignore_case", "literal", "context", "limit"]);
+  const allowed = new Set(["pattern", ...GREP_OPTIONAL_FIELDS]);
   const unknown = Object.keys(rawInput).find((key) => !allowed.has(key));
-  if (unknown) throw new Error(`Unknown input field: ${unknown}`);
+  if (unknown !== undefined) throw new Error(`Unknown input field: ${unknown}`);
   if (typeof rawInput.pattern !== "string" || rawInput.pattern.includes("\0")) {
     throw new Error("pattern must be a string without NUL");
   }
@@ -192,12 +200,36 @@ function normalizeGrepInput(rawInput: unknown): AgentGrepInput {
   if (rawInput.literal !== undefined && typeof rawInput.literal !== "boolean") throw new Error("literal must be a boolean");
   if (
     rawInput.context !== undefined
-    && (typeof rawInput.context !== "number" || !Number.isFinite(rawInput.context) || rawInput.context < 0)
+    && (!Number.isSafeInteger(rawInput.context) || (rawInput.context as number) < 0 || (rawInput.context as number) > MAX_GREP_CONTEXT)
   ) {
-    throw new Error("context must be a nonnegative number");
+    throw new Error("context must be an integer from 0 through 200");
   }
-  if (rawInput.limit !== undefined && typeof rawInput.limit !== "number") throw new Error("limit must be a number");
-  return rawInput as AgentGrepInput;
+  const mode = rawInput.mode ?? "content";
+  if (typeof mode !== "string" || !["content", "files", "count", "exists"].includes(mode)) {
+    throw new Error("mode must be content, files, count, or exists");
+  }
+  if (rawInput.include_ignored !== undefined && typeof rawInput.include_ignored !== "boolean") {
+    throw new Error("include_ignored must be a boolean");
+  }
+  if (mode !== "content" && ((rawInput.context as number | undefined) ?? 0) > 0) {
+    throw new Error("context must be zero or omitted outside content mode");
+  }
+  if (mode === "exists" && rawInput.limit !== undefined) throw new Error("limit must be omitted in exists mode");
+  return {
+    ...rawInput,
+    mode,
+    include_ignored: rawInput.include_ignored ?? false,
+    context: rawInput.context ?? 0,
+    ...(mode === "exists" ? {} : { limit: normalizeLimit(rawInput.limit, mode === "content" ? DEFAULT_GREP_LIMIT : DEFAULT_GREP_FILES_LIMIT) }),
+  } as AgentGrepInput;
+}
+
+function boundedErrorMessage(message: string): string {
+  const bytes = Buffer.from(message, "utf8");
+  if (bytes.length <= 4_096) return message;
+  let end = 4_093;
+  while (end > 0 && decodeUtf8(bytes.subarray(0, end)) === undefined) end -= 1;
+  return bytes.subarray(0, end).toString("utf8") + "...";
 }
 
 function singleLineErrorMessage(message: string): string {
@@ -227,14 +259,14 @@ function searchFailure<ToolName extends SearchToolName>(
   const message = error instanceof Error ? error.message : String(error);
   const code: SearchErrorCode = signal?.aborted || message === "Operation aborted"
     ? "CANCELLED"
-    : /^(Input must|Unknown input field|Invalid regular expression|pattern must|path must|glob must|ignore_case must|literal must|context must|limit must)/.test(message)
+    : /^(Input must|Unknown input field|Invalid regular expression|pattern must|path must|glob must|ignore_case must|literal must|context must|limit must|mode must|include_ignored must)/.test(message)
       ? "INVALID_INPUT"
       : /Cannot find/.test(message)
         ? "EXECUTABLE_NOT_FOUND"
         : /artifact/i.test(message)
           ? "ARTIFACT_FAILED"
           : "SEARCH_FAILED";
-  const bounded = Buffer.byteLength(message) <= 4_096 ? message : `${message.slice(0, 4_093)}...`;
+  const bounded = boundedErrorMessage(message);
   return {
     content: [{ type: "text", text: `[${tool} error: ${code}; ${singleLineErrorMessage(bounded)}]` }],
     details: { ok: false, tool, error: { code, message: bounded } },
@@ -253,10 +285,10 @@ function normalizeSearchRoot(value: unknown, cwd: string): string {
 
 function normalizeLimit(value: unknown, fallback: number): number {
   if (value === undefined) return fallback;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 1) {
-    throw new Error("limit must be a positive number");
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > MAX_SEARCH_LIMIT) {
+    throw new Error("limit must be an integer from 1 through 2147483647");
   }
-  return Math.max(1, Math.floor(value));
+  return value as number;
 }
 
 function slashPath(value: string): string {
@@ -280,7 +312,10 @@ export function toSessionReadPath(resultPath: string, searchRoot: string, cwd: s
 
 /** Return true when one plain-text artifact line can represent one path without loss. */
 export function isComposableFindPathRecord(record: string): boolean {
-  return !record.includes("\n")
+  return record.length > 0
+    && !record.includes("\0")
+    && Buffer.from(record, "utf8").toString("utf8") === record
+    && !record.includes("\n")
     && !record.includes("\r")
     && record.trim() === record;
 }
@@ -370,22 +405,34 @@ async function writeSearchArtifact(
   };
 }
 
+function capturedMatchingLines(capture: SearchCapture): number {
+  return capture.records.reduce((sum, record) => sum + (record.matchingLines ?? 0), 0);
+}
+
 function footerFor(
-  tool: SearchToolName,
+  mode: SearchOutputMode,
   shown: number,
   total: number,
   byteTruncated: boolean,
   lineTruncated: boolean,
-  artifact: SearchArtifactDetails,
+  capture: SearchCapture,
+  artifact?: SearchArtifactDetails,
 ): string {
-  const fields = [
-    `${tool === "find" ? "results" : "matches"}=${shown}/${total}`,
-    `preview=${shown < total || byteTruncated || lineTruncated ? "truncated" : "complete"}`,
-  ];
+  const tool = mode === "find" ? "find" : "grep";
+  const unit = mode === "find" ? "results" : mode === "content" ? "matches" : "files";
+  const fields = mode === "find" ? [] : [`mode=${mode}`];
+  fields.push(`${unit}=${shown}/${total}`);
+  if (mode === "count") {
+    fields.push(`matching_lines=${capture.complete ? capturedMatchingLines(capture) : "unknown"}`);
+    if (!capture.complete) fields.push(`captured_matching_lines=${capturedMatchingLines(capture)}`);
+  }
+  fields.push(`preview=${shown < total || byteTruncated || lineTruncated ? "truncated" : "complete"}`);
   if (byteTruncated) fields.push("limit=50KiB");
   if (lineTruncated) fields.push("lines_truncated=true");
-  fields.push(`capture=${artifact.capture}`);
-  fields.push(`artifact=${artifact.path}`);
+  fields.push(`capture=${capture.complete ? "complete" : "incomplete"}`);
+  if (!capture.complete) fields.push("counts=lower_bounds");
+  if (artifact) fields.push(`artifact=${artifact.path}`);
+  if (capture.captureError) fields.push(`search_error=${singleLineErrorMessage(boundedErrorMessage(capture.captureError))}`);
   return `[${tool}: ${fields.join("; ")}]`;
 }
 
@@ -398,8 +445,7 @@ function fitPreviewLines(
   let bytes = 0;
   for (const item of rendered) {
     const lineBytes = Buffer.byteLength(item.text) + (selected.length > 0 ? 1 : 0);
-    const separatorBytes = 2;
-    if (bytes + lineBytes + separatorBytes + footerBytes > MAX_SEARCH_TEXT_BYTES) break;
+    if (bytes + lineBytes + 2 + footerBytes > MAX_SEARCH_TEXT_BYTES) break;
     selected.push(item);
     bytes += lineBytes;
   }
@@ -410,12 +456,12 @@ function fitPreviewLines(
   };
 }
 
-function countShown(tool: SearchToolName, records: SearchRecord[]): number {
-  return tool === "find" ? records.length : records.filter((record) => record.match).length;
+function countShown(mode: SearchOutputMode, records: SearchRecord[]): number {
+  return mode === "content" ? records.filter((record) => record.match).length : records.length;
 }
 
 function buildPreview(
-  tool: SearchToolName,
+  mode: SearchOutputMode,
   capture: SearchCapture,
   limit: number,
   totalMatches: number,
@@ -424,15 +470,12 @@ function buildPreview(
   const limitedRecords: SearchRecord[] = [];
   let selectedMatches = 0;
   for (const record of capture.records) {
-    if (tool === "grep" && record.match) {
+    if (mode !== "content" || record.match) {
       if (selectedMatches >= limit) break;
       selectedMatches += 1;
-    } else if (tool === "find" && limitedRecords.length >= limit) {
-      break;
     }
     limitedRecords.push(record);
   }
-  if (tool === "find") selectedMatches = limitedRecords.length;
 
   let lineTruncated = false;
   let previousGrepPath: string | undefined;
@@ -455,25 +498,20 @@ function buildPreview(
   let byteTruncated = Buffer.byteLength(rawText) > MAX_SEARCH_TEXT_BYTES;
   const needsArtifact = previewLimited || byteTruncated || lineTruncated || !capture.complete;
 
-  if (!needsArtifact) {
-    return {
-      text: rawText,
-      outputRecords: limitedRecords,
-      byteTruncated: false,
-      lineTruncated: false,
-    };
+  if (!needsArtifact && mode !== "count") {
+    return { text: rawText, outputRecords: limitedRecords, byteTruncated: false, lineTruncated: false };
   }
 
-  let shown = selectedMatches;
-  let fitted = fitPreviewLines(
-    rendered,
-    footerFor(tool, shown, totalMatches, byteTruncated, lineTruncated, artifact),
+  const makeFooter = (shown: number): string => footerFor(
+    mode, shown, totalMatches, byteTruncated, lineTruncated, capture,
+    previewLimited || byteTruncated || lineTruncated || !capture.complete ? artifact : undefined,
   );
+  let shown = selectedMatches;
+  let fitted = fitPreviewLines(rendered, makeFooter(shown));
   for (let pass = 0; pass < 4; pass += 1) {
     if (fitted.outputRecords.length < rendered.length) byteTruncated = true;
-    const nextShown = countShown(tool, fitted.outputRecords);
-    const footer = footerFor(tool, nextShown, totalMatches, byteTruncated, lineTruncated, artifact);
-    const next = fitPreviewLines(rendered, footer);
+    const nextShown = countShown(mode, fitted.outputRecords);
+    const next = fitPreviewLines(rendered, makeFooter(nextShown));
     if (nextShown === shown && next.outputRecords.length === fitted.outputRecords.length) {
       fitted = next;
       break;
@@ -507,7 +545,7 @@ function buildPreview(
 
 function decodeUtf8(data: Buffer): string | undefined {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(data);
   } catch {
     return undefined;
   }
@@ -586,6 +624,154 @@ async function isInsideGitRepository(searchRoot: string): Promise<boolean> {
   }
 }
 
+interface SearchByteProtocol {
+  pendingBytes(): number;
+  push(chunk: Buffer): boolean;
+  finish(): void;
+}
+
+function malformedProtocol(capture: SearchCapture, reason: string): void {
+  capture.complete = false;
+  capture.malformedRecords += 1;
+  capture.captureError ??= `Malformed search protocol: ${reason}`;
+}
+
+function unsupportedPath(capture: SearchCapture): void {
+  capture.complete = false;
+  capture.unsupportedRecords += 1;
+}
+
+function normalizeRecordPath(
+  nativePath: string | undefined,
+  executionCwd: string,
+  cwd: string,
+  capture: SearchCapture,
+): string | undefined {
+  if (nativePath === undefined || !isComposableFindPathRecord(nativePath)) {
+    unsupportedPath(capture);
+    return undefined;
+  }
+  const readPath = toSessionReadPath(nativePath, executionCwd, cwd);
+  if (!isComposableFindPathRecord(readPath)) {
+    unsupportedPath(capture);
+    return undefined;
+  }
+  return readPath;
+}
+
+/** Keep partial byte records until their native delimiter arrives. */
+function createByteProtocol(
+  capture: SearchCapture,
+  delimiter: () => number,
+  consume: (frame: Buffer) => boolean,
+  extraPendingBytes: () => number = () => 0,
+): SearchByteProtocol {
+  let parts: Buffer[] = [];
+  let bytes = 0;
+  return {
+    pendingBytes: () => bytes + extraPendingBytes(),
+    push(chunk) {
+      let offset = 0;
+      while (offset < chunk.length) {
+        const end = chunk.indexOf(delimiter(), offset);
+        const part = chunk.subarray(offset, end < 0 ? chunk.length : end);
+        if (capture.bytes + bytes + extraPendingBytes() + part.length > MAX_SEARCH_CAPTURE_BYTES) return false;
+        if (part.length > 0) {
+          parts.push(part);
+          bytes += part.length;
+        }
+        if (end < 0) break;
+        const frame = Buffer.concat(parts, bytes);
+        parts = [];
+        bytes = 0;
+        if (!consume(frame)) return false;
+        offset = end + 1;
+      }
+      return true;
+    },
+    finish() {
+      if (bytes + extraPendingBytes() > 0) malformedProtocol(capture, "unfinished record");
+      parts = [];
+      bytes = 0;
+    },
+  };
+}
+
+async function runSearchCapture(
+  executable: string,
+  args: string[],
+  executionCwd: string,
+  capture: SearchCapture,
+  signal: AbortSignal | undefined,
+  protocol: SearchByteProtocol | undefined,
+  nativeTool: "fd" | "ripgrep",
+): Promise<number> {
+  if (signal?.aborted) throw new Error("Operation aborted");
+  return new Promise<number>((resolveRun, rejectRun) => {
+    const child = spawn(executable, args, {
+      cwd: executionCwd,
+      stdio: ["ignore", protocol ? "pipe" : "ignore", "pipe"],
+    });
+    let rawBytes = 0;
+    let stderr = Buffer.alloc(0);
+    let stoppedForLimit = false;
+    let aborted = false;
+    let spawnError: Error | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    const stop = (): void => {
+      stopChild(child);
+      killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
+    };
+    const onAbort = (): void => {
+      aborted = true;
+      stop();
+    };
+    const limitStop = (): void => {
+      capture.complete = false;
+      capture.stoppedAtLimit = true;
+      stoppedForLimit = true;
+      stop();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stoppedForLimit || aborted || !protocol) return;
+      const available = Math.max(0, Math.min(
+        MAX_SEARCH_CAPTURE_BYTES - rawBytes,
+        MAX_SEARCH_CAPTURE_BYTES - capture.bytes - protocol.pendingBytes(),
+      ));
+      const selected = chunk.subarray(0, available);
+      rawBytes += selected.length;
+      if (!protocol.push(selected) || selected.length < chunk.length) limitStop();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const available = Math.max(0, 16_384 - stderr.length);
+      if (available > 0) stderr = Buffer.concat([stderr, chunk.subarray(0, available)]);
+    });
+    child.once("error", (error) => { spawnError = new Error(`Failed to run ${nativeTool}: ${error.message}`); });
+    child.once("close", (code, childSignal) => {
+      if (killTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", onAbort);
+      if (aborted || signal?.aborted) return rejectRun(new Error("Operation aborted"));
+      if (spawnError) return rejectRun(spawnError);
+      protocol?.finish();
+      const validCode = code === 0 || (nativeTool === "ripgrep" && code === 1);
+      if (!stoppedForLimit && (childSignal !== null || !validCode)) {
+        const message = stderr.toString("utf8").trim()
+          || (childSignal ? `${nativeTool} terminated by ${childSignal}` : `${nativeTool} exited with code ${code}`);
+        const diagnostic = nativeTool === "ripgrep" ? regexParseError(message) ?? message : message;
+        if (!protocol || capture.records.length === 0) return rejectRun(new Error(diagnostic));
+        capture.complete = false;
+        capture.captureError = diagnostic;
+      }
+      if (capture.malformedRecords > 0 && capture.records.length === 0 && !stoppedForLimit) {
+        return rejectRun(new Error(capture.captureError ?? "Malformed search protocol"));
+      }
+      resolveRun(code ?? 0);
+    });
+  });
+}
+
 async function captureFindWithFd(
   pattern: string,
   searchRoot: string,
@@ -593,10 +779,13 @@ async function captureFindWithFd(
   capture: SearchCapture,
   signal: AbortSignal | undefined,
   configuredExecutable: string | undefined,
+  includeIgnored: boolean,
 ): Promise<void> {
   const info = await stat(searchRoot).catch(() => undefined);
   if (!info?.isDirectory()) throw new Error(`Path not found: ${searchRoot}`);
-  const args = ["--glob", "--color=never", "--hidden", "--print0", "--exclude", ".git", "--exclude", "node_modules"];
+  const args = ["--glob", "--color=never", "--hidden", "--print0", "--exclude", ".git"];
+  if (includeIgnored) args.push("--no-ignore");
+  else args.push("--exclude", "node_modules");
   if (!await isInsideGitRepository(searchRoot)) args.push("--no-require-git");
   let effectivePattern = pattern;
   if (pattern.includes("/")) {
@@ -607,76 +796,19 @@ async function captureFindWithFd(
   }
   args.push("--", effectivePattern, searchRoot);
   const executable = await resolveSearchExecutable(configuredExecutable, ["fd", "fdfind"], cwd);
-
-  await new Promise<void>((resolveRun, rejectRun) => {
-    const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let pending = Buffer.alloc(0);
-    let stderr = "";
-    let stoppedForLimit = false;
-    let aborted = false;
-    let killTimer: NodeJS.Timeout | undefined;
-    let settled = false;
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      if (killTimer) clearTimeout(killTimer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error) rejectRun(error);
-      else resolveRun();
-    };
-    const onAbort = (): void => {
-      aborted = true;
-      stopChild(child);
-      killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-    child.stdout?.on("data", (chunk: Buffer) => {
-      pending = Buffer.concat([pending, Buffer.from(chunk)]);
-      while (true) {
-        const delimiter = pending.indexOf(0);
-        if (delimiter < 0) break;
-        const raw = pending.subarray(0, delimiter);
-        pending = pending.subarray(delimiter + 1);
-        if (raw.length === 0) continue;
-        const decoded = decodeUtf8(raw);
-        if (decoded === undefined) {
-          capture.complete = false;
-          capture.unsupportedRecords += 1;
-          continue;
-        }
-        const readPath = toSessionReadPath(decoded, searchRoot, cwd);
-        if (!appendSearchRecord(capture, { text: readPath, readPath, match: true })) {
-          stoppedForLimit = true;
-          stopChild(child);
-          killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
-          break;
-        }
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < 16_384) stderr += chunk.toString("utf8");
-    });
-    child.once("error", (error) => finish(new Error(`Failed to run fd: ${error.message}`)));
-    child.once("close", (code) => {
-      if (aborted || signal?.aborted) return finish(new Error("Operation aborted"));
-      if (pending.length > 0) {
-        capture.complete = false;
-        capture.malformedRecords += 1;
-      }
-      if (!stoppedForLimit && code !== 0) {
-        const message = stderr.trim() || `fd exited with code ${code}`;
-        if (capture.records.length === 0) return finish(new Error(message));
-        capture.complete = false;
-        capture.captureError = message;
-      }
-      finish();
-    });
+  const protocol = createByteProtocol(capture, () => 0, (frame) => {
+    if (frame.length === 0) {
+      malformedProtocol(capture, "empty path");
+      return true;
+    }
+    const readPath = normalizeRecordPath(decodeUtf8(frame), searchRoot, cwd, capture);
+    return readPath === undefined || appendSearchRecord(capture, { text: readPath, readPath, match: true });
   });
+  await runSearchCapture(executable, args, searchRoot, capture, signal, protocol, "fd");
 }
 
 async function captureFind(
-  pattern: string,
+  input: AgentFindInput,
   searchRoot: string,
   cwd: string,
   options: AgentFindToolOptions | undefined,
@@ -684,28 +816,26 @@ async function captureFind(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   if (!options?.operations) {
-    await captureFindWithFd(pattern, searchRoot, cwd, capture, signal, options?.executable);
+    await captureFindWithFd(input.pattern, searchRoot, cwd, capture, signal, options?.executable, input.include_ignored === true);
     return;
   }
   if (!await options.operations.exists(searchRoot)) throw new Error(`Path not found: ${searchRoot}`);
-  const results = await options.operations.glob(pattern, searchRoot, {
-    ignore: ["**/node_modules/**", "**/.git/**"],
+  const results = await options.operations.glob(input.pattern, searchRoot, {
+    ignore: ["**/.git/**", ...(input.include_ignored ? [] : ["**/node_modules/**"])],
     limit: Number.MAX_SAFE_INTEGER,
   });
   if (signal?.aborted) throw new Error("Operation aborted");
   for (const result of results) {
     if (signal?.aborted) throw new Error("Operation aborted");
-    const readPath = toSessionReadPath(result, searchRoot, cwd);
-    if (!appendSearchRecord(capture, { text: readPath, readPath, match: true })) break;
+    const readPath = normalizeRecordPath(result, searchRoot, cwd, capture);
+    if (readPath !== undefined && !appendSearchRecord(capture, { text: readPath, readPath, match: true })) break;
   }
 }
 
 function eventText(value: unknown): string | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  if ("text" in value && typeof value.text === "string") return value.text;
-  if ("bytes" in value && typeof value.bytes === "string") {
-    return decodeUtf8(Buffer.from(value.bytes, "base64"));
-  }
+  if (!isRecord(value)) return undefined;
+  if (typeof value.text === "string") return value.text;
+  if (typeof value.bytes === "string") return decodeUtf8(Buffer.from(value.bytes, "base64"));
   return undefined;
 }
 
@@ -715,139 +845,157 @@ function stripOneLineEnding(value: string): string {
   return value;
 }
 
-async function captureGrep(
-  input: Record<string, unknown>,
-  searchRoot: string,
-  cwd: string,
-  options: AgentGrepToolOptions | undefined,
-  capture: SearchCapture,
-  signal: AbortSignal | undefined,
-): Promise<number> {
-  await stat(searchRoot).catch(() => { throw new Error(`Path not found: ${searchRoot}`); });
-  if (typeof input.pattern !== "string") throw new Error("pattern must be a string");
-  const args = ["--json", "--heading", "--line-number", "--color=never", "--hidden"];
-  if (input.ignore_case === true) args.push("--ignore-case");
-  if (input.literal === true) args.push("--fixed-strings");
-  if (typeof input.glob === "string") args.push("--glob", input.glob);
-  if (typeof input.context === "number" && input.context > 0) {
-    args.push("--context", String(Math.floor(input.context)));
+function buildGrepArgs(input: AgentGrepInput, directory: boolean, target: string): string[] {
+  const args = ["--no-config", "--color=never", "--hidden"];
+  switch (input.mode) {
+    case "files": args.push("--files-with-matches", "--null", "--with-filename"); break;
+    case "count": args.push("--count", "--null", "--with-filename"); break;
+    case "exists": args.push("--quiet"); break;
+    default: args.push("--json", "--line-number");
   }
-  args.push("--", input.pattern, searchRoot);
-  const executable = await resolveSearchExecutable(options?.executable, ["rg"], cwd);
+  if (input.ignore_case) args.push("--ignore-case");
+  if (input.literal) args.push("--fixed-strings");
+  if (input.include_ignored) args.push("--no-ignore");
+  if (input.glob !== undefined) args.push("--glob", input.glob);
+  if (directory) {
+    args.push("--glob", "!**/.git/**");
+    if (!input.include_ignored) args.push("--glob", "!**/node_modules/**");
+  }
+  if (input.mode === "content" && (input.context ?? 0) > 0) args.push("--context", String(input.context));
+  args.push("--", input.pattern, target);
+  return args;
+}
 
-  return new Promise<number>((resolveRun, rejectRun) => {
-    const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let pending = Buffer.alloc(0);
-    let rawBytes = 0;
-    let stderr = "";
-    let matchCount = 0;
-    let stoppedForLimit = false;
-    let aborted = false;
-    let killTimer: NodeJS.Timeout | undefined;
-    let settled = false;
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      if (killTimer) clearTimeout(killTimer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error) rejectRun(error);
-      else resolveRun(matchCount);
-    };
-    const requestLimitStop = (): void => {
-      capture.complete = false;
-      capture.stoppedAtLimit = true;
-      stoppedForLimit = true;
-      stopChild(child);
-      killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
-    };
-    const onAbort = (): void => {
-      aborted = true;
-      stopChild(child);
-      killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2_000);
-    };
-    const processLine = (line: Buffer): void => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line.toString("utf8"));
-      } catch {
-        capture.complete = false;
-        capture.malformedRecords += 1;
-        return;
-      }
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        capture.complete = false;
-        capture.malformedRecords += 1;
-        return;
-      }
-      const event = parsed as Record<string, unknown>;
-      if (event.type !== "match" && event.type !== "context") return;
-      const data = event.data;
-      if (typeof data !== "object" || data === null) {
-        capture.complete = false;
-        capture.malformedRecords += 1;
-        return;
-      }
-      const filePath = eventText("path" in data ? data.path : undefined);
-      const lineText = eventText("lines" in data ? data.lines : undefined);
-      const lineNumber = "line_number" in data ? data.line_number : undefined;
-      if (event.type === "match") matchCount += 1;
-      if (filePath === undefined || lineText === undefined || typeof lineNumber !== "number") {
-        capture.complete = false;
-        capture.unsupportedRecords += 1;
-        return;
-      }
-      const readPath = toSessionReadPath(filePath, searchRoot, cwd);
-      const sourceText = stripOneLineEnding(lineText);
-      const separator = event.type === "match" ? ":" : "-";
-      const artifactPrefix = `${readPath}${separator}${lineNumber}${separator} `;
-      if (!appendSearchRecord(capture, {
-        text: `${artifactPrefix}${sourceText}`,
-        readPath,
-        match: event.type === "match",
-        sourceText,
-        lineNumber,
-        separator,
-      })) requestLimitStop();
-    };
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
-    child.stdout?.on("data", (rawChunk: Buffer) => {
-      if (stoppedForLimit) return;
-      const chunk = Buffer.from(rawChunk);
-      const available = Math.max(0, MAX_SEARCH_CAPTURE_BYTES - rawBytes);
-      const selected = chunk.subarray(0, available);
-      rawBytes += selected.length;
-      pending = Buffer.concat([pending, selected]);
-      while (!stoppedForLimit) {
-        const delimiterIndex = pending.indexOf(10);
-        if (delimiterIndex < 0) break;
-        const line = pending.subarray(0, delimiterIndex);
-        pending = pending.subarray(delimiterIndex + 1);
-        if (line.length > 0) processLine(line);
-      }
-      if (selected.length < chunk.length || (available === 0 && chunk.length > 0)) requestLimitStop();
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < 16_384) stderr += chunk.toString("utf8");
-    });
-    child.once("error", (error) => finish(new Error(`Failed to run ripgrep: ${error.message}`)));
-    child.once("close", (code) => {
-      if (aborted || signal?.aborted) return finish(new Error("Operation aborted"));
-      if (pending.length > 0) {
-        capture.complete = false;
-        capture.malformedRecords += 1;
-      }
-      if (!stoppedForLimit && code !== 0 && code !== 1) {
-        const message = stderr.trim() || `ripgrep exited with code ${code}`;
-        const diagnostic = regexParseError(message) ?? message;
-        if (capture.records.length === 0) return finish(new Error(diagnostic));
-        capture.complete = false;
-        capture.captureError = diagnostic;
-      }
-      finish();
+function captureGrepContent(capture: SearchCapture, executionCwd: string, cwd: string): SearchByteProtocol {
+  return createByteProtocol(capture, () => 10, (frame) => {
+    let event: unknown;
+    try {
+      const text = decodeUtf8(frame);
+      if (text === undefined) throw new Error("invalid UTF-8");
+      event = JSON.parse(text);
+    } catch {
+      malformedProtocol(capture, "invalid JSON event");
+      return true;
+    }
+    if (!isRecord(event) || typeof event.type !== "string") {
+      malformedProtocol(capture, "invalid event");
+      return true;
+    }
+    if (["begin", "end", "summary"].includes(event.type)) return true;
+    if ((event.type !== "match" && event.type !== "context") || !isRecord(event.data)) {
+      malformedProtocol(capture, "invalid match/context event");
+      return true;
+    }
+    const data = event.data;
+    if (!Number.isSafeInteger(data.line_number) || (data.line_number as number) < 1) {
+      malformedProtocol(capture, "invalid line number");
+      return true;
+    }
+    const readPath = normalizeRecordPath(eventText(data.path), executionCwd, cwd, capture);
+    const lineText = eventText(data.lines);
+    if (lineText === undefined) {
+      unsupportedPath(capture);
+      return true;
+    }
+    if (readPath === undefined) return true;
+    const sourceText = stripOneLineEnding(lineText);
+    const separator = event.type === "match" ? ":" : "-";
+    const lineNumber = data.line_number as number;
+    return appendSearchRecord(capture, {
+      text: `${readPath}${separator}${lineNumber}${separator} ${sourceText}`,
+      readPath,
+      match: event.type === "match",
+      sourceText,
+      lineNumber,
+      separator,
     });
   });
+}
+
+function captureGrepFiles(capture: SearchCapture, executionCwd: string, cwd: string): SearchByteProtocol {
+  const seen = new Set<string>();
+  return createByteProtocol(capture, () => 0, (frame) => {
+    if (frame.length === 0) {
+      malformedProtocol(capture, "empty path");
+      return true;
+    }
+    const readPath = normalizeRecordPath(decodeUtf8(frame), executionCwd, cwd, capture);
+    if (readPath === undefined || seen.has(readPath)) return true;
+    if (!appendSearchRecord(capture, { text: readPath, readPath, match: true })) return false;
+    seen.add(readPath);
+    return true;
+  });
+}
+
+function captureGrepCounts(capture: SearchCapture, executionCwd: string, cwd: string): SearchByteProtocol {
+  const seen = new Set<string>();
+  let pendingPath: { readPath: string | undefined; bytes: number } | undefined;
+  let total = 0;
+  return createByteProtocol(capture, () => pendingPath ? 10 : 0, (frame) => {
+    if (!pendingPath) {
+      if (frame.length === 0) malformedProtocol(capture, "empty count path");
+      pendingPath = {
+        readPath: frame.length === 0 ? undefined : normalizeRecordPath(decodeUtf8(frame), executionCwd, cwd, capture),
+        bytes: frame.length + 1,
+      };
+      return true;
+    }
+    const readPath = pendingPath.readPath;
+    pendingPath = undefined;
+    const countText = frame.toString("ascii");
+    const count = Number(countText);
+    if (!frame.every((byte) => byte >= 48 && byte <= 57) || countText.length === 0 || !Number.isSafeInteger(count) || count < 1) {
+      malformedProtocol(capture, "invalid matching-line count");
+      return true;
+    }
+    if (readPath === undefined) return true;
+    if (seen.has(readPath)) {
+      malformedProtocol(capture, "duplicate count path");
+      return true;
+    }
+    if (!Number.isSafeInteger(total + count)) {
+      malformedProtocol(capture, "matching-line total exceeds safe integer");
+      return true;
+    }
+    if (!appendSearchRecord(capture, { text: `${count}\t${readPath}`, readPath, match: true, matchingLines: count })) return false;
+    seen.add(readPath);
+    total += count;
+    return true;
+  }, () => pendingPath?.bytes ?? 0);
+}
+
+async function captureGrepExists(
+  executable: string,
+  args: string[],
+  executionCwd: string,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  const code = await runSearchCapture(executable, args, executionCwd, createSearchCapture(), signal, undefined, "ripgrep");
+  return code === 0;
+}
+
+async function captureGrep(
+  input: AgentGrepInput,
+  searchRoot: string,
+  cwd: string,
+  executable: string,
+  capture: SearchCapture,
+  signal: AbortSignal | undefined,
+): Promise<boolean | undefined> {
+  const info = await stat(searchRoot).catch(() => { throw new Error(`Path not found: ${searchRoot}`); });
+  const directory = info.isDirectory();
+  const executionCwd = directory ? searchRoot : path.dirname(searchRoot);
+  const target = directory ? "." : path.basename(searchRoot);
+  const args = buildGrepArgs(input, directory, target);
+  if (input.mode === "exists") return captureGrepExists(executable, args, executionCwd, signal);
+  const protocol = input.mode === "files" ? captureGrepFiles(capture, executionCwd, cwd)
+    : input.mode === "count" ? captureGrepCounts(capture, executionCwd, cwd)
+      : captureGrepContent(capture, executionCwd, cwd);
+  await runSearchCapture(executable, args, executionCwd, capture, signal, protocol, "ripgrep");
+  if (input.mode === "files" || input.mode === "count") {
+    capture.records.sort((left, right) => left.readPath < right.readPath ? -1 : left.readPath > right.readPath ? 1 : 0);
+  }
+  return undefined;
 }
 
 /** Create a find tool with normalized output and recoverable truncation. */
@@ -890,10 +1038,11 @@ export function createAgentFindTool(
           );
           runOptions = { ...options, executable };
         }
-        await captureFind(input.pattern, searchRoot, ctx.cwd, runOptions, capture, signal);
+        await captureFind(input, searchRoot, ctx.cwd, runOptions, capture, signal);
         const artifactDetails = await writeSearchArtifact(artifact, "find", capture, {
           search_root: searchRoot,
           pattern: input.pattern,
+          include_ignored: input.include_ignored,
         }, signal);
         if (capture.records.length === 0 && capture.complete) {
           await removeSearchArtifact(artifact.directory);
@@ -920,7 +1069,7 @@ export function createAgentFindTool(
           tool: "find",
           result_count: capture.records.length,
           shown_count: preview.outputRecords.length,
-          preview: needsArtifact ? "truncated" : "complete",
+          preview: countLimited || preview.byteTruncated ? "truncated" : "complete",
           capture: capture.complete ? "complete" : "incomplete",
           read_paths: readPaths,
           ...(countLimited ? { result_limit: limit } : {}),
@@ -975,44 +1124,69 @@ export function createAgentGrepTool(
       let artifact: ProcessArtifact | undefined;
       try {
         const input = normalizeGrepInput(rawInput);
+        const mode = input.mode ?? "content";
         const searchRoot = normalizeSearchRoot(input.path, ctx.cwd);
-        const limit = normalizeLimit(input.limit, DEFAULT_GREP_LIMIT);
-        artifact = await createSearchArtifact(options?.onArtifactCreated);
+        if (signal?.aborted) throw new Error("Operation aborted");
+        if (mode !== "exists") artifact = await createSearchArtifact(options?.onArtifactCreated);
         const capture = createSearchCapture();
-        const { ignore_case, ...baseInput } = input;
-        const executable = await ensureSearchExecutable(
-          options?.executable,
-          ["rg"],
-          ctx.cwd,
-          () => base.execute(
-            _toolCallId,
-            { ...baseInput, ...(ignore_case === undefined ? {} : { ignoreCase: ignore_case }), limit: 1 },
+        const { ignore_case, mode: _mode, include_ignored: _includeIgnored, ...baseInput } = input;
+        const executable = mode === "content"
+          ? await ensureSearchExecutable(
+            options?.executable,
+            ["rg"],
+            ctx.cwd,
+            () => base.execute(
+              _toolCallId,
+              { ...baseInput, ...(ignore_case === undefined ? {} : { ignoreCase: ignore_case }), limit: 1 },
+              signal,
+              _onUpdate as Parameters<typeof base.execute>[3],
+              ctx,
+            ),
             signal,
-            _onUpdate as Parameters<typeof base.execute>[3],
-            ctx,
-          ),
-          signal,
-        );
-        const totalMatches = await captureGrep(
-          input as Record<string, unknown>,
-          searchRoot,
-          ctx.cwd,
-          { ...options, executable },
-          capture,
-          signal,
-        );
+          )
+          : await resolveSearchExecutable(options?.executable, ["rg"], ctx.cwd);
+        const exists = await captureGrep(input, searchRoot, ctx.cwd, executable, capture, signal);
+        if (mode === "exists") {
+          const witness = exists === true;
+          const termination = witness ? "match" : "eof";
+          return {
+            content: [{ type: "text", text: `[grep: mode=exists; exists=${witness}; termination=${termination}; capture=complete]` }],
+            details: {
+              ok: true,
+              tool: "grep",
+              mode,
+              exists: witness,
+              termination,
+              result_count: witness ? 1 : 0,
+              shown_count: witness ? 1 : 0,
+              preview: "complete",
+              capture: "complete",
+              read_paths: [],
+            },
+          };
+        }
+        if (!artifact) throw new Error("Search artifact is not available");
+        const totalMatches = countShown(mode, capture.records);
+        const matchingLines = capturedMatchingLines(capture);
         const artifactDetails = await writeSearchArtifact(artifact, "grep", capture, {
           search_root: searchRoot,
           pattern: input.pattern,
-          matches: totalMatches,
+          mode,
+          include_ignored: input.include_ignored,
+          result_count: totalMatches,
+          ...(mode === "count" ? {
+            total_matching_lines: capture.complete ? matchingLines : null,
+            captured_matching_lines: matchingLines,
+          } : {}),
         }, signal);
-        if (totalMatches === 0 && capture.complete) {
+        if (totalMatches === 0 && capture.complete && mode !== "count") {
           await removeSearchArtifact(artifact.directory);
           return {
             content: [{ type: "text", text: "No matches found" }],
             details: {
               ok: true,
               tool: "grep",
+              mode,
               result_count: 0,
               shown_count: 0,
               preview: "complete",
@@ -1021,28 +1195,35 @@ export function createAgentGrepTool(
             },
           };
         }
-        const preview = buildPreview("grep", capture, limit, totalMatches, artifactDetails);
+        const limit = normalizeLimit(input.limit, mode === "content" ? DEFAULT_GREP_LIMIT : DEFAULT_GREP_FILES_LIMIT);
+        const preview = buildPreview(mode, capture, limit, totalMatches, artifactDetails);
         const countLimited = totalMatches > limit;
-        const needsArtifact = countLimited || preview.byteTruncated || preview.lineTruncated || !capture.complete;
+        const previewTruncated = countLimited || preview.byteTruncated || preview.lineTruncated;
+        const needsArtifact = previewTruncated || !capture.complete;
         if (!needsArtifact) await removeSearchArtifact(artifact.directory);
         const readPaths = [...new Set(preview.outputRecords.map((record) => record.readPath))];
         const details: AgentGrepToolDetails = {
           ok: true,
           tool: "grep",
           result_count: totalMatches,
-          shown_count: preview.outputRecords.filter((record) => record.match).length,
-          preview: needsArtifact ? "truncated" : "complete",
+          shown_count: countShown(mode, preview.outputRecords),
+          preview: previewTruncated ? "truncated" : "complete",
           capture: capture.complete ? "complete" : "incomplete",
           read_paths: readPaths,
-          ...(countLimited ? { match_limit: limit } : {}),
           ...(preview.truncation ? { truncation: preview.truncation } : {}),
-          ...(preview.lineTruncated ? { lines_truncated: true } : {}),
           ...(needsArtifact ? { artifact: artifactDetails } : {}),
+          ...(mode === "count" ? {
+            mode,
+            counts: preview.outputRecords.map((record) => ({ path: record.readPath, matching_lines: record.matchingLines! })),
+            total_matching_lines: capture.complete ? matchingLines : null,
+            captured_matching_lines: matchingLines,
+          } : mode === "content" ? {
+            mode,
+            ...(countLimited ? { match_limit: limit } : {}),
+            ...(preview.lineTruncated ? { lines_truncated: true } : {}),
+          } : { mode }),
         };
-        return {
-          content: [{ type: "text", text: preview.text }],
-          details,
-        };
+        return { content: [{ type: "text", text: preview.text }], details };
       } catch (error) {
         if (artifact) await removeSearchArtifact(artifact.directory).catch(() => undefined);
         return searchFailure("grep", error, signal);
@@ -1050,7 +1231,7 @@ export function createAgentGrepTool(
     },
     renderCall: base.renderCall
       ? (args, theme, context) => {
-        const { ignore_case, ...baseArgs } = args;
+        const { ignore_case, mode: _mode, include_ignored: _includeIgnored, ...baseArgs } = args;
         return base.renderCall!(
           { ...baseArgs, ...(ignore_case === undefined ? {} : { ignoreCase: ignore_case }) },
           theme,
@@ -1061,6 +1242,10 @@ export function createAgentGrepTool(
     renderResult: base.renderResult
       ? (result, options, theme, context) => {
         const details = result.details;
+        if (details?.ok && details.mode !== "content") {
+          const text = result.content.filter((item) => item.type === "text").map((item) => item.text).join("\n");
+          return new Text(text, 0, 0);
+        }
         const compatible = details?.ok
           ? {
             ...details,

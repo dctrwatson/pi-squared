@@ -13,6 +13,8 @@ const agentModule = await import("../../extensions/agent-tools/index.ts");
 function context(cwd) {
   return {
     cwd,
+    mode: "print",
+    modelRegistry: { getAvailable: () => [] },
     model: { provider: "openai-codex", id: "test-model" },
     thinkingLevel: "off",
     sessionManager: {
@@ -39,7 +41,7 @@ async function withDirectory(callback) {
   }
 }
 
-test("agent-tools register once and enable tools for every provider", async () => {
+test("agent-tools register once and preserve selections for every provider", async () => {
   for (const provider of ["openai-codex", "openai", "anthropic", "google", undefined]) {
     const handlers = new Map();
     const tools = [];
@@ -55,17 +57,22 @@ test("agent-tools register once and enable tools for every provider", async () =
       setActiveTools: (names) => { activeTools = names; },
     });
 
-    const expected = ["ask_user", "bash", "find", "gh", "git", "grep", "read", "web_search"];
+    const expected = ["ask_user", "bash", "bash_job", "find", "gh", "git", "grep", "read", "web_search"];
     assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
     for (const name of ["read", "bash"]) {
       assert.deepEqual(tools.find((tool) => tool.name === name).constrainedSampling,
         { type: "json_schema", strict: "prefer" });
     }
-    const ctx = { model: provider ? { provider } : undefined };
+    const ctx = { ...context(process.cwd()), model: provider ? { provider } : undefined };
     await handlers.get("session_start")({}, ctx);
     await handlers.get("session_start")({}, ctx);
     assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
-    assert.deepEqual(activeTools.slice().sort(), [...expected, "custom_tool", "edit", "write"].sort());
+    assert.deepEqual(activeTools, ["read", "bash", "edit", "write", "custom_tool"]);
+    for (const name of ["ask_user", "gh", "web_search", "bash_job"]) {
+      const tool = tools.find((tool) => tool.name === name);
+      assert.equal(tool.defaultActive, true);
+      assert.equal(tool.exposure, name === "ask_user" ? "model-only" : "direct");
+    }
     const activeBeforeSwitch = [...activeTools];
     const notifications = [];
     for (const nextProvider of ["anthropic", "openai-codex", "google"]) {
@@ -105,13 +112,13 @@ test("agent-tools correct write byte counts and process errors", async () => {
       activeTools = names;
     },
   });
-  const ctx = { model: { provider: "anthropic" } };
+  const ctx = { ...context(process.cwd()), model: { provider: "anthropic" } };
   await handlers.get("session_start")({}, ctx);
   await handlers.get("session_start")({}, ctx);
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["ask_user", "bash", "find", "gh", "git", "grep", "read", "web_search"]);
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["ask_user", "bash", "bash_job", "find", "gh", "git", "grep", "read", "web_search"]);
   assert.equal(tools.some((tool) => tool.name === "apply_diff" || tool.name === "patch"), false);
   assert.equal(tools.some((tool) => tool.name === "edit" || tool.name === "write"), false);
-  assert.deepEqual(activeTools.sort(), ["ask_user", "bash", "edit", "find", "gh", "git", "grep", "read", "web_search", "write"]);
+  assert.deepEqual(activeTools, ["read", "bash", "edit", "write"]);
 
   const writeResult = (path, content, isError = false) => ({
     toolName: "write",
@@ -154,7 +161,7 @@ test("agent-tools correct write byte counts and process errors", async () => {
   assert.equal(await handlers.get("tool_result")(processResult("git", 1), ctx), undefined);
   assert.deepEqual(await handlers.get("tool_result")(processResult("git", 1, "fatal: bad revision\n"), ctx), { isError: true });
   assert.deepEqual(await handlers.get("tool_result")(processResult("git", 128, "fatal: pathspec 'tests/extensions/child.test.mjs' did not match any files\n"), ctx), { isError: true });
-  for (const toolName of ["ask_user", "bash", "read", "git", "gh"]) {
+  for (const toolName of ["ask_user", "bash", "bash_job", "read", "git", "gh", "web_search"]) {
     assert.deepEqual(await handlers.get("tool_result")({
       toolName,
       isError: false,
@@ -177,7 +184,7 @@ test("tool-result middleware preserves content, structured content, details, and
     getActiveTools: () => ["read", "bash", "edit", "write"],
     setActiveTools() {},
   });
-  await handlers.get("session_start")[0]({}, { model: { provider: "openai-codex" } });
+  for (const handler of handlers.get("session_start")) await handler({}, context(process.cwd()));
 
   const extension = {
     path: "agent-tools-test",
@@ -286,7 +293,7 @@ test("read returns raw complete and continuation line pages", async () => {
     await writeFile(join(directory, "source.ts"), "alpha\nβeta\nlast", "utf8");
     const tool = readModule.createAgentReadTool();
 
-    const first = await execute(tool, { path: "source.ts", max_lines: 2, max_bytes: 100 }, directory);
+    const first = await execute(tool, { path: "source.ts", max_lines: 2, max_bytes: 100, show_line_numbers: false }, directory);
     const firstText = "alpha\nβeta\n\n[lines 1-2; next_start_line=3; eof=false]";
     assert.equal(output(first), firstText);
     assert.deepEqual(first.details, {
@@ -295,10 +302,11 @@ test("read returns raw complete and continuation line pages", async () => {
       mode: "lines",
       path: await realpath(join(directory, "source.ts")),
       total_bytes: 16,
-      total_lines: 3,
+      total_lines: null,
       start_line: 1,
       end_line: 2,
       next_start_line: 3,
+      has_more: true,
       limited_by: "lines",
       show_line_numbers: false,
       source_bytes: 12,
@@ -307,7 +315,7 @@ test("read returns raw complete and continuation line pages", async () => {
     assert.equal(JSON.stringify(first.details).includes("alpha"), false);
     assert.equal("revision" in first.details, false);
 
-    const second = await execute(tool, { path: "source.ts", start_line: 3 }, directory);
+    const second = await execute(tool, { path: "source.ts", start_line: 3, show_line_numbers: false }, directory);
     assert.equal(output(second), "last\n\n[lines 3-3; next_start_line=null; eof=true]");
 
     const pastEnd = await execute(tool, { path: "source.ts", start_line: 99 }, directory);
@@ -349,6 +357,7 @@ test("read reduces numbered pages at the formatted-output limit", async () => {
       path: "large-lines",
       max_lines: 2_000,
       max_bytes: 40_960,
+      show_line_numbers: false,
     }, directory);
     assert.equal(clean.details.end_line, 2_000);
     assert.equal(clean.details.limited_by, "none");
@@ -415,7 +424,7 @@ test("read stops at the line byte limit without splitting a line", async () => {
     await writeFile(join(directory, "source"), "one\ntwo\nthree", "utf8");
     const result = await execute(readModule.createAgentReadTool(), { path: "source", max_bytes: 7 }, directory);
 
-    assert.equal(output(result), "one\n\n[lines 1-1; next_start_line=2; eof=false]");
+    assert.equal(output(result), "1 │ one\n\n[lines 1-1; next_start_line=2; eof=false]");
     assert.equal(result.details.end_line, 1);
     assert.equal(result.details.next_start_line, 2);
   });
@@ -445,7 +454,7 @@ test("read applies the long-line boundary to exact source bytes", async () => {
     const tool = readModule.createAgentReadTool();
     await writeFile(join(directory, "exact"), "1234", "utf8");
     const exact = await execute(tool, { path: "exact", max_bytes: 4 }, directory);
-    assert.match(output(exact), /^1234\n\n\[lines/);
+    assert.match(output(exact), /^1 │ 1234\n\n\[lines/);
 
     await writeFile(join(directory, "over"), "12345", "utf8");
     const over = await execute(tool, { path: "over", max_bytes: 4 }, directory);
@@ -496,7 +505,7 @@ test("read preserves UTF-8 source text without JSON escaping", async () => {
   await withDirectory(async (directory) => {
     const source = "\uFEFF\"quote\"\\slash\tend\n[read: source-shaped line]\n";
     await writeFile(join(directory, "source"), source, "utf8");
-    const result = await execute(readModule.createAgentReadTool(), { path: "source" }, directory);
+    const result = await execute(readModule.createAgentReadTool(), { path: "source", show_line_numbers: false }, directory);
     const text = output(result);
 
     assert.ok(text.startsWith(`${source}\n`));
@@ -568,7 +577,7 @@ test("read treats null optional fields as omitted in both modes", async () => {
     const lineResult = await execute(tool, lines, directory);
     assert.equal(lineResult.details.ok, true);
     assert.equal(lineResult.details.mode, "lines");
-    assert.match(output(lineResult), /^ok\n\n\[lines 1-1;/);
+    assert.match(output(lineResult), /^1 │ ok\n\n\[lines 1-1;/);
 
     const bytes = {
       path: "source", mode: "bytes", start_line: null, max_lines: null,
@@ -599,20 +608,24 @@ test("read resolves one leading @ and rejects an @-only path", async () => {
     await writeFile(join(directory, "source"), "ok", "utf8");
     const tool = readModule.createAgentReadTool();
     const result = await execute(tool, { path: "@source" }, directory);
-    assert.match(output(result), /^ok\n\n\[lines/);
+    assert.match(output(result), /^1 │ ok\n\n\[lines/);
 
     const invalid = await execute(tool, { path: "@" }, directory);
     assert.equal(invalid.details.error.code, "INVALID_INPUT");
   });
 });
 
-test("read rejects files larger than the file limit", async () => {
+test("read accepts files larger than 64 MiB", async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, "large");
     await writeFile(path, "", "utf8");
     await truncate(path, 67_108_865);
-    const result = await execute(readModule.createAgentReadTool(), { path: "large" }, directory);
-    assert.equal(result.details.error.code, "RESOURCE_LIMIT");
+    const result = await execute(readModule.createAgentReadTool(), {
+      path: "large", mode: "bytes", start_byte: 67_108_865,
+    }, directory);
+    assert.equal(result.details.ok, true);
+    assert.equal(result.details.total_bytes, 67_108_865);
+    assert.equal(output(result), "[bytes none; next_start_byte=null; eof=true]");
   });
 });
 
@@ -645,7 +658,7 @@ test("read measures the raw model-visible result", async () => {
     await writeFile(join(directory, "quotes"), source, "utf8");
     const result = await execute(
       readModule.createAgentReadTool(),
-      { path: "quotes", max_bytes: 40_960 },
+      { path: "quotes", max_bytes: 40_960, show_line_numbers: false },
       directory,
     );
     assert.ok(output(result).startsWith(`${source}\n\n[lines`));
@@ -674,7 +687,7 @@ test("read metadata omits revisions", () => {
   assert.match(tool.description, /bounded/);
   assert.match(tool.description, /Line ranges are inclusive/);
   assert.match(tool.description, /byte ranges are zero-based and half-open/);
-  assert.match(JSON.stringify(tool.promptGuidelines), /show_line_numbers=true/);
+  assert.match(JSON.stringify(tool.promptGuidelines), /show_line_numbers=false/);
   assert.match(JSON.stringify(tool.promptGuidelines), /cat -n/);
   assert.match(JSON.stringify(tool.promptGuidelines), /error\.byte_offset/);
 });

@@ -6,3 +6,19 @@ export function omitNullOptionalFields(input: unknown, fields: readonly string[]
   }
   return result;
 }
+
+export function prepareInputArguments<T>(
+  input: unknown,
+  optionalFields: readonly string[],
+  validate: (input: unknown) => unknown,
+): T {
+  const prepared = omitNullOptionalFields(input, optionalFields);
+  if (prepared !== null && typeof prepared === "object" && !Array.isArray(prepared)) {
+    const record = prepared as Record<string, unknown>;
+    for (const field of optionalFields) {
+      if (record[field] === undefined) delete record[field];
+    }
+  }
+  validate(prepared);
+  return prepared as T;
+}

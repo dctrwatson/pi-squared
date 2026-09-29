@@ -1,11 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { chmod, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants, createWriteStream, type WriteStream } from "node:fs";
+import { chmod, mkdir, open, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ARTIFACT_ROOT = join(tmpdir(), "pi-agent-tools");
-const ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+export const ARTIFACT_RETENTION_MS = 604_800_000;
+const pinnedDirectories = new Set<string>();
+
+/** Prevent expiry while capture or retention is not complete. */
+export function pinProcessArtifact(directory: string): void {
+  pinnedDirectories.add(directory);
+}
+
+/** Permit expiry after verified completion. */
+export function unpinProcessArtifact(directory: string): void {
+  pinnedDirectories.delete(directory);
+}
 
 export interface ProcessArtifact {
   id: string;
@@ -27,22 +38,26 @@ export type ProcessArtifactRetention = "always" | "when-needed";
 export async function removeProcessArtifact(directory: string): Promise<boolean> {
   try {
     await rm(directory, { recursive: true, force: true });
+    unpinProcessArtifact(directory);
     return true;
   } catch {
     return false;
   }
 }
 
-async function removeExpiredArtifacts(): Promise<void> {
+export async function removeExpiredArtifacts(nowMs = Date.now(), root = ARTIFACT_ROOT): Promise<void> {
   try {
-    const entries = await readdir(ARTIFACT_ROOT, { withFileTypes: true });
-    const cutoff = Date.now() - ARTIFACT_RETENTION_MS;
+    const entries = await readdir(root, { withFileTypes: true });
+    const cutoff = nowMs - ARTIFACT_RETENTION_MS;
     await Promise.all(entries.map(async (entry) => {
       if (!entry.isDirectory()) return;
-      const directory = join(ARTIFACT_ROOT, entry.name);
+      const directory = join(root, entry.name);
+      if (pinnedDirectories.has(directory)) return;
       try {
         const info = await stat(directory);
-        if (info.mtimeMs < cutoff) await removeProcessArtifact(directory);
+        if (info.mtimeMs < cutoff && !pinnedDirectories.has(directory)) {
+          await removeProcessArtifact(directory);
+        }
       } catch {
         // Artifact cleanup is best effort.
       }
@@ -52,20 +67,20 @@ async function removeExpiredArtifacts(): Promise<void> {
   }
 }
 
-function validateArtifactRoot(): void {
-  if (/[\r\n;\[\]]/.test(ARTIFACT_ROOT)) {
+function validateArtifactRoot(root: string): void {
+  if (/[\r\n;\[\]]/.test(root)) {
     throw new Error("The artifact root cannot be represented in a process header");
   }
 }
 
 /** Create one owner-only artifact directory and its empty stream files. */
-export async function createProcessArtifact(): Promise<ProcessArtifact> {
-  validateArtifactRoot();
-  await mkdir(ARTIFACT_ROOT, { recursive: true, mode: 0o700 });
-  await chmod(ARTIFACT_ROOT, 0o700);
-  await removeExpiredArtifacts();
+export async function createProcessArtifact(root = ARTIFACT_ROOT): Promise<ProcessArtifact> {
+  validateArtifactRoot(root);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  await removeExpiredArtifacts(Date.now(), root);
   const id = randomUUID();
-  const directory = join(ARTIFACT_ROOT, id);
+  const directory = join(root, id);
   const artifact = {
     id,
     directory,
@@ -133,6 +148,44 @@ export async function finalizeProcessArtifact(
     throw new Error("Cannot remove the unneeded output artifact");
   }
   return false;
+}
+
+/** Read the saved size only from a readable regular stream file. */
+export async function verifiedProcessStreamBytes(path: string): Promise<number | undefined> {
+  try {
+    const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) return undefined;
+      const probe = Buffer.alloc(1);
+      const { bytesRead } = await file.read(probe, 0, Math.min(1, info.size), 0);
+      if (info.size > 0 && bytesRead !== 1) return undefined;
+      return info.size;
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** Set final metadata and retention only after verified process cleanup. */
+export async function completeProcessArtifact(
+  artifact: ProcessArtifact,
+  completedAtMs: number,
+  metadata: Record<string, unknown>,
+): Promise<ProcessArtifact> {
+  pinProcessArtifact(artifact.directory);
+  const sizes = await Promise.all([
+    verifiedProcessStreamBytes(artifact.stdout_path),
+    verifiedProcessStreamBytes(artifact.stderr_path),
+  ]);
+  if (sizes.some((size) => size === undefined)) throw new Error("Cannot read the output artifact files");
+  const completed = { ...artifact, expires_at: completedAtMs + ARTIFACT_RETENTION_MS };
+  await writeProcessArtifactMetadata(completed, { ...metadata, expires_at: completed.expires_at });
+  await utimes(artifact.directory, completedAtMs / 1_000, completedAtMs / 1_000);
+  unpinProcessArtifact(artifact.directory);
+  return completed;
 }
 
 /** Write owner-only metadata after stream capture finishes. */

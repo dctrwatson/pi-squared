@@ -174,7 +174,7 @@ if (mode === "inspect") {
 }
 
 async function removeArtifact(result) {
-  if (result.artifact) await rm(result.artifact.directory, { recursive: true, force: true });
+  if ((result.process ?? result).artifact) await rm((result.process ?? result).artifact.directory, { recursive: true, force: true });
 }
 
 test("gh exposes typed snake_case inputs and host-behavior guidance", () => {
@@ -269,7 +269,7 @@ test("gh streams bounded incomplete progress updates", async () => {
     );
     try {
       assert.ok(updates.length >= 2);
-      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) < 48 * 1024));
+      assert.ok(updates.every((update) => Buffer.byteLength(update.content[0].text) <= 8192));
       assert.equal(updates[0].details.stdout.capture, "incomplete");
       assert.ok(updates.some((update) => /start\n/.test(update.content[0].text)));
       assert.equal(toolResult.details.stdout.capture, "complete");
@@ -341,23 +341,23 @@ test("gh formats empty, stderr-only, and early-input-close results", async () =>
   });
 });
 
-test("gh creates and deletes artifacts at the preview boundary", async () => {
+test("gh retains artifacts when the total preview budget omits output", async () => {
   await withFakeGh(async (directory) => {
     const artifacts = [];
     const tool = ghModule.createAgentGhTool({ onArtifactCreated: (artifact) => artifacts.push(artifact) });
-    const exact = await execute(tool, { args: ["output", "18432", "0"] }, directory);
+    const exact = await execute(tool, { args: ["output", "4096", "0"] }, directory);
     assert.equal(exact.stdout.preview, "complete");
     assert.equal(exact.artifact, undefined);
     await assert.rejects(stat(artifacts[0].directory), { code: "ENOENT" });
 
-    const truncated = await execute(tool, { args: ["output", "18433", "0"] }, directory);
+    const truncated = await execute(tool, { args: ["output", "8193", "0"] }, directory);
     try {
       assert.equal(truncated.stdout.preview, "truncated");
       assert.equal(truncated.stdout.artifact, truncated.artifact.stdout_path);
       assert.match(truncated.text, /\[process preview omitted: \d+ captured raw bytes\]/);
       assert.equal((await stat(truncated.artifact.directory)).mode & 0o777, 0o700);
       assert.equal((await stat(truncated.artifact.stdout_path)).mode & 0o777, 0o600);
-      assert.equal((await readFile(truncated.artifact.stdout_path)).length, 18_433);
+      assert.equal((await readFile(truncated.artifact.stdout_path)).length, 8193);
     } finally {
       await removeArtifact(truncated);
     }
@@ -381,7 +381,7 @@ test("gh bounds two large multibyte streams and keeps raw collision text", async
       assert.match(streamPreview(result, "stdout"), /TAIL\n$/);
       assert.match(streamPreview(result, "stderr"), /^ERR_HEAD\n/);
       assert.match(streamPreview(result, "stderr"), /ERR_TAIL\n$/);
-      assert.ok(Buffer.byteLength(result.text) < 48 * 1024);
+      assert.ok(Buffer.byteLength(result.text) <= 8192);
       assert.equal(await readFile(result.artifact.stdout_path, "utf8"), stdout);
       assert.equal(await readFile(result.artifact.stderr_path, "utf8"), stderr);
     } finally {
@@ -439,7 +439,7 @@ test("gh reports final incomplete capture per stream", async () => {
       timeout_seconds: 1,
     }, directory);
     try {
-      assert.equal(result.ok, true);
+      assert.equal(result.ok, true, JSON.stringify(result));
       assert.equal(result.stdout.capture, "incomplete");
       assert.equal(result.stderr.capture, "complete");
       assert.equal(result.stdout.artifact, result.artifact.stdout_path);
@@ -472,7 +472,7 @@ test("gh does not start after cancellation during artifact setup", async () => {
   });
 });
 
-test("gh cancellation and output limits remove incomplete artifacts", async () => {
+test("gh cancellation removes empty artifacts and output limits retain evidence", async () => {
   await withFakeGh(async (directory) => {
     let artifact;
     const tool = ghModule.createAgentGhTool({ onArtifactCreated: (created) => { artifact = created; } });
@@ -481,12 +481,17 @@ test("gh cancellation and output limits remove incomplete artifacts", async () =
     setTimeout(() => controller.abort(), 25);
     const cancelled = await pending;
     assert.equal(cancelled.error.code, "CANCELLED");
-    assert.equal(cancelled.text, "[gh error: CANCELLED; GitHub CLI command was cancelled.]");
+    assert.match(cancelled.text, /^\[gh error: CANCELLED;/);
+    assert.equal(cancelled.process.stop_reason, "cancelled");
+    assert.equal(cancelled.process.cleanup, "complete");
     await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
 
     const limited = await execute(tool, { args: ["output", "67108865", "0"] }, directory);
     assert.equal(limited.error.code, "OUTPUT_LIMIT");
     assert.match(limited.text, /^\[gh error: OUTPUT_LIMIT;/);
-    await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
+    assert.equal(limited.process.stop_reason, "output_limit");
+    assert.equal(limited.process.cleanup, "complete");
+    assert.equal((await readFile(artifact.stdout_path)).length, 67_108_864);
+    await removeArtifact(limited);
   });
 });

@@ -8,6 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { omitNullOptionalFields, prepareInputArguments } from "./optional-input.ts";
 import {
   DirectProcessError,
   runDirectProcess,
@@ -15,6 +16,9 @@ import {
 } from "./direct-process.ts";
 import type { ProcessArtifact } from "./process-artifacts.ts";
 import {
+  DEFAULT_PROCESS_OUTPUT_BYTES,
+  MIN_PROCESS_OUTPUT_BYTES,
+  MAX_PROCESS_OUTPUT_BYTES,
   formatProcessFailure,
   type FormattedProcessResult,
   type ProcessToolDetails,
@@ -36,8 +40,11 @@ const ghParameters = Type.Object({
   args: Type.Array(Type.String(), { description: "Arguments after gh" }),
   cwd: Type.Optional(Type.String({ description: "Working directory, relative to the session directory by default" })),
   stdin: Type.Optional(Type.String({ description: "Text to write to standard input" })),
-  timeout_seconds: Type.Optional(Type.Number({ description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
-});
+  timeout_seconds: Type.Optional(Type.Number({ minimum: MIN_TIMEOUT_SECONDS, maximum: MAX_TIMEOUT_SECONDS, description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
+  max_output_bytes: Type.Optional(Type.Integer({ minimum: MIN_PROCESS_OUTPUT_BYTES, maximum: MAX_PROCESS_OUTPUT_BYTES, description: "Total result bytes, including status and previews; default: 8192; range: 2048 through 40960" })),
+}, { additionalProperties: false });
+
+const GH_OPTIONAL_FIELDS = ["max_output_bytes", "cwd", "stdin", "timeout_seconds"];
 
 export type AgentGhInput = Static<typeof ghParameters>;
 
@@ -59,6 +66,7 @@ interface NormalizedGhInput {
   cwd?: string;
   stdin?: string;
   timeoutSeconds: number;
+  maxOutputBytes: number;
 }
 
 const INVALID_STDIN = "\0__pi_invalid_gh_stdin__";
@@ -79,29 +87,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function prepareGhArguments(rawInput: unknown): AgentGhInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { args: [] };
-  if (!Array.isArray(prepared.args)) {
-    prepared.args = [];
-  } else if (prepared.args.some((arg) => typeof arg !== "string")) {
-    prepared.args = prepared.args.map((arg) => typeof arg === "string" ? arg : "\0");
-  }
-  if (prepared.cwd !== undefined && typeof prepared.cwd !== "string") {
-    prepared.cwd = "\0";
-  }
-  if (prepared.stdin !== undefined && typeof prepared.stdin !== "string") {
-    prepared.stdin = INVALID_STDIN;
-  }
-  if (prepared.timeout_seconds !== undefined && typeof prepared.timeout_seconds !== "number") {
-    prepared.timeout_seconds = -1;
-  }
-  return prepared as AgentGhInput;
+  return prepareInputArguments(rawInput, GH_OPTIONAL_FIELDS, normalizeInput);
 }
 
 function normalizeInput(rawInput: unknown): NormalizedGhInput {
-  if (!isRecord(rawInput)) throw new GhToolError("INVALID_INPUT", "Input must be an object.");
-  const allowed = new Set(["args", "cwd", "stdin", "timeout_seconds"]);
+  rawInput = omitNullOptionalFields(rawInput, GH_OPTIONAL_FIELDS);
+  if (!isRecord(rawInput) || Array.isArray(rawInput)) throw new GhToolError("INVALID_INPUT", "Input must be an object.");
+  const allowed = new Set(["args", "cwd", "stdin", "timeout_seconds", "max_output_bytes"]);
   const unknown = Object.keys(rawInput).find((key) => !allowed.has(key));
-  if (unknown) throw new GhToolError("INVALID_INPUT", `Unknown input field: ${unknown}.`);
+  if (unknown !== undefined) throw new GhToolError("INVALID_INPUT", `Unknown input field: ${unknown}.`);
 
   if (!Array.isArray(rawInput.args) || rawInput.args.length === 0 || rawInput.args.some((arg) => typeof arg !== "string")) {
     throw new GhToolError("INVALID_INPUT", "args must be a nonempty array of strings.");
@@ -127,11 +121,19 @@ function normalizeInput(rawInput: unknown): NormalizedGhInput {
     throw new GhToolError("INVALID_INPUT", "timeout_seconds must be from 0.1 through 3600.");
   }
 
+  if (rawInput.max_output_bytes !== undefined && (
+    typeof rawInput.max_output_bytes !== "number" || !Number.isSafeInteger(rawInput.max_output_bytes)
+    || rawInput.max_output_bytes < MIN_PROCESS_OUTPUT_BYTES || rawInput.max_output_bytes > MAX_PROCESS_OUTPUT_BYTES
+  )) {
+    throw new GhToolError("INVALID_INPUT", "max_output_bytes must be an integer from 2048 through 40960");
+  }
+
   return {
     args: [...rawInput.args],
     ...(rawInput.cwd === undefined ? {} : { cwd: rawInput.cwd }),
     ...(rawInput.stdin === undefined ? {} : { stdin: rawInput.stdin }),
     timeoutSeconds: rawInput.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS,
+    maxOutputBytes: rawInput.max_output_bytes ?? DEFAULT_PROCESS_OUTPUT_BYTES,
   };
 }
 
@@ -164,14 +166,14 @@ function ghEnvironment(baseEnvironment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-async function findGh(environment: NodeJS.ProcessEnv, cwd: string): Promise<string> {
+export async function findGh(environment: NodeJS.ProcessEnv, cwd: string): Promise<string> {
   const path = environment.PATH;
   if (!path) throw new GhToolError("EXECUTABLE_NOT_FOUND", "Cannot find gh in PATH.");
   for (const entry of path.split(delimiter)) {
     const candidate = resolve(cwd, entry || ".", "gh");
     try {
       await access(candidate, constants.X_OK);
-      return candidate;
+      if ((await stat(candidate)).isFile()) return candidate;
     } catch {
       // Continue through PATH entries.
     }
@@ -186,9 +188,11 @@ async function executeGh(
   options: AgentGhToolOptions,
   onUpdate: AgentToolUpdateCallback<GhToolDetails> | undefined,
 ): Promise<FormattedProcessResult | ReturnType<typeof formatProcessFailure>> {
+  let maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES;
   try {
     const environment = ghEnvironment({ ...process.env });
     const input = normalizeInput(rawInput);
+    maxOutputBytes = input.maxOutputBytes;
     const cwd = await validateCwd(input, ctx.cwd);
     const executable = await findGh(environment, cwd);
     return await runDirectProcess({
@@ -200,6 +204,7 @@ async function executeGh(
       environment,
       stdin: input.stdin,
       timeoutSeconds: input.timeoutSeconds,
+      maxOutputBytes: input.maxOutputBytes,
       signal,
       onUpdate,
       onArtifactCreated: options.onArtifactCreated,
@@ -207,9 +212,9 @@ async function executeGh(
     });
   } catch (error) {
     if (error instanceof GhToolError || error instanceof DirectProcessError) {
-      return formatProcessFailure("gh", error.code, error.detailMessage);
+      return formatProcessFailure("gh", error.code, error.detailMessage, undefined, maxOutputBytes);
     }
-    return formatProcessFailure("gh", "INTERNAL_ERROR", `Cannot run gh: ${String(error)}`);
+    return formatProcessFailure("gh", "INTERNAL_ERROR", `Cannot run gh: ${String(error)}`, undefined, maxOutputBytes);
   }
 }
 
@@ -232,6 +237,7 @@ export function createAgentGhTool(options: AgentGhToolOptions = {}): ToolDefinit
       return {
         content: [{ type: "text", text: result.text }],
         details: result.details,
+        isError: result.details.ok === false,
       };
     },
     renderCall(args, theme, context) {
@@ -241,6 +247,7 @@ export function createAgentGhTool(options: AgentGhToolOptions = {}): ToolDefinit
       if (args.timeout_seconds !== undefined) {
         call += theme.fg("muted", ` (timeout ${safeRenderArgument(args.timeout_seconds)}s)`);
       }
+      if (args.max_output_bytes !== undefined) call += theme.fg("muted", ` (output ${safeRenderArgument(args.max_output_bytes)} bytes)`);
       return renderTruncatedToolCall(call, theme, context.isPartial, context.isError);
     },
     renderResult(toolResult, renderOptions, theme, context) {

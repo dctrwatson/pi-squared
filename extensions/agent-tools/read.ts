@@ -1,4 +1,5 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import type {
   ExtensionContext,
@@ -6,10 +7,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { omitNullOptionalFields } from "./optional-input.ts";
+import { omitNullOptionalFields, prepareInputArguments } from "./optional-input.ts";
 import type { ToolFailureDetails, ToolSuccessDetails } from "./tool-result.ts";
 
-const MAX_FILE_BYTES = 67_108_864;
+const SCAN_BLOCK_BYTES = 65_536;
 const MAX_RESULT_BYTES = 48 * 1024;
 const MAX_LINE_COUNT = 2_000;
 const MAX_LINE_PAGE_BYTES = 40_960;
@@ -19,19 +20,19 @@ const READ_OPTIONAL_FIELDS = ["mode", "start_line", "max_lines", "show_line_numb
 
 const readParameters = Type.Object({
   path: Type.String({ description: "File path" }),
-  mode: Type.Optional(Type.String({ description: "lines (default) or bytes" })),
-  start_line: Type.Optional(Type.Number({ description: "Line mode: 1-based start, 1–2147483647 (default 1)" })),
-  max_lines: Type.Optional(Type.Number({ description: "Line mode: 1–2000 (default 500)" })),
-  show_line_numbers: Type.Optional(Type.Boolean({ description: "Line mode: prefix 1-based line numbers (default false)" })),
-  max_bytes: Type.Optional(Type.Number({ description: "Line or UTF-8 byte mode: 1–40960; Base64: 1–30720" })),
-  start_byte: Type.Optional(Type.Number({ description: "Byte mode: 0-based start, 0–67108864 (default 0)" })),
-  encoding: Type.Optional(Type.String({ description: "Byte mode: utf8 (default) or base64" })),
-});
+  mode: Type.Optional(Type.Union([Type.Literal("lines"), Type.Literal("bytes")], { description: "lines (default) or bytes" })),
+  start_line: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_147_483_647, description: "Line mode: 1-based start, 1–2147483647 (default 1)" })),
+  max_lines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LINE_COUNT, description: "Line mode: 1–2000 (default 200)" })),
+  show_line_numbers: Type.Optional(Type.Boolean({ description: "Line mode: prefix 1-based line numbers (default true)" })),
+  max_bytes: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_UTF8_PAGE_BYTES, description: "Line or UTF-8 byte mode: 1–40960; Base64: 1–30720 (default 16384)" })),
+  start_byte: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, description: "Byte mode: 0-based start, 0–9007199254740991 (default 0)" })),
+  encoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64")], { description: "Byte mode: utf8 (default) or base64" })),
+}, { additionalProperties: false });
 
 export type AgentReadInput = Static<typeof readParameters>;
 
 type ReadMode = "lines" | "bytes";
-type ByteEncoding = "utf8" | "base64";
+export type ByteEncoding = "utf8" | "base64";
 
 interface NormalizedReadInput {
   path: string;
@@ -50,6 +51,7 @@ export type ReadErrorCode =
   | "NOT_READABLE"
   | "UNSUPPORTED_FILE_TYPE"
   | "RESOURCE_LIMIT"
+  | "FILE_CHANGED"
   | "INVALID_ENCODING"
   | "INVALID_BYTE_BOUNDARY"
   | "BYTE_PAGE_TOO_SMALL"
@@ -65,7 +67,7 @@ export interface ReadFile {
 export interface ReadLinesResult {
   ok: true;
   mode: "lines";
-  file: ReadFile & { total_lines: number };
+  file: ReadFile & { total_lines: number | null };
   content: string;
   start_line: number | null;
   end_line: number | null;
@@ -107,10 +109,11 @@ export type ReadToolDetails =
     mode: "lines";
     path: string;
     total_bytes: number;
-    total_lines: number;
+    total_lines: number | null;
     start_line: number | null;
     end_line: number | null;
     next_start_line: number | null;
+    has_more: boolean;
     limited_by: "none" | "lines" | "bytes" | "formatted_bytes";
     show_line_numbers: boolean;
     source_bytes: number;
@@ -124,12 +127,13 @@ export type ReadToolDetails =
     start_byte: number;
     end_byte: number;
     next_start_byte: number | null;
+    has_more: boolean;
   })
   | (ToolFailureDetails<"read", ReadErrorCode> & {
     error: ReadFailure["error"];
   });
 
-class ReadToolError extends Error {
+export class ReadToolError extends Error {
   readonly code: ReadErrorCode;
   readonly path: string | undefined;
   readonly line: number | undefined;
@@ -150,9 +154,35 @@ class ReadToolError extends Error {
   }
 }
 
-interface FileBuffer {
+export interface PositionedReader {
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+}
+
+export interface ReadHandleStat {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+  isFile(): boolean;
+}
+
+export interface ReadFileHandle extends PositionedReader {
+  stat(options: { bigint: true }): Promise<ReadHandleStat>;
+  close(): Promise<void>;
+}
+
+export interface AgentReadToolOptions {
+  openFile?: (path: string, flags: number) => Promise<ReadFileHandle>;
+}
+
+type FileSnapshot = Pick<ReadHandleStat, "dev" | "ino" | "size" | "mtimeNs" | "ctimeNs">;
+
+interface PagedFile {
   path: string;
-  bytes: Buffer;
+  handle: ReadFileHandle;
+  totalBytes: number;
+  snapshot: FileSnapshot;
 }
 
 interface LineSpan {
@@ -160,29 +190,12 @@ interface LineSpan {
   end: number;
 }
 
-function hasOwn(value: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function prepareReadArguments(rawInput: unknown): AgentReadInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput)
-    ? omitNullOptionalFields(rawInput, READ_OPTIONAL_FIELDS) as Record<string, unknown>
-    : { path: "" };
-  if (typeof prepared.path !== "string") prepared.path = "";
-  if (prepared.mode !== undefined && typeof prepared.mode !== "string") prepared.mode = "";
-  for (const field of ["start_line", "max_lines", "max_bytes", "start_byte"] as const) {
-    if (prepared[field] !== undefined && typeof prepared[field] !== "number") prepared[field] = -1;
-  }
-  if (prepared.show_line_numbers !== undefined && typeof prepared.show_line_numbers !== "boolean") {
-    prepared.show_line_numbers = false;
-    prepared.max_bytes = -1;
-  }
-  if (prepared.encoding !== undefined && typeof prepared.encoding !== "string") prepared.encoding = "";
-  return prepared as AgentReadInput;
+  return prepareInputArguments(rawInput, READ_OPTIONAL_FIELDS, normalizeInput);
 }
 
 function fail(
@@ -232,7 +245,7 @@ function normalizeInput(rawInput: unknown): NormalizedReadInput {
     "encoding",
   ]);
   const unknownKey = Object.keys(rawInput).find((key) => !allowedKeys.has(key));
-  if (unknownKey) {
+  if (unknownKey !== undefined) {
     throw new ReadToolError("INVALID_INPUT", `Unknown input field: ${unknownKey}`);
   }
 
@@ -251,7 +264,7 @@ function normalizeInput(rawInput: unknown): NormalizedReadInput {
   }
 
   if (mode === "lines") {
-    if (hasOwn(rawInput, "start_byte") || hasOwn(rawInput, "encoding")) {
+    if (rawInput.start_byte !== undefined || rawInput.encoding !== undefined) {
       throw new ReadToolError("INVALID_INPUT", "start_byte and encoding are valid only in byte mode");
     }
 
@@ -266,16 +279,16 @@ function normalizeInput(rawInput: unknown): NormalizedReadInput {
         ? 1
         : validateInteger(rawInput.start_line, "start_line", 1, 2_147_483_647),
       maxLines: rawInput.max_lines === undefined
-        ? 500
+        ? 200
         : validateInteger(rawInput.max_lines, "max_lines", 1, MAX_LINE_COUNT),
-      showLineNumbers: rawInput.show_line_numbers ?? false,
+      showLineNumbers: rawInput.show_line_numbers ?? true,
       maxBytes: rawInput.max_bytes === undefined
-        ? 32_768
+        ? 16_384
         : validateInteger(rawInput.max_bytes, "max_bytes", 1, MAX_LINE_PAGE_BYTES),
     };
   }
 
-  if (hasOwn(rawInput, "start_line") || hasOwn(rawInput, "max_lines") || hasOwn(rawInput, "show_line_numbers")) {
+  if (rawInput.start_line !== undefined || rawInput.max_lines !== undefined || rawInput.show_line_numbers !== undefined) {
     throw new ReadToolError(
       "INVALID_INPUT",
       "start_line, max_lines, and show_line_numbers are valid only in line mode",
@@ -292,9 +305,9 @@ function normalizeInput(rawInput: unknown): NormalizedReadInput {
     mode,
     startByte: rawInput.start_byte === undefined
       ? 0
-      : validateInteger(rawInput.start_byte, "start_byte", 0, MAX_FILE_BYTES),
+      : validateInteger(rawInput.start_byte, "start_byte", 0, Number.MAX_SAFE_INTEGER),
     maxBytes: rawInput.max_bytes === undefined
-      ? 32_768
+      ? 16_384
       : validateInteger(
         rawInput.max_bytes,
         "max_bytes",
@@ -333,80 +346,179 @@ function checkCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new ReadToolError("CANCELLED", "Read was cancelled");
 }
 
-async function loadFileBuffer(
+async function openPagedFile(
   input: NormalizedReadInput,
   cwd: string,
   signal: AbortSignal | undefined,
-): Promise<FileBuffer> {
+  openFile: NonNullable<AgentReadToolOptions["openFile"]>,
+): Promise<PagedFile> {
   checkCancelled(signal);
   const requestedPath = resolve(cwd, input.path);
   let canonicalPath: string;
-
   try {
     canonicalPath = await realpath(requestedPath);
+    checkCancelled(signal);
   } catch (error) {
+    checkCancelled(signal);
     throw mapFilesystemError(error, requestedPath, "resolve path");
   }
 
+  let handle: ReadFileHandle | undefined;
+  let opened = false;
   try {
     const fileInfo = await stat(canonicalPath);
+    checkCancelled(signal);
     if (!fileInfo.isFile()) {
       throw new ReadToolError("UNSUPPORTED_FILE_TYPE", "The target is not a regular file", canonicalPath);
     }
-    if (fileInfo.size > MAX_FILE_BYTES) {
-      throw new ReadToolError("RESOURCE_LIMIT", "The file exceeds the 67108864-byte limit", canonicalPath);
-    }
-
+    handle = await openFile(canonicalPath, constants.O_RDONLY | constants.O_NONBLOCK);
     checkCancelled(signal);
-    const bytes = await readFile(canonicalPath, signal ? { signal } : undefined);
-    if (bytes.length > MAX_FILE_BYTES) {
-      throw new ReadToolError("RESOURCE_LIMIT", "The file exceeds the 67108864-byte limit", canonicalPath);
+    const snapshot = await handle.stat({ bigint: true });
+    checkCancelled(signal);
+    if (!snapshot.isFile()) {
+      throw new ReadToolError("UNSUPPORTED_FILE_TYPE", "The target is not a regular file", canonicalPath);
     }
-    return { path: canonicalPath, bytes };
+    if (snapshot.size < 0n || snapshot.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new ReadToolError("RESOURCE_LIMIT", "The file size is not a safe integer", canonicalPath);
+    }
+    const { dev, ino, size, mtimeNs, ctimeNs } = snapshot;
+    opened = true;
+    return { path: canonicalPath, handle, totalBytes: Number(size), snapshot: { dev, ino, size, mtimeNs, ctimeNs } };
   } catch (error) {
-    if (isAbortError(error)) throw new ReadToolError("CANCELLED", "Read was cancelled");
-    if (error instanceof ReadToolError) throw error;
-    throw mapFilesystemError(error, canonicalPath, "read file");
+    checkCancelled(signal);
+    throw mapFilesystemError(error, canonicalPath, "open file");
+  } finally {
+    if (handle && !opened) await handle.close();
   }
 }
 
-function decodeUtf8(bytes: Buffer): string {
+async function verifySnapshot(file: PagedFile, signal: AbortSignal | undefined): Promise<void> {
+  checkCancelled(signal);
+  const current = await file.handle.stat({ bigint: true });
+  checkCancelled(signal);
+  const keys = ["dev", "ino", "size", "mtimeNs", "ctimeNs"] as const;
+  if (!current.isFile() || keys.some((key) => current[key] !== file.snapshot[key])) {
+    throw new ReadToolError("FILE_CHANGED", "The file changed during read", file.path);
+  }
+}
+
+async function readPositioned(
+  reader: PositionedReader,
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  position: number,
+  signal: AbortSignal | undefined,
+  path?: string,
+): Promise<number> {
+  checkCancelled(signal);
+  let bytesRead: number;
+  try {
+    ({ bytesRead } = await reader.read(buffer, offset, length, position));
+  } catch (error) {
+    checkCancelled(signal);
+    throw error;
+  }
+  checkCancelled(signal);
+  if (bytesRead === 0) {
+    throw new ReadToolError("FILE_CHANGED", "The file changed during read", path);
+  }
+  if (!Number.isInteger(bytesRead) || bytesRead < 0 || bytesRead > length) {
+    throw new ReadToolError("INTERNAL_ERROR", "The positioned read returned an invalid byte count", path);
+  }
+  return bytesRead;
+}
+
+function decodeUtf8(bytes: Buffer, path?: string): string {
   try {
     return new TextDecoder("utf-8", decoderOptions).decode(bytes);
   } catch {
-    throw new ReadToolError("INVALID_ENCODING", "The file is not valid UTF-8");
+    throw new ReadToolError("INVALID_ENCODING", "The file is not valid UTF-8", path);
   }
 }
 
-function countLogicalLines(bytes: Buffer): number {
-  if (bytes.length === 0) return 0;
-  let lineFeeds = 0;
-  for (const byte of bytes) {
-    if (byte === 10) lineFeeds += 1;
-  }
-  return lineFeeds + (bytes[bytes.length - 1] === 10 ? 0 : 1);
+interface ScannedLinePage {
+  bytes: Buffer;
+  spans: LineSpan[];
+  startByte: number;
+  totalLines: number | null;
+  limitedBy: "none" | "lines" | "bytes";
 }
 
-function findLineSpan(bytes: Buffer, targetLine: number): LineSpan | undefined {
+type LineInput = NormalizedReadInput & {
+  mode: "lines";
+  startLine: number;
+  maxLines: number;
+  showLineNumbers: boolean;
+};
+
+async function scanLinePage(
+  input: LineInput,
+  file: PagedFile,
+  signal: AbortSignal | undefined,
+): Promise<ScannedLinePage> {
+  const scratch = Buffer.allocUnsafe(SCAN_BLOCK_BYTES);
+  const source = Buffer.allocUnsafe(input.maxBytes + 1);
+  const spans: LineSpan[] = [];
+  let position = 0;
   let line = 1;
-  let start = 0;
-  for (let index = 0; index < bytes.length; index += 1) {
-    if (bytes[index] !== 10) continue;
-    if (line === targetLine) return { start, end: index + 1 };
-    line += 1;
-    start = index + 1;
-  }
-  if (start < bytes.length && line === targetLine) return { start, end: bytes.length };
-  return undefined;
-}
+  let lineStart = 0;
+  let startByte = 0;
+  let retained = 0;
+  let candidateStart = 0;
+  let totalLines: number | null = file.totalBytes === 0 ? 0 : null;
+  let limitedBy: ScannedLinePage["limitedBy"] = "none";
 
-function findNextLineSpan(bytes: Buffer, previous: LineSpan): LineSpan | undefined {
-  if (previous.end >= bytes.length) return undefined;
-  const start = previous.end;
-  for (let index = start; index < bytes.length; index += 1) {
-    if (bytes[index] === 10) return { start, end: index + 1 };
+  scan: while (position < file.totalBytes) {
+    const count = await readPositioned(
+      file.handle, scratch, 0, Math.min(SCAN_BLOCK_BYTES, file.totalBytes - position), position, signal, file.path,
+    );
+    let cursor = 0;
+    while (cursor < count) {
+      checkCancelled(signal);
+      const found = scratch.indexOf(10, cursor);
+      const hasLf = found >= 0 && found < count;
+      const end = hasLf ? found + 1 : count;
+      const absoluteEnd = position + end;
+      const atEof = absoluteEnd === file.totalBytes;
+      if (line >= input.startLine) {
+        if (retained === 0) startByte = lineStart;
+        const length = end - cursor;
+        const kept = Math.min(length, input.maxBytes + 1 - retained);
+        scratch.copy(source, retained, cursor, cursor + kept);
+        retained += kept;
+        if (retained > input.maxBytes) {
+          if (spans.length === 0) {
+            throw new ReadToolError(
+              "LINE_TOO_LONG", "The first requested line exceeds max_bytes", file.path, line, lineStart,
+            );
+          }
+          limitedBy = "bytes";
+          break scan;
+        }
+        if (hasLf || atEof) {
+          spans.push({ start: candidateStart, end: retained });
+          candidateStart = retained;
+        }
+      }
+      if (atEof) totalLines = line;
+      if (spans.length === input.maxLines) {
+        limitedBy = atEof ? "none" : "lines";
+        break scan;
+      }
+      if (spans.length > 0 && retained === input.maxBytes && (hasLf || atEof)) {
+        limitedBy = atEof ? "none" : "bytes";
+        break scan;
+      }
+      if (hasLf) {
+        line += 1;
+        lineStart = absoluteEnd;
+      }
+      cursor = end;
+    }
+    position += count;
   }
-  return { start, end: bytes.length };
+  return { bytes: source.subarray(0, retained), spans, startByte, totalLines, limitedBy };
 }
 
 function lineFooter(startLine: number | null, endLine: number | null, hasMore: boolean): string {
@@ -449,84 +561,37 @@ function renderLineSpans(
   }).join("");
 }
 
-function buildLineResult(
-  input: NormalizedReadInput & {
-    mode: "lines";
-    startLine: number;
-    maxLines: number;
-    showLineNumbers: boolean;
-  },
-  fileBuffer: FileBuffer,
+async function buildLineResult(
+  input: LineInput,
+  pagedFile: PagedFile,
   signal: AbortSignal | undefined,
-): ReadLinesResult {
-  decodeUtf8(fileBuffer.bytes);
-  checkCancelled(signal);
-  const totalLines = countLogicalLines(fileBuffer.bytes);
-  const file = { path: fileBuffer.path, total_bytes: fileBuffer.bytes.length, total_lines: totalLines };
-
-  if (input.startLine > totalLines || totalLines === 0) {
-    const footer = lineFooter(null, null, false);
+): Promise<ReadLinesResult> {
+  const page = await scanLinePage(input, pagedFile, signal);
+  const file = { path: pagedFile.path, total_bytes: pagedFile.totalBytes, total_lines: page.totalLines };
+  if (page.spans.length === 0) {
     return {
-      ok: true,
-      mode: "lines",
-      file,
-      content: "",
-      start_line: null,
-      end_line: null,
-      has_more: false,
-      next_start_line: null,
-      limited_by: "none",
-      show_line_numbers: input.showLineNumbers,
-      source_bytes: 0,
-      formatted_bytes: Buffer.byteLength(footer),
+      ok: true, mode: "lines", file, content: "", start_line: null, end_line: null,
+      has_more: false, next_start_line: null, limited_by: "none",
+      show_line_numbers: input.showLineNumbers, source_bytes: 0,
+      formatted_bytes: Buffer.byteLength(lineFooter(null, null, false)),
     };
   }
 
-  const eligible: LineSpan[] = [];
-  let sourceBytes = 0;
-  let span = findLineSpan(fileBuffer.bytes, input.startLine);
-  let sourceLimitedBy: "none" | "lines" | "bytes" = "none";
-  while (span && eligible.length < input.maxLines) {
-    checkCancelled(signal);
-    const lineBytes = span.end - span.start;
-    if (eligible.length === 0 && lineBytes > input.maxBytes) {
-      throw new ReadToolError(
-        "LINE_TOO_LONG",
-        "The first requested line exceeds max_bytes",
-        fileBuffer.path,
-        input.startLine,
-        span.start,
-      );
-    }
-    if (sourceBytes + lineBytes > input.maxBytes) {
-      sourceLimitedBy = "bytes";
-      break;
-    }
-    eligible.push(span);
-    sourceBytes += lineBytes;
-    span = findNextLineSpan(fileBuffer.bytes, span);
-  }
-
-  const eligibleEndLine = input.startLine + eligible.length - 1;
-  if (eligibleEndLine >= totalLines) sourceLimitedBy = "none";
-  else if (eligible.length === input.maxLines) sourceLimitedBy = "lines";
-
-  const formattedPage = (count: number): { content: string; text: string } => {
-    const selected = eligible.slice(0, count);
-    const content = renderLineSpans(fileBuffer.bytes, selected, input.startLine, input.showLineNumbers);
+  const formattedSize = (count: number): number => {
     const endLine = input.startLine + count - 1;
-    return {
-      content,
-      text: contentWithFooter(content, lineFooter(input.startLine, endLine, endLine < totalLines)),
-    };
+    const sourceEnd = page.spans[count - 1]!.end;
+    const hasMore = page.startByte + sourceEnd < pagedFile.totalBytes;
+    let bytes = sourceEnd;
+    if (input.showLineNumbers) bytes += count * (String(endLine).length + Buffer.byteLength(" │ "));
+    bytes += page.bytes[sourceEnd - 1] === 10 ? 1 : 2;
+    return bytes + Buffer.byteLength(lineFooter(input.startLine, endLine, hasMore));
   };
-
   let low = 1;
-  let high = eligible.length;
+  let high = page.spans.length;
   let emittedCount = 1;
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    if (Buffer.byteLength(formattedPage(middle).text) <= MAX_RESULT_BYTES) {
+    if (formattedSize(middle) <= MAX_RESULT_BYTES) {
       emittedCount = middle;
       low = middle + 1;
     } else {
@@ -534,30 +599,19 @@ function buildLineResult(
     }
   }
 
+  const selected = page.spans.slice(0, emittedCount);
+  const sourceBytes = selected[emittedCount - 1]!.end;
+  decodeUtf8(page.bytes.subarray(0, sourceBytes), pagedFile.path);
+  checkCancelled(signal);
+  const content = renderLineSpans(page.bytes, selected, input.startLine, input.showLineNumbers);
   const endLine = input.startLine + emittedCount - 1;
-  const hasMore = endLine < totalLines;
-  const limitedBy = endLine === totalLines
-    ? "none"
-    : emittedCount < eligible.length
-      ? "formatted_bytes"
-      : sourceLimitedBy;
-  const selectedSpans = eligible.slice(0, emittedCount);
-  const emittedSourceBytes = selectedSpans.reduce((total, selected) => total + selected.end - selected.start, 0);
-  const formatted = formattedPage(emittedCount);
-
+  const hasMore = page.startByte + sourceBytes < pagedFile.totalBytes;
   return {
-    ok: true,
-    mode: "lines",
-    file,
-    content: formatted.content,
-    start_line: input.startLine,
-    end_line: endLine,
-    has_more: hasMore,
-    next_start_line: hasMore ? endLine + 1 : null,
-    limited_by: limitedBy,
-    show_line_numbers: input.showLineNumbers,
-    source_bytes: emittedSourceBytes,
-    formatted_bytes: Buffer.byteLength(formatted.text),
+    ok: true, mode: "lines", file, content, start_line: input.startLine, end_line: endLine,
+    has_more: hasMore, next_start_line: hasMore ? endLine + 1 : null,
+    limited_by: !hasMore ? "none" : emittedCount < page.spans.length ? "formatted_bytes" : page.limitedBy,
+    show_line_numbers: input.showLineNumbers, source_bytes: sourceBytes,
+    formatted_bytes: Buffer.byteLength(contentWithFooter(content, lineFooter(input.startLine, endLine, hasMore))),
   };
 }
 
@@ -565,61 +619,111 @@ function isContinuationByte(value: number | undefined): boolean {
   return value !== undefined && value >= 0x80 && value <= 0xbf;
 }
 
-function buildByteResult(
-  input: NormalizedReadInput & { mode: "bytes"; startByte: number; maxBytes: number; encoding: ByteEncoding },
-  fileBuffer: FileBuffer,
-  signal: AbortSignal | undefined,
-): ReadBytesResult {
-  const { bytes } = fileBuffer;
-  const file = { path: fileBuffer.path, total_bytes: bytes.length };
-  const startByte = Math.min(input.startByte, bytes.length);
-  if (input.encoding === "base64") {
-    const endByte = Math.min(startByte + input.maxBytes, bytes.length);
-    return {
-      ok: true,
-      mode: "bytes",
-      file,
-      encoding: "base64",
-      content: bytes.subarray(startByte, endByte).toString("base64"),
-      start_byte: startByte,
-      end_byte: endByte,
-      has_more: endByte < bytes.length,
-      next_start_byte: endByte < bytes.length ? endByte : null,
-    };
-  }
+export interface BytePageOptions {
+  totalBytes: number;
+  startByte: number;
+  maxBytes: number;
+  encoding: ByteEncoding;
+  path?: string;
+  signal?: AbortSignal;
+  /** Withhold a valid partial UTF-8 code point at a live prefix end. */
+  allowIncompleteUtf8?: boolean;
+}
 
-  decodeUtf8(bytes);
-  checkCancelled(signal);
-  if (startByte < bytes.length && isContinuationByte(bytes[startByte])) {
-    throw new ReadToolError("INVALID_BYTE_BOUNDARY", "start_byte is inside a UTF-8 code point", fileBuffer.path);
-  }
+export interface BytePage {
+  encoding: ByteEncoding;
+  content: string;
+  start_byte: number;
+  end_byte: number;
+  has_more: boolean;
+  next_start_byte: number | null;
+}
 
-  const tentativeEnd = Math.min(startByte + input.maxBytes, bytes.length);
-  let endByte = tentativeEnd;
-  while (endByte > startByte && endByte < bytes.length && isContinuationByte(bytes[endByte])) {
-    endByte -= 1;
-  }
-  if (endByte === startByte && startByte < bytes.length) {
-    throw new ReadToolError("BYTE_PAGE_TOO_SMALL", "max_bytes cannot contain the next UTF-8 code point", fileBuffer.path);
-  }
+function utf8Width(lead: number): number {
+  return lead <= 0x7f ? 1 : lead >= 0xc2 && lead <= 0xdf ? 2
+    : lead >= 0xe0 && lead <= 0xef ? 3 : lead >= 0xf0 && lead <= 0xf4 ? 4 : 0;
+}
 
+function bytePageRange(options: BytePageOptions): { startByte: number; length: number } {
+  validateInteger(options.totalBytes, "totalBytes", 0, Number.MAX_SAFE_INTEGER);
+  validateInteger(options.startByte, "startByte", 0, Number.MAX_SAFE_INTEGER);
+  if (options.encoding !== "utf8" && options.encoding !== "base64") {
+    throw new ReadToolError("INVALID_INPUT", "encoding must be utf8 or base64");
+  }
+  validateInteger(options.maxBytes, "maxBytes", 1,
+    options.encoding === "base64" ? MAX_BASE64_PAGE_BYTES : MAX_UTF8_PAGE_BYTES);
+  const startByte = Math.min(options.startByte, options.totalBytes);
+  const length = Math.min(options.maxBytes + (options.encoding === "utf8" ? 3 : 0), options.totalBytes - startByte);
+  return { startByte, length };
+}
+
+/** Supply bytes from startByte through maxBytes plus three UTF-8 lookahead bytes, or EOF. */
+export function decodeBytePage(bytes: Buffer, options: BytePageOptions): BytePage {
+  checkCancelled(options.signal);
+  const { startByte, length } = bytePageRange(options);
+  if (bytes.length < length) {
+    throw new ReadToolError("INVALID_INPUT", "The byte page buffer is shorter than the requested range", options.path);
+  }
+  const budget = Math.min(options.maxBytes, options.totalBytes - startByte);
+  bytes = bytes.subarray(0, length);
+  let selected = budget;
+  if (options.encoding === "utf8") {
+    if (isContinuationByte(bytes[0])) {
+      throw new ReadToolError("INVALID_BYTE_BOUNDARY", "start_byte is inside a UTF-8 code point", options.path);
+    }
+    let withheld = false;
+    if (budget > 0) {
+      let tail = budget - 1;
+      while (tail > 0 && tail >= budget - 3 && isContinuationByte(bytes[tail])) tail -= 1;
+      const width = utf8Width(bytes[tail]!);
+      if (width > budget - tail) {
+        if (options.allowIncompleteUtf8 && startByte + budget === options.totalBytes) {
+          try {
+            new TextDecoder("utf-8", decoderOptions).decode(bytes.subarray(tail, budget), { stream: true });
+          } catch {
+            throw new ReadToolError("INVALID_ENCODING", "The file is not valid UTF-8", options.path);
+          }
+          withheld = true;
+        } else {
+          decodeUtf8(bytes.subarray(tail, tail + width), options.path);
+        }
+        selected = tail;
+      }
+    }
+    if (selected === 0 && budget > 0 && !withheld) {
+      throw new ReadToolError("BYTE_PAGE_TOO_SMALL", "max_bytes cannot contain the next UTF-8 code point", options.path);
+    }
+  }
+  const endByte = startByte + selected;
+  const hasMore = endByte < options.totalBytes;
+  const content = options.encoding === "base64" ? bytes.subarray(0, selected).toString("base64")
+    : decodeUtf8(bytes.subarray(0, selected), options.path);
+  checkCancelled(options.signal);
   return {
-    ok: true,
-    mode: "bytes",
-    file,
-    encoding: "utf8",
-    content: new TextDecoder("utf-8", decoderOptions).decode(bytes.subarray(startByte, endByte)),
-    start_byte: startByte,
-    end_byte: endByte,
-    has_more: endByte < bytes.length,
-    next_start_byte: endByte < bytes.length ? endByte : null,
+    encoding: options.encoding, content,
+    start_byte: startByte, end_byte: endByte, has_more: hasMore, next_start_byte: hasMore ? endByte : null,
   };
+}
+
+/** Read a frozen byte prefix. The caller owns the handle and consistency checks. */
+export async function readBytePage(reader: PositionedReader, options: BytePageOptions): Promise<BytePage> {
+  checkCancelled(options.signal);
+  const { startByte, length } = bytePageRange(options);
+  const bytes = Buffer.allocUnsafe(length);
+  let offset = 0;
+  while (offset < length) {
+    offset += await readPositioned(
+      reader, bytes, offset, length - offset, startByte + offset, options.signal, options.path,
+    );
+  }
+  return decodeBytePage(bytes, options);
 }
 
 async function executeRead(
   rawInput: unknown,
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
+  options: AgentReadToolOptions,
 ): Promise<ReadResult> {
   let input: NormalizedReadInput;
   try {
@@ -631,31 +735,31 @@ async function executeRead(
     return fail("INVALID_INPUT", error instanceof Error ? error.message : String(error));
   }
 
+  let errorPath = resolve(ctx.cwd, input.path);
   try {
-    const fileBuffer = await loadFileBuffer(input, ctx.cwd, signal);
-    if (input.mode === "lines") {
-      return buildLineResult(
-        input as NormalizedReadInput & {
-          mode: "lines";
-          startLine: number;
-          maxLines: number;
-          showLineNumbers: boolean;
-        },
-        fileBuffer,
-        signal,
-      );
+    const file = await openPagedFile(input, ctx.cwd, signal, options.openFile ?? open);
+    errorPath = file.path;
+    let result: ReadLinesResult | ReadBytesResult;
+    try {
+      if (input.mode === "lines") {
+        result = await buildLineResult(input as LineInput, file, signal);
+      } else {
+        const page = await readBytePage(file.handle, {
+          totalBytes: file.totalBytes, startByte: input.startByte!, maxBytes: input.maxBytes,
+          encoding: input.encoding!, path: file.path, signal,
+        });
+        result = { ok: true, mode: "bytes", file: { path: file.path, total_bytes: file.totalBytes }, ...page };
+      }
+      await verifySnapshot(file, signal);
+    } finally {
+      await file.handle.close();
     }
-    return buildByteResult(
-      input as NormalizedReadInput & { mode: "bytes"; startByte: number; maxBytes: number; encoding: ByteEncoding },
-      fileBuffer,
-      signal,
-    );
+    checkCancelled(signal);
+    return result;
   } catch (error) {
-    if (error instanceof ReadToolError) {
-      return fail(error.code, error.message, error.path, error.line, error.byteOffset);
-    }
-    if (isAbortError(error)) return fail("CANCELLED", "Read was cancelled");
-    return fail("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
+    if (signal?.aborted || isAbortError(error)) return fail("CANCELLED", "Read was cancelled");
+    const mapped = mapFilesystemError(error, errorPath, "read file");
+    return fail(mapped.code, mapped.message, mapped.path, mapped.line, mapped.byteOffset);
   }
 }
 
@@ -698,6 +802,7 @@ function detailsFor(result: ReadResult): ReadToolDetails {
       start_line: result.start_line,
       end_line: result.end_line,
       next_start_line: result.next_start_line,
+      has_more: result.has_more,
       limited_by: result.limited_by,
       show_line_numbers: result.show_line_numbers,
       source_bytes: result.source_bytes,
@@ -714,6 +819,7 @@ function detailsFor(result: ReadResult): ReadToolDetails {
     start_byte: result.start_byte,
     end_byte: result.end_byte,
     next_start_byte: result.next_start_byte,
+    has_more: result.has_more,
   };
 }
 
@@ -724,21 +830,21 @@ function boundResult(result: ReadResult): { result: ReadResult; text: string } {
   return { result: failure, text: formatReadResult(failure) };
 }
 
-export function createAgentReadTool(): ToolDefinition<typeof readParameters, ReadToolDetails> {
+export function createAgentReadTool(options: AgentReadToolOptions = {}): ToolDefinition<typeof readParameters, ReadToolDetails> {
   return {
     name: "read",
     label: "read",
-    description: "Read a regular file as bounded line or byte pages. Line ranges are inclusive; byte ranges are zero-based and half-open. Set show_line_numbers=true when precise line identity is needed. Large lines require byte mode.",
+    description: "Read a regular file as bounded line or byte pages. Line ranges are inclusive; byte ranges are zero-based and half-open. Line pages include line numbers by default. Large lines require byte mode.",
     promptSnippet: "Read file contents with bounded line or byte paging",
     promptGuidelines: [
-      "Use read for file examination or paging; set show_line_numbers=true for exact line identity. Do not use nl, cat -n, or sed only to number or page files.",
+      "Use read for file examination or paging. Line numbers are on by default; set show_line_numbers=false for raw source. Do not use nl, cat -n, or sed only to number or page files.",
       "Use read byte mode when line mode reports LINE_TOO_LONG, starting at error.byte_offset.",
     ],
     parameters: readParameters,
     constrainedSampling: { type: "json_schema", strict: "prefer" },
     prepareArguments: prepareReadArguments,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const bounded = boundResult(await executeRead(params, ctx, signal));
+      const bounded = boundResult(await executeRead(params, ctx, signal, options));
       return {
         content: [{ type: "text", text: bounded.text }],
         details: detailsFor(bounded.result),
