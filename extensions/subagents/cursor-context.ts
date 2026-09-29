@@ -284,6 +284,8 @@ function contextFailure(): SubagentBackendError {
  * source comes from the effective in-memory branch, so ephemeral sessions work.
  */
 export function prepareCursorForkSummarySource(branch: readonly SessionEntry[]): CursorForkSummarySource {
+    // Raw entries do not reflect Pi context edits. Use a fresh context instead of leaking omitted text.
+    if (branch.some((entry) => entry.type === "context_edit")) throw contextFailure();
     let selected: SessionEntry[];
     try {
         selected = selectForkSnapshotEntries(branch).slice(-MAX_CURSOR_FORK_SOURCE_ENTRIES);

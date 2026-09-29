@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
-import { InMemoryCredentialStore, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt, InMemoryCredentialStore, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import {
   DefaultResourceLoader,
   ModelRuntime,
@@ -519,7 +519,7 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
     const managerFaux = fauxProvider({ provider: "hari-manager-sdk" });
     let managerRequestPrompt;
     managerFaux.setResponses([async (context) => {
-      managerRequestPrompt = context.systemPrompt;
+      managerRequestPrompt = getCurrentSystemPrompt(context.messages);
       return fauxAssistantMessage("local manager SDK response");
     }]);
     const managerRuntime = await ModelRuntime.create({

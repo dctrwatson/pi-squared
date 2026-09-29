@@ -804,7 +804,9 @@ export default function hariExtension(pi: ExtensionAPI) {
       || deliveredSignature !== view.signature
       || !event.messages.some((message) => message.role === "toolResult"
         && message.toolName === "manager_context" && !message.isError
-        && message.details?.signature === deliveredSignature && !message.details?.blocked
+        && message.details !== null && typeof message.details === "object"
+        && "signature" in message.details && message.details.signature === deliveredSignature
+        && (!("blocked" in message.details) || !message.details.blocked)
         && message.content.length === 1 && message.content[0].type === "text"
         && message.content[0].text === view.prompt);
   });

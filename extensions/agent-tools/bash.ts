@@ -11,6 +11,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { omitNullOptionalFields } from "./optional-input.ts";
 import {
   createProcessArtifact,
   openProcessArtifactStreams,
@@ -73,6 +74,7 @@ export const agentBashParameters = Type.Object({
 });
 
 const bashParameters = agentBashParameters;
+const BASH_OPTIONAL_FIELDS = ["cwd", "timeout_seconds"];
 
 export type AgentBashInput = Static<typeof bashParameters>;
 
@@ -117,10 +119,11 @@ class BashToolError extends Error {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function normalizeInput(rawInput: unknown): NormalizedBashInput {
+  rawInput = omitNullOptionalFields(rawInput, BASH_OPTIONAL_FIELDS);
   if (!isRecord(rawInput)) throw new BashToolError("INVALID_INPUT", "Input must be an object");
   const allowedKeys = new Set(["command", "cwd", "timeout_seconds"]);
   const unknownKey = Object.keys(rawInput).find((key) => !allowedKeys.has(key));
@@ -157,7 +160,7 @@ export function normalizeInput(rawInput: unknown): NormalizedBashInput {
 
 function prepareBashArguments(rawInput: unknown): AgentBashInput {
   if (!isRecord(rawInput)) return { command: "\0" } as AgentBashInput;
-  const prepared: Record<string, unknown> = { ...rawInput };
+  const prepared = omitNullOptionalFields(rawInput, BASH_OPTIONAL_FIELDS) as Record<string, unknown>;
   if (typeof prepared.command !== "string") prepared.command = "\0";
   if (prepared.cwd !== undefined && typeof prepared.cwd !== "string") prepared.cwd = "\0";
   if (
@@ -713,6 +716,7 @@ export function createAgentBashTool(options: AgentBashToolOptions = {}): ToolDef
     description: "Run Bash with a 120-second default timeout and bounded stream previews. Read artifacts for omitted captured bytes. Incomplete capture is marked.",
     promptSnippet: "Run Bash with bounded status and previews",
     parameters: bashParameters,
+    constrainedSampling: { type: "json_schema", strict: "prefer" },
     prepareArguments: prepareBashArguments,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {

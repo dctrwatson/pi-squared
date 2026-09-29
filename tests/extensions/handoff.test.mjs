@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const handoffModule = await import("../../extensions/handoff.ts");
+const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 const {
   HANDOFF_MAX_TOKENS,
   HANDOFF_SYSTEM_PROMPT,
@@ -139,34 +140,18 @@ test("handoff uses its dedicated, data-safe replacement system prompt", () => {
   assert.match(HANDOFF_SYSTEM_PROMPT, /Output only the handoff text/i);
 });
 
-test("generated handoffs retain the compaction-aware context", () => {
+test("generated handoffs keep projected context and replace the source system prompt", () => {
   const messages = buildHandoffGenerationMessages([
-    {
-      type: "compaction",
-      id: "compaction-entry",
-      parentId: null,
-      timestamp: "2026-01-01T00:00:00.000Z",
-      summary: "Important compacted context",
-      firstKeptEntryId: "kept-user",
-      tokensBefore: 100,
-    },
-    {
-      type: "message",
-      id: "kept-user",
-      parentId: "compaction-entry",
-      timestamp: "2026-01-01T00:00:01.000Z",
-      message: {
-        role: "user",
-        content: "Recent uncompressed context",
-        timestamp: 1,
-      },
-    },
+    { role: "system", content: "Old system prompt", timestamp: 0 },
+    { role: "compactionSummary", summary: "Important compacted context", timestamp: 1 },
+    { role: "user", content: "Recent uncompressed context", timestamp: 2 },
   ]);
 
   assert.equal(messages.length, 3);
   assert.match(messages[0].content[0].text, /Important compacted context/);
   assert.equal(messages[1].content, "Recent uncompressed context");
   assert.equal(messages[2].content[0].text, "Create the handoff now.");
+  assert.doesNotMatch(JSON.stringify(messages), /Old system prompt/);
 });
 
 test("generated handoffs dispatch through the model runtime without retaining cache state", async () => {
@@ -191,13 +176,9 @@ test("generated handoffs dispatch through the model runtime without retaining ca
       ],
     }),
     sessionManager: {
-      buildContextEntries: () => [{
-        type: "message",
-        id: "user-entry",
-        parentId: null,
-        timestamp: "2026-01-01T00:00:00.000Z",
-        message: { role: "user", content: "Original request", timestamp: 0 },
-      }],
+      buildSessionProjection: () => ({ messages: [
+        { role: "user", content: "Edited request", timestamp: 0 },
+      ] }),
     },
     modelRegistry: {
       complete: async (...args) => {
@@ -215,6 +196,7 @@ test("generated handoffs dispatch through the model runtime without retaining ca
   assert.equal(text, "Generated handoff");
   assert.equal(request[0], model);
   assert.equal(request[1].systemPrompt, HANDOFF_SYSTEM_PROMPT);
+  assert.equal(request[1].messages[0].content, "Edited request");
   assert.match(request[1].messages.at(-1).content[0].text, /temporary-review/);
   assert.doesNotMatch(request[1].messages.at(-1).content[0].text, /command-only/);
   assert.match(request[1].messages.at(-1).content[0].text, /do not carry into the new session/i);
@@ -222,6 +204,19 @@ test("generated handoffs dispatch through the model runtime without retaining ca
   assert.equal(request[2].cacheRetention, "none");
   assert.equal(request[2].maxTokens, Math.min(HANDOFF_MAX_TOKENS, model.maxTokens));
   assert.match(request[2].sessionId, /^[0-9a-f-]+$/);
+});
+
+test("generated handoffs honor Pi context edits without changing the original transcript", async () => {
+  const manager = SessionManager.inMemory(process.cwd());
+  const original = manager.appendMessage({ role: "user", content: "Old request", timestamp: 1 });
+  manager.appendContextEdit(original, { content: "Revised request" });
+  manager.appendMessage({ role: "user", content: "Discard this", timestamp: 2 });
+  const omitted = manager.getLeafId();
+  manager.appendContextEdit(omitted, null);
+  const projected = buildHandoffGenerationMessages(manager.buildSessionProjection().messages);
+  assert.equal(projected[0].content, "Revised request");
+  assert.doesNotMatch(JSON.stringify(projected), /Old request|Discard this/);
+  assert.equal(manager.getBranch().find((entry) => entry.id === original).message.content, "Old request");
 });
 
 test("default handoff creates a linked blank session and leaves the draft in its editor", async () => {

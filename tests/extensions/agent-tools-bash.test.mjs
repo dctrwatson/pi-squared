@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
@@ -67,6 +68,19 @@ test("bash normalizes timeout boundaries", () => {
     () => bashModule.normalizeInput({ command: "true", timeout: 1 }),
     (error) => error.code === "INVALID_INPUT" && /timeout/.test(error.message),
   );
+});
+
+test("bash treats null optional fields as defaults without changing the caller's input", async () => {
+  const tool = bashModule.createAgentBashTool();
+  const input = { command: "printf ok", cwd: null, timeout_seconds: null };
+  assert.deepEqual(tool.prepareArguments(input), { command: "printf ok" });
+  assert.deepEqual(validateToolArguments(tool, { id: "call", name: "bash", arguments: tool.prepareArguments(input) }), { command: "printf ok" });
+  assert.equal(input.cwd, null);
+  assert.deepEqual(bashModule.normalizeInput(input), { command: "printf ok", timeoutSeconds: 120 });
+  const result = await execute(tool, input, process.cwd());
+  assert.equal(result.ok, true);
+  assert.match(result.text, /ok/);
+  assert.throws(() => bashModule.normalizeInput({ command: null, cwd: null }), (error) => error.code === "INVALID_INPUT");
 });
 
 test("bash renderer strips terminal sequences", () => {

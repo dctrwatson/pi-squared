@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import type { Usage } from "@earendil-works/pi-ai";
+import { hasApi, type Usage } from "@earendil-works/pi-ai";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
@@ -239,12 +239,20 @@ function webSearchFailure(error: unknown, signal: AbortSignal | undefined): { te
   };
 }
 
+function supportsNativeWebSearch(model: NonNullable<ExtensionContext["model"]>): boolean {
+  return model.provider === CODEX_PROVIDER
+    && hasApi(model, "openai-codex-responses")
+    && model.compat?.supportsAdditionalTools === true;
+}
+
 function selectWebSearchModel(ctx: ExtensionContext): NonNullable<ExtensionContext["model"]> {
-  if (ctx.model?.provider === CODEX_PROVIDER) return ctx.model;
-  const models = ctx.modelRegistry.getAvailable().filter((model) => model.provider === CODEX_PROVIDER);
-  const model = models.find((candidate) => candidate.id === "gpt-5.4-mini") ?? models[0];
+  if (ctx.model && supportsNativeWebSearch(ctx.model)) return ctx.model;
+  const models = ctx.modelRegistry.getAvailable().filter(supportsNativeWebSearch);
+  const model = models.find((candidate) => candidate.id === "gpt-6-luna")
+    ?? models.find((candidate) => candidate.id === "gpt-5.6-luna")
+    ?? models[0];
   if (!model) {
-    throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an available openai-codex model");
+    throw new WebSearchToolError("MODEL_UNAVAILABLE", "web_search requires an available openai-codex model with native tool support");
   }
   return model;
 }

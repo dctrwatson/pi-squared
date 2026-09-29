@@ -6,6 +6,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
+import { omitNullOptionalFields } from "./optional-input.ts";
 import type { ToolFailureDetails, ToolSuccessDetails } from "./tool-result.ts";
 
 const MAX_FILE_BYTES = 67_108_864;
@@ -14,6 +15,7 @@ const MAX_LINE_COUNT = 2_000;
 const MAX_LINE_PAGE_BYTES = 40_960;
 const MAX_UTF8_PAGE_BYTES = 40_960;
 const MAX_BASE64_PAGE_BYTES = 30_720;
+const READ_OPTIONAL_FIELDS = ["mode", "start_line", "max_lines", "show_line_numbers", "max_bytes", "start_byte", "encoding"];
 
 const readParameters = Type.Object({
   path: Type.String({ description: "File path" }),
@@ -163,11 +165,13 @@ function hasOwn(value: object, key: string): boolean {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function prepareReadArguments(rawInput: unknown): AgentReadInput {
-  const prepared: Record<string, unknown> = isRecord(rawInput) ? { ...rawInput } : { path: "" };
+  const prepared: Record<string, unknown> = isRecord(rawInput)
+    ? omitNullOptionalFields(rawInput, READ_OPTIONAL_FIELDS) as Record<string, unknown>
+    : { path: "" };
   if (typeof prepared.path !== "string") prepared.path = "";
   if (prepared.mode !== undefined && typeof prepared.mode !== "string") prepared.mode = "";
   for (const field of ["start_line", "max_lines", "max_bytes", "start_byte"] as const) {
@@ -213,6 +217,7 @@ function validateInteger(
 }
 
 function normalizeInput(rawInput: unknown): NormalizedReadInput {
+  rawInput = omitNullOptionalFields(rawInput, READ_OPTIONAL_FIELDS);
   if (!isRecord(rawInput)) {
     throw new ReadToolError("INVALID_INPUT", "Input must be an object");
   }
@@ -730,6 +735,7 @@ export function createAgentReadTool(): ToolDefinition<typeof readParameters, Rea
       "Use read byte mode when line mode reports LINE_TOO_LONG, starting at error.byte_offset.",
     ],
     parameters: readParameters,
+    constrainedSampling: { type: "json_schema", strict: "prefer" },
     prepareArguments: prepareReadArguments,
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const bounded = boundResult(await executeRead(params, ctx, signal));

@@ -12,10 +12,10 @@
  */
 
 import { type AssistantMessage, type Message, uuidv7 } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
     BorderedLoader,
     convertToLlm,
-    sessionEntryToContextMessages,
     type ExtensionAPI,
     type ExtensionCommandContext,
     type ExtensionContext,
@@ -106,10 +106,11 @@ function errorMessage(error: unknown): string {
 }
 
 export function buildHandoffGenerationMessages(
-    entries: readonly SessionEntry[],
+    contextMessages: readonly AgentMessage[],
     request = HANDOFF_GENERATION_REQUEST,
 ): Message[] {
-    const messages = convertToLlm(entries.flatMap(sessionEntryToContextMessages));
+    // Keep the projected conversation, but use the handoff prompt instead of the source system prompt.
+    const messages = convertToLlm(contextMessages.filter((message) => message.role !== "system"));
 
     return [
         ...messages,
@@ -129,7 +130,7 @@ function buildGenerationMessages(ctx: ExtensionCommandContext): Message[] {
     const request = temporarySkills.length === 0
         ? HANDOFF_GENERATION_REQUEST
         : `${HANDOFF_GENERATION_REQUEST}\n\nTemporary skill metadata, encoded as JSON: ${JSON.stringify(temporarySkills)}\nThese skills do not carry into the new session. Include only relevant skills in the handoff, with an instruction to read the given path on demand.`;
-    return buildHandoffGenerationMessages(ctx.sessionManager.buildContextEntries(), request);
+    return buildHandoffGenerationMessages(ctx.sessionManager.buildSessionProjection().messages, request);
 }
 
 export async function generateHandoffText(

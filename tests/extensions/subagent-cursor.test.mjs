@@ -640,6 +640,19 @@ test("fork source bounds entries, blocks, text, IDs, and keeps the latest user r
   assert.doesNotMatch(text, /tool-output-secret|errorMessage|error-secret/);
 });
 
+test("Cursor forks reject raw context-edited history before sending source text", async () => {
+  const branch = [
+    userEntry("original", "Omitted confidential text."),
+    { type: "context_edit", id: "edit", targetId: "original", replacement: null },
+    userEntry("latest", "Current request."),
+  ];
+  let called = false;
+  await assert.rejects(contextModule.createCursorForkHandoff(branch, {
+    async generate() { called = true; return "Unsafe"; },
+  }), { code: "BACKEND_FAILED" });
+  assert.equal(called, false);
+});
+
 test("fork handoff truncates generated text but follow-up rejects oversized UTF-8 caller text", async () => {
   const oversized = "🙂".repeat(10_000);
   const handoff = await contextModule.createCursorForkHandoff([userEntry("utf8-user", "Summarize this.")], {

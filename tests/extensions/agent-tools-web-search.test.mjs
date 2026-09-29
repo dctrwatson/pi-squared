@@ -15,8 +15,9 @@ const usage = {
 
 function context(complete, model = {
   provider: "openai-codex",
-  id: "gpt-5.4-mini",
+  id: "gpt-6-luna",
   api: "openai-codex-responses",
+  compat: { supportsAdditionalTools: true },
 }) {
   return { model, modelRegistry: { complete, getAvailable: () => [] } };
 }
@@ -38,7 +39,7 @@ test("web_search forwards only the query to a separate native web-search request
           { type: "text", text: "Node.js release notes: https://nodejs.org/en/blog/release" },
         ],
         provider: "openai-codex",
-        model: "gpt-5.4-mini",
+        model: "gpt-6-luna",
         usage,
         stopReason: "stop",
       };
@@ -52,11 +53,11 @@ test("web_search forwards only the query to a separate native web-search request
       tool: "web_search",
       external_session: true,
       provider: "openai-codex",
-      model: "gpt-5.4-mini",
+      model: "gpt-6-luna",
     },
   }]);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].model.id, "gpt-5.4-mini");
+  assert.equal(calls[0].model.id, "gpt-6-luna");
   assert.equal(calls[0].request.messages.length, 1);
   assert.deepEqual(calls[0].request.messages[0].content, [{ type: "text", text: "latest Node.js release" }]);
   assert.equal(
@@ -64,11 +65,11 @@ test("web_search forwards only the query to a separate native web-search request
     "Search the web. Return a concise factual answer with direct source URLs. Do not make unsupported claims.",
   );
   assert.deepEqual(await calls[0].options.onPayload({
-    model: "gpt-5.4-mini",
+    model: "gpt-6-luna",
     tools: [{ type: "function", name: "do_not_forward" }],
     tool_choice: "none",
   }), {
-    model: "gpt-5.4-mini",
+    model: "gpt-6-luna",
     tools: [{ type: "web_search" }],
     tool_choice: "auto",
     parallel_tool_calls: false,
@@ -80,18 +81,19 @@ test("web_search forwards only the query to a separate native web-search request
       tool: "web_search",
       external_session: true,
       provider: "openai-codex",
-      model: "gpt-5.4-mini",
+      model: "gpt-6-luna",
     },
     usage,
   });
 });
 
 test("web_search selects a Codex backend for other providers or no session model", async () => {
-  const preferred = { provider: "openai-codex", id: "gpt-5.4-mini", api: "openai-codex-responses" };
-  const fallback = { ...preferred, id: "gpt-5.4" };
-  const other = { provider: "openai", id: "gpt-5.4-mini", api: "openai-responses" };
-  for (const model of [other, { provider: "anthropic", id: "claude-test" }, undefined]) {
-    for (const available of [[other, fallback, preferred], [other, fallback]]) {
+  const preferred = { provider: "openai-codex", id: "gpt-6-luna", api: "openai-codex-responses", compat: { supportsAdditionalTools: true } };
+  const fallback = { ...preferred, id: "gpt-5.6-luna" };
+  const unsupported = { ...preferred, id: "gpt-5.3-codex-spark", compat: {} };
+  const other = { provider: "openai", id: "gpt-6-luna", api: "openai-responses" };
+  for (const model of [other, { provider: "anthropic", id: "claude-test" }, unsupported, undefined]) {
+    for (const available of [[other, unsupported, fallback, preferred], [other, unsupported, fallback]]) {
       const expected = available.includes(preferred) ? preferred : fallback;
       const calls = [];
       const updates = [];
@@ -133,14 +135,26 @@ test("web_search selects a Codex backend for other providers or no session model
   }
 });
 
+test("web_search keeps an active Codex model with native tool support", async () => {
+  const active = { provider: "openai-codex", id: "gpt-6-sol", api: "openai-codex-responses", compat: { supportsAdditionalTools: true } };
+  const result = await webSearchModule.createAgentWebSearchTool().execute(
+    "tool-call", { query: "latest release" }, undefined, undefined,
+    context(async (model) => {
+      assert.strictEqual(model, active);
+      return { content: [{ type: "text", text: "Source: https://example.com" }], provider: model.provider, model: model.id, usage, stopReason: "stop" };
+    }, active),
+  );
+  assert.equal(result.details.model, active.id);
+});
+
 test("web_search reports an unavailable Codex backend without a request", async () => {
-  for (const model of [{ provider: "anthropic", id: "claude-test" }, undefined]) {
+  for (const model of [{ provider: "anthropic", id: "claude-test" }, { provider: "openai-codex", id: "gpt-5.3-codex-spark" }, undefined]) {
     const updates = [];
     const result = await webSearchModule.createAgentWebSearchTool().execute(
       "tool-call", { query: "latest release" }, undefined, (update) => updates.push(update), {
         model,
         modelRegistry: {
-          getAvailable: () => [{ provider: "openai", id: "gpt-5.4-mini" }],
+          getAvailable: () => [{ provider: "openai", id: "gpt-6-luna" }, { provider: "openai-codex", id: "gpt-5.3-codex-spark" }],
           complete: () => { throw new Error("must not run"); },
         },
       },
@@ -174,7 +188,7 @@ test("web_search returns structured validation and external failures", async () 
     context(async () => ({
       content: [],
       provider: "openai-codex",
-      model: "gpt-5.4-mini",
+      model: "gpt-6-luna",
       usage,
       stopReason: "error",
       errorMessage: "rate limited",
@@ -190,7 +204,7 @@ test("web_search returns structured validation and external failures", async () 
     undefined,
     context(async () => {
       throw new Error("must not run");
-    }, { provider: "openai", id: "gpt-5.4", api: "openai-responses" }),
+    }, { provider: "openai", id: "gpt-6-luna", api: "openai-responses" }),
   );
   assert.equal(unavailable.details.error.code, "MODEL_UNAVAILABLE");
   assert.match(unavailable.details.error.message, /openai-codex/);
@@ -211,7 +225,7 @@ test("web_search bounds a large external response and retains its complete artif
       context(async () => ({
         content: [{ type: "text", text }],
         provider: "openai-codex",
-        model: "gpt-5.4-mini",
+        model: "gpt-6-luna",
         usage,
         stopReason: "stop",
       })),
@@ -245,7 +259,7 @@ test("web_search bounds a large external response and retains its complete artif
       captured_bytes: Buffer.byteLength(text),
       captured_lines: 2_001,
       provider: "openai-codex",
-      model: "gpt-5.4-mini",
+      model: "gpt-6-luna",
       response_truncated: result.details.response_truncated,
     });
   } finally {

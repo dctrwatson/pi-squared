@@ -14,6 +14,6 @@ export default async function workspaceCreation(pi: ExtensionAPI): Promise<void>
     },
     registerCommand() {},
     registerShortcut() {},
-    on() {},
+    on() { return () => {}; },
   });
 }

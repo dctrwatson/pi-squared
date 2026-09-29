@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createExtensionRuntime, ExtensionRunner } from "@earendil-works/pi-coding-agent";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 
 const readModule = await import("../../extensions/agent-tools/read.ts");
 const agentModule = await import("../../extensions/agent-tools/index.ts");
@@ -56,6 +57,10 @@ test("agent-tools register once and enable tools for every provider", async () =
 
     const expected = ["ask_user", "bash", "find", "gh", "git", "grep", "read", "web_search"];
     assert.deepEqual(tools.map((tool) => tool.name).sort(), expected);
+    for (const name of ["read", "bash"]) {
+      assert.deepEqual(tools.find((tool) => tool.name === name).constrainedSampling,
+        { type: "json_schema", strict: "prefer" });
+    }
     const ctx = { model: provider ? { provider } : undefined };
     await handlers.get("session_start")({}, ctx);
     await handlers.get("session_start")({}, ctx);
@@ -528,18 +533,47 @@ test("read returns INVALID_INPUT for invalid fields", async () => {
     const tool = readModule.createAgentReadTool();
     const cases = [
       { path: 12 },
+      { path: null },
       { path: "source", unknown: true },
       { path: "source", mode: "lines", encoding: "utf8" },
       { path: "source", mode: "bytes", max_lines: 1 },
       { path: "source", mode: "bytes", show_line_numbers: true },
       { path: "source", show_line_numbers: "yes" },
-      { path: "source", max_lines: null },
+      { path: "source", max_lines: "ten" },
     ];
     for (const input of cases) {
       const result = await execute(tool, input, directory);
       assert.equal(result.details.error.code, "INVALID_INPUT", JSON.stringify(input));
       assert.match(output(result), /^\[read error: INVALID_INPUT;/);
     }
+  });
+});
+
+test("read treats null optional fields as omitted in both modes", async () => {
+  await withDirectory(async (directory) => {
+    await writeFile(join(directory, "source"), "ok", "utf8");
+    const tool = readModule.createAgentReadTool();
+    const lines = {
+      path: "source", mode: null, start_line: null, max_lines: null,
+      show_line_numbers: null, max_bytes: null, start_byte: null, encoding: null,
+    };
+    assert.deepEqual(tool.prepareArguments(lines), { path: "source" });
+    assert.deepEqual(validateToolArguments(tool, { id: "call", name: "read", arguments: tool.prepareArguments(lines) }), { path: "source" });
+    assert.equal(lines.start_byte, null);
+    const lineResult = await execute(tool, lines, directory);
+    assert.equal(lineResult.details.ok, true);
+    assert.equal(lineResult.details.mode, "lines");
+    assert.match(output(lineResult), /^ok\n\n\[lines 1-1;/);
+
+    const bytes = {
+      path: "source", mode: "bytes", start_line: null, max_lines: null,
+      show_line_numbers: null, max_bytes: null, start_byte: null, encoding: null,
+    };
+    assert.deepEqual(tool.prepareArguments(bytes), { path: "source", mode: "bytes" });
+    const byteResult = await execute(tool, bytes, directory);
+    assert.equal(byteResult.details.ok, true);
+    assert.equal(byteResult.details.mode, "bytes");
+    assert.match(output(byteResult), /^ok\n\n\[bytes 0,2\);/);
   });
 });
 

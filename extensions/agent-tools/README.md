@@ -8,17 +8,17 @@ The extension registers `read`, `find`, `grep`, `bash`, `git`, `gh`, `web_search
 
 If your configuration names `extensions/codex-tools` or `extensions/ask-user.ts` explicitly, use `extensions/agent-tools` instead. Load `extensions/agent-tools` only once.
 
-`edit` is unchanged. The extension corrects the built-in `write` success message to report UTF-8 byte count. It does not add a patch tool.
+`edit` is unchanged. The extension corrects the built-in `write` success message to report UTF-8 byte count. The custom `read` and `bash` tools use Pi's preferred strict JSON-schema sampling when the provider supports it. It does not add a patch tool.
 
 `web_search` sends only its query to a separate Codex request with the native web-search tool enabled. It does not send project files or the current conversation. The response includes source URLs and its usage is added to the tool result.
 
-If the selected model uses `openai-codex`, `web_search` uses that model. Otherwise, it uses an available `openai-codex/gpt-5.4-mini` model, or the first available Codex model if that model is absent. Codex authentication is required. If no Codex model is available, `web_search` returns `MODEL_UNAVAILABLE`; the other tools remain available.
+If the selected Codex model supports native tools, `web_search` uses it. Otherwise, it selects an available Codex model with native tool support. It prefers `gpt-6-luna`, then `gpt-5.6-luna`. Codex authentication is required. If no compatible Codex model is available, `web_search` returns `MODEL_UNAVAILABLE`; the other tools remain available.
 
 `ask_user` asks one question with free text, one option, or multiple options. It requires an interactive TUI. Other modes return `UI_UNAVAILABLE`. Each session permits one active prompt. Session shutdown cancels the prompt.
 
 ## Result contract
 
-All tool inputs use `snake_case`. The process tools use `timeout_seconds` for their optional time limit.
+All tool inputs use `snake_case`. The process tools use `timeout_seconds` for their optional time limit. For `read` and `bash`, `null` in an optional field has the same effect as omitting that field. Required fields and non-null invalid values still fail.
 
 Each tool result has `details.ok` and `details.tool`. A recoverable failure has `details.ok=false` and `details.error.code` plus `details.error.message`. A process can have `ok=true` with a nonzero exit code, signal, or timeout. Check its process status before you use its output.
 

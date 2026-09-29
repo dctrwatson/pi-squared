@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1953,6 +1954,16 @@ test("active-turn fork snapshots end at the latest parent user request", async (
     getSessionFile: () => undefined,
   }, join(root, "unused"));
   assert.deepEqual(ephemeral, { mode: "fresh", fallback: "parent-session-not-persisted" });
+
+  const editedBranch = [
+    ...branch,
+    { type: "context_edit", id: "edit-after-user", parentId: "tool-current", targetId: "user-1", replacement: null },
+  ];
+  assert.throws(() => createActiveTurnForkSnapshot({
+    ...sessionManager,
+    getBranch: () => editedBranch,
+  }, join(root, "edited")), /use fresh context/);
+  assert.equal(existsSync(join(root, "edited")), false);
 });
 
 test("persistent subagent registry stores branch-local mutations and restores dormant instances", async (t) => {

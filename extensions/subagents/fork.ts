@@ -35,6 +35,10 @@ export function selectForkSnapshotEntries(branch: readonly SessionEntry[]): Sess
     if (latestUserIndex < 0) {
         throw new Error("Cannot safely fork without a parent user request; use fresh context");
     }
+    // An edit after the cut could change earlier context. Do not copy stale source content.
+    if (branch.slice(latestUserIndex + 1).some((entry) => entry.type === "context_edit")) {
+        throw new Error("Cannot safely fork after a context edit beyond the latest user request; use fresh context");
+    }
     return branch.slice(0, latestUserIndex + 1);
 }
 
