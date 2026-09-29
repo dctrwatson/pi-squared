@@ -41,17 +41,17 @@
     "test:skills": "env -u CURSOR_API_KEY node --test tests/skills/*.test.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.87.1",
-    "@earendil-works/pi-ai": ">=0.87.1",
-    "@earendil-works/pi-coding-agent": ">=0.87.1",
-    "@earendil-works/pi-tui": ">=0.87.1",
+    "@earendil-works/pi-agent-core": ">=0.99.1",
+    "@earendil-works/pi-ai": ">=0.99.1",
+    "@earendil-works/pi-coding-agent": ">=0.99.1",
+    "@earendil-works/pi-tui": ">=0.99.1",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^0.87.1",
-    "@earendil-works/pi-ai": "^0.87.1",
-    "@earendil-works/pi-coding-agent": "^0.87.1",
-    "@earendil-works/pi-tui": "^0.87.1",
+    "@earendil-works/pi-agent-core": "^0.99.1",
+    "@earendil-works/pi-ai": "^0.99.1",
+    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-tui": "^0.99.1",
     "@types/node": "^25.2.1",
     "typebox": "^1.1.32",
     "typescript": "^5.7.2"

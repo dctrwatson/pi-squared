@@ -165,7 +165,7 @@ test("agent-tools correct write byte counts and process errors", async () => {
 
 });
 
-test("tool-result middleware preserves content, details, and usage", async () => {
+test("tool-result middleware preserves content, structured content, details, and usage", async () => {
   const handlers = new Map();
   agentModule.default({
     on(event, handler) {
@@ -193,6 +193,7 @@ test("tool-result middleware preserves content, details, and usage", async () =>
   const runner = new ExtensionRunner([extension], createExtensionRuntime(), process.cwd(), {}, {});
   const failureContent = [{ type: "text", text: "[read error: NOT_FOUND; missing]" }];
   const failureDetails = { ok: false, tool: "read", error: { code: "NOT_FOUND", message: "missing" } };
+  const structuredContent = { error: "missing" };
   const usage = { retained: true };
   const readResult = await runner.emitToolResult({
     type: "tool_result",
@@ -201,12 +202,14 @@ test("tool-result middleware preserves content, details, and usage", async () =>
     input: { path: "missing" },
     content: failureContent,
     details: failureDetails,
+    structuredContent,
     isError: false,
     usage,
   });
   assert.deepEqual(readResult, {
     content: failureContent,
     details: failureDetails,
+    structuredContent,
     isError: true,
     usage,
   });
@@ -226,6 +229,7 @@ test("tool-result middleware preserves content, details, and usage", async () =>
   assert.deepEqual(gitResult, {
     content: gitContent,
     details: gitDetails,
+    structuredContent: undefined,
     isError: true,
     usage,
   });
@@ -271,6 +275,7 @@ test("tool-result middleware preserves content, details, and usage", async () =>
   }), {
     content: nonzeroContent,
     details: nonzeroDetails,
+    structuredContent: undefined,
     isError: true,
     usage: undefined,
   });

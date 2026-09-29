@@ -386,9 +386,11 @@ A Pi subagent starts with:
 
 Pi loads `agent-tools` and `prevent-idle` explicitly. For all models, `agent-tools` provides `read`, `find`, `grep`, `bash`, `git`, `gh`, and Codex-backed `web_search`. It also corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the Pi subagent works.
 
+Built-in extensions stay disabled.
+
 The Pi runtime leaves `--tools` unset. A Pi subagent receives Pi's normal configured tool set. Pi's built-in default is `read`, `bash`, `edit`, and `write`. A Pi persona extension can register additional active tools.
 
-Pi disables ambient extension, skill, prompt-template, and theme discovery. Pi adds the bundled extensions, persona resources, and selected skills explicitly. This prevents recursive subagent loading and unrelated startup code.
+Pi disables ambient extension, skill, prompt-template, and theme discovery. Pi adds persona resources and selected skills explicitly. This prevents recursive subagent loading and unrelated startup code.
 
 > **Trust boundary:** Separate Pi processes and conversation context do not sandbox tools or the filesystem. Pi subagents share the parent worktree and host authority. Give concurrent workers non-overlapping file, module, or responsibility ownership. A worker must preserve unrelated changes and stop when ownership overlaps. Attach only trusted Pi persona extensions. Cursor Cloud uses remote repository and configured MCP permissions. Cursor does not receive Pi extensions or Pi skills. Repository access does not automatically expose uncommitted or local-only worktree state. Parent prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes. Credential redaction is a mitigation, not a complete data-loss boundary.
 

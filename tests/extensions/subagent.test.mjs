@@ -3167,6 +3167,21 @@ test("subagent args preserve the parent's scoped model cycle", () => {
   ]);
 });
 
+test("subagent args do not load built-in or ambient extensions", () => {
+  const cases = [
+    { mode: "fresh", model: "openai/gpt-5.4" },
+    { mode: "fresh", scopedModels: [{ provider: "anthropic", id: "claude-sonnet-4-6" }] },
+    { mode: "fork", parentSessionFile: "/sessions/parent.jsonl" },
+    { mode: "fresh", sessionFile: "/sessions/subagent.jsonl" },
+  ];
+  for (const options of cases) {
+    const args = buildSubagentProcessArgs(options);
+    const extensions = args.flatMap((value, index) => value === "--extension" ? [args[index + 1]] : []);
+    assert.equal(args.includes("--no-extensions"), true);
+    assert.deepEqual(extensions, [...SUBAGENT_EXTENSION_PATHS]);
+  }
+});
+
 test("forked persona args load bundled and declared resources with Pi's normal tool selection", () => {
   const persona = {
     name: "reviewer",
