@@ -332,7 +332,7 @@ test("workspace creation requires an explicit project cwd outside global coordin
   await pi.handlers.get("before_agent_start")({}, ctx);
   assert.ok(pi.active.includes("create_workspace"));
   assert.ok(!pi.active.includes("launch_pi"));
-  assert.ok(!pi.active.includes("subagent"));
+  assert.ok(pi.active.includes("subagent"), "Hari keeps the observer tool in its explicit profile");
   const nested = join(f.coordination, "..hidden");
   await mkdir(nested);
   await mkdir(`${f.coordination} `);

@@ -48,6 +48,7 @@ import {
     type CursorSubagentLifecyclePort,
     type CursorDeliveryReceipt,
     type PersistentSubagentSummary,
+    type StoredSubagent,
 } from "./registry.ts";
 
 export {
@@ -678,6 +679,16 @@ function getSubagentsArgumentCompletions(
     return completions.length > 0 ? completions : null;
 }
 
+export const SUBAGENT_EXTENSION_CAPABILITIES = {
+    validateRestoredSubagent: true,
+} as const;
+
+export interface SubagentExtensionOptions {
+    readonly personaDirectory?: string;
+    /** Validate all restored records before installation or runtime effects. Throw to reject restore. */
+    readonly validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void;
+}
+
 export interface SubagentExtensionTestSeam {
     /** Replace backend construction for isolated extension integration tests. */
     readonly backendFactory?: SubagentBackendFactory;
@@ -687,7 +698,7 @@ export interface SubagentExtensionTestSeam {
 
 export default function (
     pi: ExtensionAPI,
-    options: { personaDirectory?: string } & SubagentExtensionTestSeam = {},
+    options: SubagentExtensionOptions & SubagentExtensionTestSeam = {},
 ) {
     const discovery = options.personaDirectory
         ? loadSubagentPersonas(options.personaDirectory)
@@ -695,7 +706,12 @@ export default function (
             BUNDLED_PERSONA_DIRECTORY,
             path.join(getAgentDir(), "personas"),
         ]);
-    const registry = new PersistentSubagentRegistry(pi, options.backendFactory, options.cursorLifecycle);
+    const registry = new PersistentSubagentRegistry(
+        pi,
+        options.backendFactory,
+        options.cursorLifecycle,
+        options.validateRestoredSubagent,
+    );
     let parentDiscoveredSkills: ParentDiscoveredSkill[] = [];
     let diagnosticsShown = false;
     const runtimeDetailsFor = (summary: PersistentSubagentSummary) => {

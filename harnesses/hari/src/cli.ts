@@ -73,7 +73,7 @@ export function resourceArguments(config: LauncherConfig, role: "hari" | "manage
   return [
     "--no-extensions",
     "-e", role === "manager" ? resources.workspaceExtension : join(harnessRoot, "src", "workspace-create.ts"),
-    ...(role === "manager" ? ["-e", resources.subagentExtension] : []),
+    "-e", role === "manager" ? resources.subagentExtension : join(harnessRoot, "src", "session-observer.ts"),
     "-e", extensionPath,
     "--no-skills",
     "--no-prompt-templates",

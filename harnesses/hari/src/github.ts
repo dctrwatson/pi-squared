@@ -529,7 +529,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function runGh(args: string[], signal: AbortSignal | undefined): Promise<string> {
+/** Run gh without a shell, with the existing timeout and output limits. */
+export function runGh(args: string[], signal: AbortSignal | undefined): Promise<string> {
   throwIfAborted(signal);
 
   return new Promise((resolve, reject) => {

@@ -1,177 +1,163 @@
 # Using Hari
 
-Use `hari init` once, then bare `hari` to meet Hari in his global durable home,
-the **Prime Radiant**. Tracking, inbox capture, manager control, and local
-checkpoints happen through conversation. Hari has initiative within agreed
-authority, but he does not run a background watcher.
-
-## Install and requirements
+## Setup
 
 From the pi-squared root:
 
 ```bash
 npm ci
 export PATH="$PWD/bin:$PATH"
-```
-
-The root `bin` directory contains `hari` and `piw`. Add it to shell configuration
-if useful. No global npm installation is required. An ordinary Pi launch does not
-load or activate Hari.
-
-The Hari harness needs:
-
-- Node 22.19 or newer, Git, and `pi` on `PATH`
-- Root dependencies installed with `npm ci`
-- `gh` access only for requested GitHub observations
-
-The harness uses bundled workspace and subagent resources by default. Setup validates them before use. It does not use `piw` on `PATH` or
-sibling-checkout discovery. The workspace launcher must provide the required public
-pre-activation capability. Missing required resources or tools block the affected
-role rather than falling back to an ambient Pi configuration.
-
-## Set up the Prime Radiant
-
-```bash
 hari init
 hari
 ```
 
-Hari's durable home is always the Prime Radiant at `~/Projects/primeradiant`.
-`hari init` creates or adopts it and keeps runtime files under `.hari/` out of Git.
-Repeated init preserves existing coordination history and pending changes. Setup
-refuses unrelated nonempty content, source repositories, nested Git repositories,
-and linked worktrees rather than overwriting them.
+Requires Node 22.19 or newer, Git, and `pi` on `PATH`; GitHub reads also need `gh`.
+`hari init` creates or adopts `~/Projects/primeradiant`, the **Prime Radiant**.
+Repeated init preserves records, history, and pending changes. Bare `hari` opens
+Hari there. Ordinary Pi launches do not load Hari.
 
-Use `hari init --pi-squared <checkout>` only to explicitly override bundled
-resource resolution. `--pi` and `--workspace-launcher` are also advanced resource settings. Existing saved resource settings remain in use.
-Init does not silently replace or migrate them. None selects another Prime Radiant
-location.
+Workspace and subagent resources come from this checkout. Resource overrides are
+`hari init --pi-squared <checkout>`, `--pi`, and `--workspace-launcher`. Saved
+settings remain in use; they do not change the Prime Radiant location.
 
-There is no coordination-directory option. `--coordination` is unrecognized and
-`HARI_COORDINATION_DIR` is ignored. Old coordination locations and saved
-coordination selections are not read.
+## Start with your projects
 
-The Hari harness creates no Prime Radiant remote and does not fetch, pull, or push.
+One Hari coordinates all your projects from the same Prime Radiant. Start with a
+compact view of projects, repositories, commitments, dependencies, blockers, and
+pending decisions. Use existing records and add missing projects. For example:
 
-## Records and local checkpoints
+> Help me organize all my projects. Read the current project index and inbox,
+> help me add missing projects, and show commitments, blockers, and decisions
+> that need my attention. Let's agree priorities and next actions. Do not launch
+> or resume managers until I ask.
+
+Ask Hari to capture notes, track issues, update project state, and record decisions.
+He retrieves project details as needed. You choose priorities across projects and
+which work to assign next.
+
+## GitHub work, following, and notifications
+
+Hari reads your authored and assigned issues and PRs across GitHub, plus review
+requests. Following records interest separately from assigned work. For example:
+
+> Show my open issues and PRs, including assignments and review requests.
+
+> Follow `<issue-or-PR-URL>` because I care about the new cache API.
+
+> Digest my unread notifications. Separate things needing my attention, updates
+> to items I follow, and other things I may be interested in.
+
+> Digest these notifications, but leave them in my GitHub inbox.
+
+Follows and optional interest notes are saved locally in `FOLLOWING.md`. They do
+not create projects, assignments, or GitHub subscriptions. Ask to stop following
+an item when it is no longer relevant. Hari can refresh followed items even when
+they have no notification.
+
+Digests include links and relevance reasons. Hari can inspect selected threads
+and issue/PR details. After presenting a digest, Hari marks the included
+notifications **Done**, removing them from your GitHub notifications inbox unless
+you ask to keep them there. He finishes page reads before marking anything and
+leaves notifications not covered by the digest unchanged. The issues, PRs, and
+local follows remain unchanged. Suggested follows remain your choice. Reads are
+on demand, with no background polling.
+
+Use issue/PR URLs for follows and PR references. Issue lookup also accepts
+`owner/repository#123`; bare issue numbers need an explicit or recorded repository.
+
+## Prepare and run a manager
+
+1. Agree the outcome, acceptance criteria, constraints, checkout, branch, and
+   authority.
+2. `create_workspace` prepares an inactive workspace in the selected source
+   repository, outside the Prime Radiant.
+3. `hari_manager_create` records the assignment without launching it.
+4. When you ask, `hari_manager_launch` starts or resumes the manager.
+
+Managers continue through Hari with their recorded checkout and native session.
+Hari supports native `/new` and `/resume`. Managers can use workspace PM support
+and bounded helper subagents while retaining assignment ownership.
+
+Managers read live assignment and source facts through `manager_context`.
+If the view is missing or state changes, guarded work requires a fresh view.
+An applicable visible result can be reused.
+
+See [Pi integration](../design/harness-pi-integration.md#manager-launch) for session
+checks and the manual Linux launch command.
+
+## Learn from work
+
+Ask about a selected manager's session when you have a useful question:
+
+> Inspect project `<project>` manager `<manager>` for a missing reproduction
+> command in Hari's blocked-work handoff. Return observations and source references.
+
+Hari uses the read-only `hari-session-observer` Pi persona through `subagent`.
+The observer examines Hari's assignments, context, guidance, and harness behavior,
+not implementation correctness. It does not resume the manager or replace reports.
+Hari can reuse an observer, check its status, and stop it on request.
+
+### Keep and deliver guidance
+
+Hari keeps useful candidates in project-linked inbox notes with
+`hari_capture_inbox` or `hari_update_inbox`. A note can use this format:
+
+> Candidate: Include the exact failing command in a blocked-work handoff.
+> Evidence: project/manager, session reference, and entry IDs.
+> Applies when: another manager must reproduce that local failure.
+> Expected benefit: fewer requests for the missing command.
+> Review: the next applicable handoff. Disposition: not yet reviewed.
+
+Before a related assignment, Hari reads relevant notes and corrects his own
+preparation first. Execution-relevant advice goes under `Applicable learned
+guidance` in the assignment, with usable text, scope, limits, and source.
+The manager receives it through `manager_context` without old conversations.
+
+Note edits do not alter existing assignments. Use `hari_manager_amend` for an
+agreed assignment change; it requires a fresh manager view. Keep hypotheses and
+practices to test separate from authoritative decisions.
+
+### Review an adaptation
+
+At a relevant opportunity, ask Hari to review the note against a later manager's
+session and the expected benefit. Check separately:
+
+| Question | Evidence |
+| --- | --- |
+| Delivered | Usable guidance was in the manager's received context. |
+| Applicable | The situation where it should help occurred. |
+| Used | The session supports that the manager followed it. |
+| Outcome | Expected benefit, adverse effects, and alternative causes. |
+
+Hari records `retain`, `revise`, `remove`, or `inconclusive` in the same note,
+with a reason and source. Remove superseded guidance from future assignments.
+Your explicit preferences remain instructions, not experiments.
+
+## Records and checkpoints
 
 ```text
 ~/Projects/primeradiant/
 ├── PROJECTS.md
 ├── INBOX.md
+├── FOLLOWING.md
 ├── projects/<project>/PROJECT.md
 ├── projects/<project>/reports/<manager>.md
 └── .hari/
 ```
 
-The Prime Radiant holds Hari's coordinator conversations under `.hari/sessions`,
-plus structured coordination knowledge and local checkpoints. The index and project records hold authoritative
-JSON metadata and a checked generated Markdown view. Use the update tools rather
-than editing that view by hand. Manual edits are detected, not silently
-overwritten. Managers own their reports at `projects/<project>/reports/<manager>.md`.
+Use record-update tools for generated record views. Updates save immediately;
+ask Hari for a local checkpoint when useful. `hari_git` handles recognized records
+and manager reports, not runtime files or arbitrary company guidance. Existing
+staged changes stop a checkpoint for inspection. Prime Radiant Git has no remote
+operations.
 
-Project source remains in its own repository. Managers retain their native
-workspace sessions and mechanics at their prepared source workspaces. The Prime
-Radiant does not relocate credentials, source repositories, external evidence, or
-all manager sessions into one Git repository.
+Managers own their reports. Source and manager sessions remain in prepared
+workspaces; coordinator sessions live under `.hari/sessions`. Keep private
+coordination knowledge in the Prime Radiant and generic harness resources under
+`harnesses/hari`. Company guidance is not loaded or checkpointed automatically.
 
-The Hari harness Git tool can inspect and checkpoint recognized structured
-records. It does not automatically load, write, or checkpoint company-specific
-skills, glossary material, or other guidance stored in the Prime Radiant. Keep
-generic Hari harness code, docs, skills, and glossary material under
-`harnesses/hari` in pi-squared. These harness resources are not Hari's private
-memory. Keep company-specific knowledge, conventions, skills, and glossary material
-in the Prime Radiant. These locations guide authorship. They are not an automatic
-loading or publishing mechanism.
-
-Update tools immediately save their record-file changes. Hari decides when
-meaningful coordination work warrants a local checkpoint. Existing staged changes
-or uncertain Git results stop for inspection. The harness does not reset the index
-or rewrite history.
-
-## Coordinate work
-
-Ask Hari in ordinary language to capture an inbox item, track an issue, catch up
-on a project, inspect local record changes, or save a checkpoint. Hari uses
-judgment within agreed authority to retrieve relevant records, weigh coordination
-consequences, and make recommendations without making the user relay context
-between sessions. The harness does not paste live coordination state into Hari's
-system prompt or automatically inject it as a snapshot each turn. Hari uses
-`hari_projects` for the current index or a selected project when needed, and
-retrieves other detail on demand. Missing, stale, or uncertain facts need
-retrieval before dependent coordination actions. Hari's memory does not override
-current records. Large record previews name `hari_record_page` as the recovery
-path. Start that record at offset 0, then use the `nextOffset` in each page's
-visible footer with the same record arguments until `eof=true`.
-
-GitHub reads are on demand and read-only. A full issue URL or `owner/repository#123`
-identifies its repository. A bare `#123` or `123` needs an explicit repository or a
-project repository preference recorded in the Prime Radiant. Hari has no default
-tracking repository. PR discovery considers only explicit project repositories and
-tracked issue links. He returns a bounded snapshot, not a continuous scan or a
-review obligation.
-
-## Prepare and run a manager
-
-Before manager launch, agree the outcome, non-empty acceptance criteria,
-constraints, prepared checkout, branch, and applicable authority. Hari can use
-`create_workspace` with an explicit absolute project repository path outside the
-Prime Radiant. The returned workspace is inactive.
-
-Record the assignment with `hari_manager_create`. It does not launch anything.
-On the user's later request, `hari_manager_launch` starts or resumes the manager.
-Generic `launch_pi` is blocked for Hari roles. A terminal request is not proof
-that the manager started.
-
-The manager launch checks the recorded checkout, branch, native workspace session,
-and manager identity before activation. It does not silently repair a missing
-session or take another manager's session. Native manager session switching,
-forking, and replacement are blocked. A valid reload retains the workspace lease
-and normal exit releases it.
-
-Managers keep Pi's coding prompt and stable workspace guidance, with manager
-responsibilities from the Hari harness appended separately. Ambient system and
-context files remain disabled. Live assignment facts and checkout guidance are not
-in this system prompt. Managers read them through `manager_context` before
-dependent work.
-The full successful result must be visible in model context, not just in memory.
-A missing view or changed coordination/source state requires a valid current view
-before guarded source actions, helper dispatch, or reports. Still-visible,
-applicable results can be reused without another snapshot each turn.
-
-Managers retain the native workspace PM skill and active tool guidance from their
-explicit workspace resource. They may use the existing optional `subagent` tool
-for bounded help. Helpers share the prepared checkout and are not a second manager
-or a sandbox. The manager retains acceptance responsibility and must avoid
-overlapping writes.
-
-The Hari harness role extension adds compact current authority and a bounded source
-summary to prompted helper dispatches while preserving the caller's task context.
-Oversized required handoffs block rather than silently truncate. Cursor also
-checks its smaller byte limits after credential redaction, before dispatch.
-A rejected request needs a narrower task or context, not an unchanged retry.
-Dormant helper
-controls do not require a full context refresh. Fresh helpers use the existing
-helper profile, not a cloned Hari manager role profile.
-
-## Current limits
-
-- The public CLI workflows are only `hari init` and bare `hari`.
-- Native `/new` and `/resume` remain available in Hari. Managers continue through
-  Hari so their recorded identity remains intact.
-- Manager resumption and waking are user-controlled. No timer, notification, or
-  record change starts work.
-- GitHub mutation, source push, merge, deployment, and live-system actions need
-  separate authority and are not Hari defaults.
-- Authority checks and ownership boundaries are advisory. Shell access is not a
-  permission grant or sandbox.
-- A commit, CI result, merge, deployment, operational validation, and acceptance
-  remain separate facts. Follow applicable repository and assignment evidence
-  obligations.
-- Concurrent shared-record writers, automatic repair, strict memory projection,
-  exceptional child reassociation, multi-checkout orchestration, and Linux terminal
-  launching are not current guarantees.
-
-See [Pi integration](../design/harness-pi-integration.md) for the implemented
-resource and session boundaries and [future options](../design/future.md) for
-narrow deferred ideas.
+For large records, `hari_record_page` starts at offset 0; follow `nextOffset`
+until `eof=true`. Session evidence uses `hari_session_evidence` with the returned
+`nextOffset` and same `view`. Changed evidence requires a restart from offset 0.
+See [Pi integration](../design/harness-pi-integration.md#session-observation) for
+evidence format and size limits.

@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { CoordinationError, CONFIG_FILE, coordinationDirectory, initializeCoordination, integrationResources, readLauncherConfig, type LauncherConfig } from "./coordination.ts";
 import { checkpointCoordination, initializeCoordinationRepository, preflightCoordinationRepository } from "./coordination-git.ts";
+import { loadSessionObserverResources } from "./observer-resources.ts";
 
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true; }
@@ -23,6 +24,7 @@ export async function validateResources(config: LauncherConfig): Promise<void> {
       throw new CoordinationError(`Missing pi-squared extension: ${path}. Run hari init --pi-squared <complete-local-checkout>`);
     }
   }
+  await loadSessionObserverResources(config);
   const launcher = await import(pathToFileURL(config.workspaceLauncher).href) as {
     WORKSPACE_LAUNCH_CAPABILITIES?: { beforeActivate?: boolean }; resolveLaunch?: unknown;
   };

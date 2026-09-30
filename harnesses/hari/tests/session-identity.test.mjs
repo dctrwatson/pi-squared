@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { inspectHariManagerSession } from "../src/session-identity.ts";
+import { inspectHariManagerSession, inspectHariManagerSessionEntries } from "../src/session-identity.ts";
 
 test("native-session identity detects a prior Hari manager without becoming a registry", async () => {
   const root = await mkdtemp(join(tmpdir(), "hari-session-identity-"));
@@ -83,4 +83,55 @@ test("entries over the explicit 16 MiB parser cap surface uncertainty", async ()
   const session = join(root, "session.jsonl");
   await writeFile(session, "x".repeat(17 * 1024 * 1024));
   assert.match((await inspectHariManagerSession(session)).uncertain ?? "", /line limit/);
+});
+
+test("parsed snapshot inspection shares exact launch identity and placeholder rules", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hari-identity-snapshot-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const session = join(root, "session.jsonl");
+  const header = { type: "session", version: 3, cwd: "/synthetic/checkout" };
+  const data = { coordinationDir: "/synthetic/radiant", projectId: "project", managerId: "manager" };
+  const identity = { type: "custom", customType: "hari-manager-identity", data };
+  const placeholder = [header,
+    { type: "session_info", name: "feature/prepared" },
+    { type: "custom", customType: "pi-workspace-session-name", data: { branch: "feature/prepared" } },
+    { type: "custom", customType: "pi-workspace", data: { repository: "/synthetic/checkout/.git", branch: "feature/prepared", cwd: "/synthetic/checkout" } },
+  ];
+  const cases = [
+    [[], {}],
+    [[header], {}],
+    [[header, identity], { identity: data }],
+    [[header, identity, identity], { identity: data }],
+    [placeholder, { pristineWorkspace: true }],
+    [[...placeholder, identity], { identity: data }],
+    [[...placeholder, { type: "custom", customType: "unknown" }], {}],
+    [[header, null], {}],
+    [[header, identity, { ...identity, data: { ...data, managerId: "other" } }], /conflicting/],
+    [[header, { ...identity, data: { projectId: "project" } }], /malformed/],
+    [[header, { ...identity, type: "custom_message" }], /malformed/],
+  ];
+  for (const [entries, expected] of cases) {
+    const original = JSON.stringify(entries);
+    await writeFile(session, entries.map((entry) => JSON.stringify(entry)).join("\n"));
+    const before = await readFile(session);
+    const snapshot = inspectHariManagerSessionEntries(entries.values());
+    assert.deepEqual(snapshot, await inspectHariManagerSession(session));
+    if (expected instanceof RegExp) assert.match(snapshot.uncertain, expected);
+    else assert.deepEqual(snapshot, expected);
+    assert.equal(JSON.stringify(entries), original);
+    assert.deepEqual(await readFile(session), before);
+  }
+});
+
+test("ordinary launch inspection keeps history uncapped while each line stays bounded", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "hari-identity-long-launch-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const session = join(root, "session.jsonl");
+  const data = { coordinationDir: "/synthetic/radiant", projectId: "project", managerId: "manager" };
+  await writeFile(session, `${JSON.stringify({ type: "session", version: 3 })}\n${JSON.stringify({ type: "custom", customType: "hari-manager-identity", data })}\n`);
+  const line = `${JSON.stringify({ type: "message", message: { role: "user", content: "x".repeat(1024 * 1024), timestamp: 1 } })}\n`;
+  for (let index = 0; index < 17; index += 1) await appendFile(session, line);
+  assert.deepEqual(await inspectHariManagerSession(session), { identity: data });
+  await appendFile(session, `${JSON.stringify({ type: "custom", customType: "hari-manager-identity", data: { ...data, managerId: "late-conflict" } })}\n`);
+  assert.match((await inspectHariManagerSession(session)).uncertain, /conflicting/);
 });

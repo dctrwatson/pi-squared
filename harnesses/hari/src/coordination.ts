@@ -1,9 +1,11 @@
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
+import { gitHubItemKey, parseGitHubItemUrl, type GitHubItemReference } from "./github-reference.ts";
 
 export const INDEX_FILE = "PROJECTS.md";
 export const INBOX_FILE = "INBOX.md";
+export const FOLLOWING_FILE = "FOLLOWING.md";
 export const CONFIG_FILE = ".hari/launcher.json";
 const META_START = "<!-- hari-meta:start -->";
 const META_END = "<!-- hari-meta:end -->";
@@ -35,6 +37,13 @@ export type InboxItem = {
 export type Inbox = {
   version: 1;
   items: InboxItem[];
+};
+
+export type FollowedGitHubItem = GitHubItemReference & { note?: string; followedAt: string };
+
+export type Following = {
+  version: 1;
+  items: FollowedGitHubItem[];
 };
 
 export type IssueLink = {
@@ -177,6 +186,46 @@ function validateInbox(value: Inbox): Inbox {
   return value;
 }
 
+function followingReference(url: string): GitHubItemReference {
+  try { return parseGitHubItemUrl(url); }
+  catch (error) { throw new CoordinationError(`Invalid followed GitHub item: ${error instanceof Error ? error.message : String(error)}`); }
+}
+
+function followingNote(note: string | undefined): string | undefined {
+  if (note === undefined) return undefined;
+  if (typeof note !== "string" || note.length > 2000) throw new CoordinationError("A following note must be text with at most 2000 characters");
+  return note.trim() || undefined;
+}
+
+function validateFollowing(value: Following): Following {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1) {
+    throw new CoordinationError(`Unsupported ${FOLLOWING_FILE} metadata version`);
+  }
+  if (Object.keys(value).some((key) => !["version", "items"].includes(key))) throw new CoordinationError(`Invalid ${FOLLOWING_FILE} metadata fields`);
+  assertArray(value.items, "following items");
+  const identities = new Set<string>();
+  for (const item of value.items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)
+      || Object.keys(item).some((key) => !["kind", "repository", "number", "url", "note", "followedAt"].includes(key))) {
+      throw new CoordinationError(`Invalid followed item fields in ${FOLLOWING_FILE}`);
+    }
+    const reference = followingReference(item.url);
+    if (item.kind !== reference.kind || item.repository !== reference.repository
+      || item.number !== reference.number || item.url !== reference.url) {
+      throw new CoordinationError(`Followed item identity is not canonical in ${FOLLOWING_FILE}`);
+    }
+    const identity = gitHubItemKey(item);
+    if (identities.has(identity)) throw new CoordinationError(`Duplicate followed GitHub identity in ${FOLLOWING_FILE}: ${identity}`);
+    identities.add(identity);
+    if (item.note !== undefined && followingNote(item.note) === undefined) throw new CoordinationError(`Invalid empty following note in ${FOLLOWING_FILE}`);
+    if (typeof item.followedAt !== "string" || !Number.isFinite(Date.parse(item.followedAt))
+      || new Date(item.followedAt).toISOString() !== item.followedAt) {
+      throw new CoordinationError(`Invalid followedAt timestamp in ${FOLLOWING_FILE}`);
+    }
+  }
+  return value;
+}
+
 function validateProject(value: ProjectRecord, source: string): ProjectRecord {
   if (!value || value.version !== 1) throw new CoordinationError(`Unsupported ${source} metadata version`);
   if (!value.id || !value.name) throw new CoordinationError(`${source} is missing project identity`);
@@ -223,6 +272,15 @@ function renderInbox(inbox: Inbox): string {
 
 function renderLegacyInbox(inbox: Inbox): string {
   return renderInboxView(inbox, "");
+}
+
+function renderFollowing(following: Following): string {
+  const items = following.items.length === 0
+    ? "- No GitHub items followed."
+    : following.items.map((item) => `- [${item.repository}#${item.number}](${item.url}) (${item.kind}); followed ${item.followedAt}${item.note ? ` — ${item.note}` : ""}`).join("\n");
+  // Keep note text from closing the metadata block.
+  const json = JSON.stringify(following, null, 2).replaceAll("<", "\\u003c");
+  return `${META_START}\n${json}\n${META_END}\n\n# Hari following\n\n${managedNotice()}\n\n${items}\n`;
 }
 
 function renderProjectView(project: ProjectRecord, notice: string): string {
@@ -275,6 +333,75 @@ export async function readInbox(coordinationDir: string): Promise<Inbox> {
 
 export async function writeInbox(coordinationDir: string, inbox: Inbox): Promise<void> {
   await writeText(assertInside(coordinationDir, join(coordinationDir, INBOX_FILE)), renderInbox(validateInbox(inbox)));
+}
+
+async function followingFilePresent(path: string): Promise<boolean> {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new CoordinationError(`${FOLLOWING_FILE} must be a regular file, not a symlink: ${path}`);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export async function readFollowing(coordinationDir: string): Promise<Following> {
+  const path = assertInside(coordinationDir, join(coordinationDir, FOLLOWING_FILE));
+  if (!await followingFilePresent(path)) return { version: 1, items: [] };
+  const content = await readFile(path, "utf8");
+  const following = validateFollowing(parseMetadata<Following>(content, FOLLOWING_FILE));
+  const generated = renderFollowing(following);
+  assertGenerated(content, generated, generated, FOLLOWING_FILE);
+  return following;
+}
+
+async function writeFollowing(coordinationDir: string, following: Following): Promise<void> {
+  const path = assertInside(coordinationDir, join(coordinationDir, FOLLOWING_FILE));
+  await followingFilePresent(path);
+  await writeText(path, renderFollowing(validateFollowing(following)));
+}
+
+function followedItemIndex(following: Following, reference: GitHubItemReference): number {
+  const index = following.items.findIndex((item) => gitHubItemKey(item) === gitHubItemKey(reference));
+  if (index >= 0 && following.items[index].kind !== reference.kind) {
+    throw new CoordinationError(`Contradictory GitHub item kind for ${gitHubItemKey(reference)}`);
+  }
+  return index;
+}
+
+/** Follow locally. Do not create project work or change GitHub state. */
+export async function followGitHubItem(
+  coordinationDir: string,
+  input: { url: string; note?: string },
+): Promise<FollowedGitHubItem> {
+  const reference = followingReference(input?.url);
+  const note = followingNote(input.note);
+  const following = await readFollowing(coordinationDir);
+  const index = followedItemIndex(following, reference);
+  if (index >= 0) {
+    const item = following.items[index];
+    if (input.note !== undefined) {
+      if (note === undefined) delete item.note;
+      else item.note = note;
+    }
+    await writeFollowing(coordinationDir, following);
+    return item;
+  }
+  const item: FollowedGitHubItem = { ...reference, ...(note === undefined ? {} : { note }), followedAt: now() };
+  following.items.push(item);
+  await writeFollowing(coordinationDir, following);
+  return item;
+}
+
+export async function unfollowGitHubItem(coordinationDir: string, url: string): Promise<boolean> {
+  const reference = followingReference(url);
+  const following = await readFollowing(coordinationDir);
+  const index = followedItemIndex(following, reference);
+  if (index < 0) return false;
+  following.items.splice(index, 1);
+  await writeFollowing(coordinationDir, following);
+  return true;
 }
 
 export async function readProject(coordinationDir: string, projectId: string): Promise<ProjectRecord> {
@@ -556,7 +683,7 @@ export async function listManagers(coordinationDir: string): Promise<Array<{ pro
   return result;
 }
 
-export type CoordinationRecordKind = "index" | "inbox" | "project" | "report";
+export type CoordinationRecordKind = "index" | "inbox" | "following" | "project" | "report";
 
 /** Read a validated record's generated Markdown for explicit caller-managed paging. */
 export async function readCoordinationRecord(
@@ -574,6 +701,11 @@ export async function readCoordinationRecord(
     await readInbox(coordinationDir);
     const path = assertInside(coordinationDir, join(coordinationDir, INBOX_FILE));
     return { path, content: await readFile(path, "utf8") };
+  }
+  if (kind === "following") {
+    const following = await readFollowing(coordinationDir);
+    const path = assertInside(coordinationDir, join(coordinationDir, FOLLOWING_FILE));
+    return { path, content: renderFollowing(following) };
   }
   if (!projectId) throw new CoordinationError(`${kind} record paging requires a project id`);
   if (kind === "project") {

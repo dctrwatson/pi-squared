@@ -2,12 +2,12 @@ import { execFile } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { CoordinationError, readInbox, readIndex, readProject } from "./coordination.ts";
+import { CoordinationError, FOLLOWING_FILE, readFollowing, readInbox, readIndex, readProject } from "./coordination.ts";
 
 const exec = promisify(execFile);
 const IGNORE_RULE = "/.hari/";
 const PAGE_CHARS = 16_000;
-const RECORD_PATH = /^(?:PROJECTS\.md|INBOX\.md|\.gitignore|projects\/[a-z0-9-]+\/(?:PROJECT\.md|reports\/[a-z0-9-]+\.md))$/;
+const RECORD_PATH = /^(?:PROJECTS\.md|INBOX\.md|FOLLOWING\.md|\.gitignore|projects\/[a-z0-9-]+\/(?:PROJECT\.md|reports\/[a-z0-9-]+\.md))$/;
 
 // Do not let a parent shell redirect a coordination command into another repository/index.
 function gitEnvironment(): NodeJS.ProcessEnv {
@@ -81,7 +81,7 @@ export async function preflightCoordinationRepository(directory: string): Promis
   if (!await pathExists(root)) return;
   if (!(await lstat(root)).isDirectory()) throw new CoordinationError(`Coordination directory must be a real directory: ${root}`);
   const entries = await readdir(root);
-  if (!entries.includes("PROJECTS.md") && !entries.includes("INBOX.md")
+  if (!entries.includes("PROJECTS.md") && !entries.includes("INBOX.md") && !entries.includes(FOLLOWING_FILE)
     && entries.some(name => ![".git", "projects", ".hari", ".gitignore", ".DS_Store"].includes(name))) {
     throw new CoordinationError("The Prime Radiant location must be empty or contain existing coordination records; unrelated files will not be adopted");
   }
@@ -94,7 +94,7 @@ export async function preflightCoordinationRepository(directory: string): Promis
     if (foreign.length) throw new CoordinationError(`Refusing to adopt a repository with non-coordination tracked files: ${foreign.slice(0, 5).join(", ")}`);
     await requireEmptyIndex(root);
   }
-  for (const name of ["PROJECTS.md", "INBOX.md", ".gitignore"]) await regularRecord(root, name);
+  for (const name of ["PROJECTS.md", "INBOX.md", FOLLOWING_FILE, ".gitignore"]) await regularRecord(root, name);
   for (const name of ["projects", ".hari"]) {
     if (await pathExists(join(root, name)) && !(await lstat(join(root, name))).isDirectory()) {
       throw new CoordinationError(`Coordination ${name} must be a real directory`);
@@ -108,6 +108,7 @@ export async function preflightCoordinationRepository(directory: string): Promis
     }
   }
   if (await pathExists(join(root, "INBOX.md"))) await readInbox(root);
+  await readFollowing(root);
 }
 
 async function requireEmptyIndex(root: string): Promise<void> {
@@ -153,7 +154,8 @@ export async function initializeCoordinationRepository(directory: string): Promi
 async function recordPaths(root: string): Promise<string[]> {
   const index = await readIndex(root);
   await readInbox(root);
-  const paths = new Set([".gitignore", "PROJECTS.md", "INBOX.md"]);
+  await readFollowing(root);
+  const paths = new Set([".gitignore", "PROJECTS.md", "INBOX.md", FOLLOWING_FILE]);
   for (const entry of index.projects) {
     const project = await readProject(root, entry.id);
     paths.add(`projects/${project.id}/PROJECT.md`);

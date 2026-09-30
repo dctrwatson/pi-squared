@@ -2253,6 +2253,194 @@ NEEDS: A release decision from the parent`;
   assert.deepEqual(otherParent.list(), []);
 });
 
+async function makeRestoreValidationHarness(t) {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-restore-validation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const ownerSessionId = "restore-validation-parent";
+  const allowed = {
+    id: "sa_allowed", name: "allowed-observer", runtime: "pi", purpose: "Inspect synthetic evidence",
+    lifetime: "one-shot", mode: "fresh", cwd: root, createdAt: 1, lastActiveAt: 2,
+    localLifecycle: "available", selectedSkillPaths: [], sessionDir: join(root, "child-sessions"),
+    thinking: "high", scopedModels: [],
+    persona: {
+      name: "restore-observer", description: "Inspect synthetic evidence", systemPrompt: "Inspect only.",
+      runtime: "pi", extensions: [join(root, "observer-policy.ts")], skills: [],
+      filePath: join(root, "personas", "restore-observer.md"),
+    },
+    activeBlocker: { reason: "Evidence is missing", need: "Synthetic evidence" },
+  };
+  const cursor = {
+    id: "sa_cursor", name: "cursor-agent", runtime: "cursor-cloud", purpose: "Saved Cloud result",
+    lifetime: "one-shot", mode: "fresh", cwd: root, createdAt: 1, lastActiveAt: 2,
+    localLifecycle: "available", agentId: "bc-saved-agent", remoteCreated: true,
+    currentRunId: "run-saved-result", repositories: [], pendingOperations: [], remoteLifecycle: "idle",
+    pendingResult: { state: "available", runId: "run-saved-result" },
+  };
+  const receipt = {
+    version: 1, subagentId: cursor.id, runId: cursor.currentRunId, archiveAfterDelivery: true,
+  };
+  const branch = [{
+    type: "custom", customType: "persistent-subagents",
+    data: { version: 3, ownerSessionId, upserts: [allowed], removedIds: [] },
+  }, {
+    type: "message",
+    message: {
+      role: "toolResult", toolName: "subagent",
+      details: {
+        [SUBAGENT_REGISTRY_TOOL_DETAILS_KEY]: { version: 3, ownerSessionId, upserts: [cursor], removedIds: [] },
+        cursorDeliveryReceipt: receipt,
+      },
+    },
+  }];
+  const effects = [];
+  const appended = [];
+  const pi = {
+    getThinkingLevel: () => "high",
+    appendEntry(customType, data) { appended.push({ type: "custom", customType, data }); },
+  };
+  const backendFactory = () => {
+    effects.push("backend");
+    throw new Error("Restore must not construct a backend");
+  };
+  const cursorLifecycle = {
+    async reconcile() { effects.push("reconcile"); return { remoteLifecycle: "idle" }; },
+    async stop(_stored, progress) {
+      effects.push("stop");
+      progress.persistArchiveStarted();
+      return { state: "stopped" };
+    },
+    async disposeObservers() { effects.push("disposeObservers"); },
+  };
+  const context = {
+    cwd: root, mode: "tui", hasUI: true, model: undefined, scopedModels: [], ui: {},
+    sessionManager: {
+      getSessionId: () => ownerSessionId,
+      getSessionFile: () => join(root, "parent.jsonl"),
+      getBranch: () => branch,
+    },
+  };
+  return { root, allowed, cursor, receipt, branch, effects, appended, pi, backendFactory, cursorLifecycle, context };
+}
+
+for (const incompatibleRuntime of ["pi", "cursor-cloud"]) {
+  test(`restore validation rejects an incompatible ${incompatibleRuntime} record before installation or effects`, async (t) => {
+    const harness = await makeRestoreValidationHarness(t);
+    const { allowed, cursor, receipt, branch, effects, appended, pi, backendFactory, cursorLifecycle, context } = harness;
+    const incompatible = incompatibleRuntime === "cursor-cloud" ? cursor : {
+      ...structuredClone(allowed), id: "sa_incompatible", name: "incompatible-worker",
+      persona: { ...allowed.persona, name: "other-persona" },
+    };
+    branch[1].message.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts = [incompatible];
+    const before = structuredClone(branch);
+    const validated = [];
+    const rejection = new Error("Restored subagent is not permitted");
+    let registry;
+    registry = new PersistentSubagentRegistry(pi, backendFactory, cursorLifecycle, (stored) => {
+      assert.deepEqual(registry.list(), [], "no record is installed during validation");
+      assert.equal(stored.lifetime, "one-shot", "validation precedes lifetime normalization");
+      assert.deepEqual(appended, []);
+      assert.deepEqual(effects, []);
+      validated.push(stored.id);
+      if (stored.runtime !== "pi" || stored.persona?.name !== "restore-observer") throw rejection;
+    });
+
+    assert.throws(() => registry.restore(context), (error) => error === rejection);
+    assert.deepEqual(validated, [allowed.id, incompatible.id]);
+    assert.deepEqual(registry.list(), []);
+    assert.deepEqual(appended, []);
+    assert.deepEqual(effects, []);
+    assert.deepEqual(branch, before);
+    assert.equal(existsSync(allowed.sessionDir), false);
+
+    for (const target of [allowed.id, incompatible.id]) {
+      assert.throws(() => registry.summaryFor(target), /Unknown subagent/);
+      await assert.rejects(registry.status(target), /Unknown subagent/);
+      await assert.rejects(registry.prompt(context, target, "Do not start"), /Unknown subagent/);
+      await assert.rejects(registry.setLifetime(target, "task"), /Unknown subagent/);
+      await assert.rejects(registry.stop(target), /Unknown subagent/);
+    }
+    await registry.processCursorDeliveryReceipt(receipt);
+    await registry.shutdown();
+    assert.deepEqual(registry.list(), []);
+    assert.deepEqual(appended, []);
+    assert.deepEqual(effects, []);
+    assert.deepEqual(branch, before);
+  });
+}
+
+test("factory advertises and forwards restore validation through session lifecycle hooks", async (t) => {
+  const harness = await makeRestoreValidationHarness(t);
+  const { root, allowed, branch, effects, appended, pi, backendFactory, cursorLifecycle, context } = harness;
+  allowed.lifetime = "task";
+  delete allowed.activeBlocker;
+  branch.splice(1);
+  const before = structuredClone(branch);
+  const tools = new Map();
+  const events = new Map();
+  const validated = [];
+  assert.equal(subagentsModule.SUBAGENT_EXTENSION_CAPABILITIES.validateRestoredSubagent, true);
+  subagentsModule.default({
+    ...pi,
+    registerTool(tool) { tools.set(tool.name, tool); }, registerCommand() {}, registerShortcut() {},
+    on(name, listener) { events.set(name, listener); },
+  }, {
+    personaDirectory: join(root, "missing-personas"), backendFactory, cursorLifecycle,
+    validateRestoredSubagent(stored) { validated.push(structuredClone(stored)); },
+  });
+  events.get("session_start")({}, context);
+  assert.deepEqual(validated, [allowed]);
+  const tool = tools.get("subagent");
+  const status = await tool.execute("restored-status", { action: "status", id: allowed.id }, undefined, undefined, context);
+  assert.equal(status.details.ok, true);
+  assert.equal(status.details.subagent.status, "dormant");
+  assert.equal(status.details.subagent.persona, "restore-observer");
+  await events.get("session_tree")({}, context);
+  assert.deepEqual(validated, [allowed, allowed]);
+  await events.get("session_shutdown")({}, context);
+  assert.deepEqual(appended, []);
+  assert.deepEqual(effects, []);
+  assert.deepEqual(branch, before);
+  assert.equal(existsSync(allowed.sessionDir), false);
+});
+
+test("restore validation rejection clears the previous registry state", async (t) => {
+  const { allowed, cursor, branch, effects, appended, pi, backendFactory, cursorLifecycle, context } = await makeRestoreValidationHarness(t);
+  const savedResult = branch.pop();
+  allowed.lifetime = "task";
+  delete allowed.activeBlocker;
+  const registry = new PersistentSubagentRegistry(pi, backendFactory, cursorLifecycle, (stored) => {
+    if (stored.runtime !== "pi") throw new Error("Cursor restore is not permitted");
+  });
+  registry.restore(context);
+  assert.equal(registry.summaryFor(allowed.id).status, "dormant");
+  branch.push(savedResult);
+
+  assert.throws(() => registry.restore(context), /Cursor restore is not permitted/);
+  assert.deepEqual(registry.list(), []);
+  await assert.rejects(registry.stop(allowed.id), /Unknown subagent/);
+  await assert.rejects(registry.stop(cursor.id), /Unknown subagent/);
+  await registry.shutdown();
+  assert.deepEqual(appended, []);
+  assert.deepEqual(effects, []);
+});
+
+test("restore without validation retains Pi normalization and saved Cursor receipt cleanup", async (t) => {
+  const { allowed, cursor, branch, effects, appended, pi, backendFactory, cursorLifecycle, context } = await makeRestoreValidationHarness(t);
+  const before = structuredClone(branch);
+  const registry = new PersistentSubagentRegistry(pi, backendFactory, cursorLifecycle);
+  registry.restore(context);
+  assert.equal(registry.summaryFor(allowed.id).lifetime, "task");
+  assert.equal(registry.summaryFor(allowed.id).status, "blocked");
+  await waitFor(() => registry.summaryFor(cursor.id).status === "stopped");
+  assert.deepEqual(effects, ["reconcile", "stop"]);
+  const storedCursor = latestStoredSubagent(appended, context.sessionManager.getSessionId(), cursor.id);
+  assert.equal(storedCursor.lifetime, "task");
+  assert.equal(storedCursor.remoteLifecycle, "archived");
+  assert.deepEqual(storedCursor.pendingResult, { state: "none" });
+  assert.deepEqual(branch, before);
+  await registry.shutdown();
+});
+
 test("registry persistence is incremental and bounds stopped metadata", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-bound-"));
   t.after(() => rm(root, { recursive: true, force: true }));

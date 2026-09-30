@@ -809,6 +809,7 @@ export class PersistentSubagentRegistry {
     private readonly pi: ExtensionAPI;
     private readonly backendFactory: SubagentBackendFactory;
     private readonly cursorLifecycle: CursorSubagentLifecyclePort;
+    private readonly validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void;
     private ownerSessionId: string | undefined;
     private readonly persistedFingerprints = new Map<string, string>();
     private readonly pendingRestoreRemovedIds = new Set<string>();
@@ -820,10 +821,12 @@ export class PersistentSubagentRegistry {
         pi: ExtensionAPI,
         backendFactory: SubagentBackendFactory = createSubagentBackend,
         cursorLifecycle: CursorSubagentLifecyclePort = createCursorSubagentLifecyclePort(),
+        validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void,
     ) {
         this.pi = pi;
         this.backendFactory = backendFactory;
         this.cursorLifecycle = cursorLifecycle;
+        this.validateRestoredSubagent = validateRestoredSubagent;
     }
 
     restore(ctx: ExtensionContext): void {
@@ -863,6 +866,12 @@ export class PersistentSubagentRegistry {
                 if (entry.message.toolName !== "subagent") continue;
                 const receipt = parseCursorDeliveryReceipt(details?.[SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY]);
                 if (receipt) deliveryReceipts.set(`${receipt.subagentId}:${receipt.runId}`, receipt);
+            }
+        }
+
+        if (this.validateRestoredSubagent) {
+            for (const { stored } of restored.values()) {
+                this.validateRestoredSubagent(stored);
             }
         }
 

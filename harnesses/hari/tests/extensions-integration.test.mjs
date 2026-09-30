@@ -33,6 +33,7 @@ const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(harnessRoot, "..", "..");
 const bundledWorkspaceLauncher = join(repositoryRoot, "extensions", "workspace", "launcher.ts");
 const workspaceCreateEntry = join(harnessRoot, "src", "workspace-create.ts");
+const sessionObserverEntry = join(harnessRoot, "src", "session-observer.ts");
 const hariEntry = join(harnessRoot, "src", "index.ts");
 
 function git(cwd, ...args) {
@@ -273,7 +274,7 @@ test("ordinary Pi package discovery loads only bundled generic resources", async
   assert.doesNotMatch(session.systemPrompt, /# Hari(?: manager)?\n/);
 });
 
-test("Hari loads real Pi SDK extensions offline without a launcher or subagents", async (t) => {
+test("Hari loads real Pi SDK resources offline with the observer adapter but no generic launcher", async (t) => {
   const launcher = bundledWorkspaceLauncher;
   const workspaceDirectory = dirname(launcher);
   const root = await mkdtemp(join(tmpdir(), "hari-real-sdk-smoke-"));
@@ -308,7 +309,7 @@ test("Hari loads real Pi SDK extensions offline without a launcher or subagents"
       cwd,
       agentDir,
       settingsManager,
-      additionalExtensionPaths: [workspaceCreateEntry, hariEntry],
+      additionalExtensionPaths: [workspaceCreateEntry, sessionObserverEntry, hariEntry],
       noExtensions: true,
       noSkills: true,
       noPromptTemplates: true,
@@ -321,6 +322,7 @@ test("Hari loads real Pi SDK extensions offline without a launcher or subagents"
     assert.deepEqual(resourceLoader.getExtensions().errors, []);
     assert.deepEqual(resourceLoader.getExtensions().extensions.map((extension) => extension.path), [
       workspaceCreateEntry,
+      sessionObserverEntry,
       hariEntry,
     ]);
 
@@ -348,7 +350,8 @@ test("Hari loads real Pi SDK extensions offline without a launcher or subagents"
     assert.ok(active.includes("hari_manager_launch"));
     const configured = session.getAllTools().map((tool) => tool.name);
     assert.ok(!configured.includes("launch_pi"));
-    assert.ok(!configured.includes("subagent"));
+    assert.ok(active.includes("subagent"));
+    assert.ok(configured.includes("subagent"));
   } finally {
     session?.dispose();
     process.env = previousEnvironment;
@@ -395,7 +398,7 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
     const hariResources = resourceArguments(config);
     const managerResources = resourceArguments(config, "manager");
     const extensionValues = (args) => args.flatMap((value, index) => args[index - 1] === "-e" ? [value] : []);
-    assert.deepEqual(extensionValues(hariResources), [coordinatorWorkspaceEntry, hariEntry]);
+    assert.deepEqual(extensionValues(hariResources), [coordinatorWorkspaceEntry, sessionObserverEntry, hariEntry]);
     assert.deepEqual(extensionValues(managerResources), [workspaceEntry, subagentsEntry, hariEntry]);
     for (const resources of [hariResources, managerResources]) {
       assert.ok(resources.includes("--no-extensions"));
@@ -418,6 +421,8 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
     const { default: workspaceExtension } = await import(pathToFileURL(workspaceEntry).href);
     const { default: workspaceCreation } = await import(pathToFileURL(coordinatorWorkspaceEntry).href);
     await workspaceCreation(coordinator.api);
+    const { default: sessionObserver } = await import(pathToFileURL(sessionObserverEntry).href);
+    await sessionObserver(coordinator.api);
     hariExtension(coordinator.api);
     const coordinatorContext = extensionContext(coordination, join(coordination, "hari.jsonl"));
     await coordinator.emit("session_start", {}, coordinatorContext);
@@ -429,8 +434,11 @@ test("Hari composes real workspace and subagent extensions in isolated role sess
     assert.equal(coordinator.commands.has("workspace"), false);
     assert.equal(coordinator.commands.has("ws"), false);
     assert.equal(coordinator.handlers.has("resources_discover"), false, "the coordinator has no workspace resource lifecycle hook");
-    assert.equal(coordinator.handlers.get("session_start")?.length, 1, "only Hari registers the coordinator session-start hook");
-    assert.equal(coordinator.handlers.get("session_shutdown")?.length, 1, "only Hari registers the coordinator session-shutdown hook");
+    assert.equal(coordinator.handlers.get("session_start")?.length, 2, "observer and Hari hooks remain, but workspace activation is absent");
+    assert.equal(coordinator.handlers.get("session_shutdown")?.length, 2, "observer shutdown remains in the coordinator");
+    assert.ok(coordinator.active.includes("subagent"));
+    assert.ok(!coordinator.commands.has("subagent"));
+    assert.equal(coordinator.shortcuts.size, 0);
 
     const missingCwd = await coordinator.emit("tool_call", {
       toolName: "create_workspace",

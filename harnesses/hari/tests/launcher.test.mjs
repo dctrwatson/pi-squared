@@ -14,6 +14,7 @@ const harnessRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(harnessRoot, "..", "..");
 const hariEntry = join(harnessRoot, "src", "index.ts");
 const workspaceCreateEntry = join(harnessRoot, "src", "workspace-create.ts");
+const sessionObserverEntry = join(harnessRoot, "src", "session-observer.ts");
 const bundledWorkspaceLauncher = join(repoRoot, "extensions", "workspace", "launcher.ts");
 
 function identity(coordination, project, manager) {
@@ -30,10 +31,12 @@ test("Hari resource profiles are explicit and the manager suppresses ambient pro
     workspaceLauncher: "/resources/workspace/launcher.ts",
   };
   const args = resourceArguments(config);
-  assert.deepEqual(args.slice(0, 5), [
+  assert.deepEqual(args.slice(0, 7), [
     "--no-extensions",
     "-e",
     workspaceCreateEntry,
+    "-e",
+    sessionObserverEntry,
     "-e",
     hariEntry,
   ]);
@@ -43,6 +46,8 @@ test("Hari resource profiles are explicit and the manager suppresses ambient pro
   assert.ok(args.includes("--system-prompt"));
 
   const manager = resourceArguments(config, "manager");
+  assert.deepEqual(manager.slice(0, 7), ["--no-extensions", "-e", "/resources/workspace/index.ts", "-e", "/resources/subagents/index.ts", "-e", hariEntry]);
+  assert.equal(manager.includes(sessionObserverEntry), false);
   assert.equal(manager[manager.indexOf("--system-prompt") + 1], "");
   assert.equal(manager[manager.indexOf("--append-system-prompt") + 1], "");
 });

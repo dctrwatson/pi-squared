@@ -36,6 +36,7 @@ import {
   withIntegrationContext,
 } from "./context.ts";
 import { discoverGitHubPullRequests, readGitHubIssue } from "./github-access.ts";
+import { registerGitHubInboxTools } from "./github-tools.ts";
 import { inspectHariManagerSession } from "./session-identity.ts";
 import { checkpointCoordination, inspectCoordinationGit } from "./coordination-git.ts";
 
@@ -46,6 +47,7 @@ const TEXT_LIMIT = 16_000;
 const SUBAGENT_CONTEXT_LIMIT = 8_000;
 const HARI_TOOLS = [
   "create_workspace",
+  "subagent",
   "hari_git",
   "hari_projects",
   "hari_create_project",
@@ -63,6 +65,9 @@ const HARI_TOOLS = [
   "hari_catch_up",
   "hari_discover_prs",
   "hari_github_issue",
+  "hari_follow",
+  "hari_github_work",
+  "hari_notifications",
 ];
 const MANAGER_TOOLS = ["manager_context", "manager_report", "hari_github_issue", "subagent"];
 const MANAGER_BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -142,7 +147,7 @@ function managerSharedStateAttempt(toolName: string, input: unknown, ctx: Extens
   if (toolName === "edit" || toolName === "write") {
     const path = directPath(input, ctx.cwd);
     if (path && isInside(config.coordinationDir, path)) {
-      return "Managers cannot edit Hari's shared Prime Radiant records directly. Use manager_report for the owned report; Hari owns index/project/inbox records.";
+      return "Managers cannot edit Hari's shared Prime Radiant records directly. Use manager_report for the owned report; Hari owns index/project/inbox/following records.";
     }
   }
   return undefined;
@@ -279,11 +284,11 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
 
   pi.registerTool({
     name: "hari_track_issue",
-    label: "Track GitHub Issue",
-    description: "Read a GitHub issue and link it to an existing or newly named Hari project. This never writes GitHub.",
+    label: "Track GitHub Issue or PR",
+    description: "Read a GitHub issue or PR and link it to a Hari project. This never writes GitHub or adds it to local following.",
     parameters: Type.Object({
       project: Type.String({ description: "Existing project id or name for a new project" }),
-      reference: Type.String({ description: "GitHub issue URL, owner/repo#number, or issue number" }),
+      reference: Type.String({ description: "Issue/PR URL, owner/repo#issue-number, or issue number" }),
       createProject: Type.Optional(Type.Boolean({ description: "Create the project when it is not already tracked" })),
       goal: Type.Optional(Type.String({ description: "Goal used only when creating a project" })),
       repository: Type.Optional(Type.String({ description: "Repository override for issue lookup/new project" })),
@@ -522,7 +527,7 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
     label: "Read Hari Record Page",
     description: "Read a coordination record page with its source path and continuation offset. Start at offset 0; use nextOffset with the same record arguments to continue.",
     parameters: Type.Object({
-      kind: StringEnum(["index", "inbox", "project", "report"] as const),
+      kind: StringEnum(["index", "inbox", "following", "project", "report"] as const),
       project: Type.Optional(Type.String({ description: "Required for project and report" })),
       manager: Type.Optional(Type.String({ description: "Required for report" })),
       offset: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based character offset; default: 0" })),
@@ -577,16 +582,17 @@ function registerHariTools(pi: ExtensionAPI, getConfig: () => RoleConfig, mutate
     },
   });
 
+  registerGitHubInboxTools(pi, getConfig, mutate);
   registerGitHubTool(pi, getConfig);
 }
 
 function registerGitHubTool(pi: ExtensionAPI, getConfig: () => RoleConfig) {
   pi.registerTool({
     name: "hari_github_issue",
-    label: "Read GitHub Issue",
-    description: "Read a GitHub issue through the harness's read-only intake module. It never writes GitHub.",
+    label: "Read GitHub Issue or PR",
+    description: "Read one GitHub issue or PR without changing GitHub.",
     parameters: Type.Object({
-      reference: Type.String({ description: "Issue URL, owner/repo#number, or issue number" }),
+      reference: Type.String({ description: "Issue/PR URL, owner/repo#issue-number, or issue number" }),
       repository: Type.Optional(Type.String({ description: "Repository when reference is not a full URL" })),
     }),
     async execute(_id, params, signal) {
@@ -606,7 +612,7 @@ function registerManagerTools(
   pi.registerTool({
     name: "manager_context",
     label: "Refresh Manager Context",
-    description: "Read the full current assignment, project facts, checkout state/guidance, and read-only issue observation. Required before dependent work when no applicable full result is visible.",
+    description: "Read the full current assignment, project facts, checkout state/guidance, and read-only issue/PR observation. Required before dependent work when no applicable full result is visible.",
     parameters: Type.Object({}),
     async execute() {
       const assembly = await assembleContext(getConfig());
@@ -742,7 +748,7 @@ export default function hariExtension(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (!config) return;
     const available = new Set(pi.getAllTools().map((tool) => tool.name));
-    const required = config.role === "hari" ? ["create_workspace"] : ["create_workspace", "subagent"];
+    const required = ["create_workspace", "subagent"];
     const missing = required.filter((name) => !available.has(name));
     runtimeError = missing.length ? `Hari resource profile is incomplete (missing ${missing.join(", ")}). Configure a complete pi-squared checkout with hari init and launch through Hari.` : undefined;
     if (config.role === "manager" && !runtimeError) {

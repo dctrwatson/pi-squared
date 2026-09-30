@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { addManager, captureInbox, createProject, initializeCoordination, readInbox, writeManagerReport } from "../src/coordination.ts";
+import { addManager, captureInbox, createProject, FOLLOWING_FILE, followGitHubItem, initializeCoordination, readFollowing, readInbox, unfollowGitHubItem, writeManagerReport } from "../src/coordination.ts";
 import { checkpointCoordination, initializeCoordinationRepository, inspectCoordinationGit, preflightCoordinationRepository, requireCoordinationRepository } from "../src/coordination-git.ts";
 
 const resources = { version: 1, workspaceLauncher: "/resources/launcher.ts" };
@@ -144,4 +144,88 @@ test("tracked runtime data is surfaced rather than silently committed or untrack
   git(root, "add", "-f", ".hari/launcher.json");
   await assert.rejects(requireCoordinationRepository(root), /already tracked/);
   assert.match(git(root, "ls-files"), /\.hari\/launcher.json/);
+});
+
+test("following checkpoints include the durable file and its deletion, not unrelated or runtime data", async (t) => {
+  const root = await directory(t);
+  await initialize(root);
+  const initialHead = git(root, "rev-parse", "HEAD");
+  assert.deepEqual(await readFollowing(root), { version: 1, items: [] });
+  await initialize(root);
+  assert.equal(git(root, "rev-parse", "HEAD"), initialHead);
+  await assert.rejects(readFile(join(root, FOLLOWING_FILE)), { code: "ENOENT" });
+  await followGitHubItem(root, { url: "https://github.com/acme/widgets/pull/42", note: "A useful design" });
+  await writeFile(join(root, "unrelated.txt"), "Keep this untracked\n");
+  await writeFile(join(root, ".hari", "digest.json"), "Synthetic runtime data\n");
+  const saved = await readFile(join(root, FOLLOWING_FILE), "utf8");
+  assert.equal((await checkpointCoordination(root, "follow a PR locally")).changed, true);
+  assert.equal(git(root, "show", `HEAD:${FOLLOWING_FILE}`), saved.trim());
+  assert.deepEqual(git(root, "ls-files").split("\n"), [".gitignore", "FOLLOWING.md", "INBOX.md", "PROJECTS.md"]);
+  await preflightCoordinationRepository(root);
+  await initialize(root);
+  assert.equal(await readFile(join(root, FOLLOWING_FILE), "utf8"), saved);
+  assert.equal(await unfollowGitHubItem(root, "https://github.com/acme/widgets/pull/42"), true);
+  assert.equal((await checkpointCoordination(root, "unfollow the PR locally")).changed, true);
+  assert.deepEqual(await readFollowing(root), { version: 1, items: [] });
+  await rm(join(root, FOLLOWING_FILE));
+  assert.match((await inspectCoordinationGit(root, "diff")).text, /deleted file mode/);
+  assert.equal((await checkpointCoordination(root, "remove the empty following record")).changed, true);
+  assert.doesNotMatch(git(root, "ls-files"), /FOLLOWING|unrelated|\.hari\//);
+  assert.deepEqual(await readFollowing(root), { version: 1, items: [] });
+  assert.equal(await readFile(join(root, "unrelated.txt"), "utf8"), "Keep this untracked\n");
+  assert.equal(git(root, "diff", "--cached"), "");
+});
+
+test("a local following record can be adopted without changing its contents", async (t) => {
+  const root = await directory(t);
+  await followGitHubItem(root, { url: "https://github.com/acme/widgets/issues/42" });
+  const before = await readFile(join(root, FOLLOWING_FILE), "utf8");
+  await preflightCoordinationRepository(root);
+  await initialize(root);
+  assert.equal(await readFile(join(root, FOLLOWING_FILE), "utf8"), before);
+  assert.equal(git(root, "show", `HEAD:${FOLLOWING_FILE}`), before.trim());
+  assert.equal(git(root, "remote", "-v"), "");
+});
+
+test("following preflight and checkpoints refuse edited, symlinked, or nonregular records without staging", async (t) => {
+  const root = await directory(t);
+  await initialize(root);
+  await followGitHubItem(root, { url: "https://github.com/acme/widgets/issues/42" });
+  await checkpointCoordination(root, "initial follow");
+  const head = git(root, "rev-parse", "HEAD");
+  const path = join(root, FOLLOWING_FILE);
+  const before = await readFile(path, "utf8");
+  await writeFile(path, `${before}manual view edit\n`);
+  await assert.rejects(preflightCoordinationRepository(root), /manual or stale generated-view edits/);
+  await assert.rejects(checkpointCoordination(root, "do not overwrite"), /manual or stale generated-view edits/);
+  await writeFile(path, before.replace('"number": 42', '"number": 43'));
+  await assert.rejects(preflightCoordinationRepository(root), /not canonical/);
+  await assert.rejects(checkpointCoordination(root, "do not stage malformed metadata"), /not canonical/);
+  const target = join(root, "external-record.md");
+  await writeFile(target, before);
+  await rm(path);
+  await symlink(target, path);
+  await assert.rejects(preflightCoordinationRepository(root), /regular files\/directories/);
+  await assert.rejects(checkpointCoordination(root, "do not follow a link"), /regular file/);
+  assert.equal(await readFile(target, "utf8"), before);
+  await rm(path);
+  await mkdir(path);
+  await assert.rejects(preflightCoordinationRepository(root), /regular files\/directories/);
+  await assert.rejects(checkpointCoordination(root, "do not stage a directory"), /regular file/);
+  assert.equal(git(root, "diff", "--cached"), "");
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+});
+
+test("a following change does not consume unrelated staged work", async (t) => {
+  const root = await directory(t);
+  await initialize(root);
+  await writeFile(join(root, "unrelated.txt"), "Staged human work\n");
+  git(root, "add", "unrelated.txt");
+  const staged = git(root, "diff", "--cached");
+  const head = git(root, "rev-parse", "HEAD");
+  await followGitHubItem(root, { url: "https://github.com/acme/widgets/pull/42" });
+  await assert.rejects(checkpointCoordination(root, "leave the index alone"), /staged changes/);
+  assert.equal(git(root, "diff", "--cached"), staged);
+  assert.equal(git(root, "rev-parse", "HEAD"), head);
+  assert.equal((await readFollowing(root)).items.length, 1);
 });

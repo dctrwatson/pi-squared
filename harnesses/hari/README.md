@@ -1,18 +1,13 @@
 # Hari
 
-Hari is the named cross-project coordination agent you meet through native Pi.
-The Hari harness is the local software under `harnesses/hari` in
-[pi-squared](../../README.md) that gives him that role. Hari's durable home is the
-**Prime Radiant** at `~/Projects/primeradiant`. There he keeps his coordinator
-conversations and durable coordination knowledge while
-managers own technical delivery for their assigned issues.
+Hari coordinates all your projects through native Pi. His shared home is the
+**Prime Radiant** at `~/Projects/primeradiant`.
 
-## Status
-
-The Hari harness is early usable local software. Hari can coordinate, prepare
-managers, and use bounded helper flows within agreed authority, but real
-interactive use has not yet established the harness's usefulness or validated every
-runtime edge case. GitHub intake is read-only. Manager continuation is user-controlled.
+Use conversation to track commitments, decisions, dependencies, and blockers.
+You set priorities and control manager launches. Managers own their assignments
+and acceptance evidence. Hari reads your GitHub work and notifications, keeps a
+local list of issues and PRs you follow, and prepares digests. Useful learning
+stays in inbox notes and later assignments.
 
 ## Quick start
 
@@ -25,58 +20,21 @@ hari init
 hari
 ```
 
-`bin/hari` is next to `bin/piw`. It starts Hari without a global npm install.
-An ordinary Pi launch does not load or activate Hari. `hari init` creates or
-adopts the fixed Prime Radiant at `~/Projects/primeradiant`. Bare `hari` opens Hari
-in his durable home. Conversation is the normal interface for tracking work,
-recording decisions, preparing managers, and making local checkpoints.
+Requires Node 22.19 or newer, Git, and `pi` on `PATH`; GitHub reads also need `gh`.
+Hari uses this checkout's bundled resources. Ordinary Pi launches do not load Hari.
 
-## Requirements
+## Documentation
 
-- Node 22.19 or newer, Git, and `pi` on `PATH`
-- Root dependencies installed with `npm ci`
-- `gh` access only when you request GitHub observations
-
-By default, the harness uses workspace and subagent resources bundled in this
-pi-squared checkout. It does not require `piw` on `PATH`
-or a sibling checkout. Advanced resource flags and saved resource settings remain
-available. Init does not silently replace or migrate saved settings. They do not
-select another Prime Radiant or create another Hari instance.
-
-## What Hari can do today
-
-- Keep small, Git-backed coordination knowledge in the Prime Radiant
-- Track local inbox items and read-only GitHub issue and PR observations
-- Exercise judgment within agreed authority to retrieve relevant context, make
-  coordination recommendations, and prepare or resume managers
-- Reuse native Pi, workspace, and optional helper subagents without creating a
-  second agent runtime
-- Keep Prime Radiant Git separate from source repositories with no remote, fetch,
-  pull, or push operations
-
-Hari's initiative does not expand authority or start background work. Managers need
-separate applicable authority to publish, push source, merge, deploy, or operate
-live systems. Idle managers are not woken automatically, and advisory checks are
-not a sandbox. A source change, commit, CI result, merge, deployment, operational
-validation, and acceptance are distinct facts.
+- [Usage](docs/usage.md): projects, managers, learning, and checkpoints.
+- [Operating model](design/harness-operating-model.md): responsibilities and records.
+- [Pi integration](design/harness-pi-integration.md): resources and runtime contracts.
+- [Glossary](GLOSSARY.md), [contributor guidance](AGENTS.md), and
+  [maintainer lessons](RETROSPECTIVE.md).
 
 ## Development checks
 
 ```bash
 npm run check
+npm run test:quick
 npm run test:hari
 ```
-
-Run these commands from the pi-squared root. `npm test` also includes Hari tests.
-`npm run test:quick` remains the generic extension quick suite.
-
-## Documentation
-
-- [Usage](docs/usage.md) covers setup and the current workflow.
-- [Operating model](design/harness-operating-model.md) states the durable
-  coordination principles.
-- [Pi integration](design/harness-pi-integration.md) describes implemented role
-  and session boundaries.
-- [Future options](design/future.md) lists deferred ideas, not a roadmap.
-- [Glossary](GLOSSARY.md), [repository guidance](AGENTS.md), and
-  [retrospective](RETROSPECTIVE.md) support consistent maintenance.

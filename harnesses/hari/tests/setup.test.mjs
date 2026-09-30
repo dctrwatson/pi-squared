@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { addManager, captureInbox, createProject, initializeCoordination, readInbox } from "../src/coordination.ts";
 import { roleConfigFromEnvironment } from "../src/context.ts";
@@ -14,6 +14,14 @@ const rootHariBin = join(repositoryRoot, "bin", "hari");
 const bundledLauncher = join(repositoryRoot, "extensions", "workspace", "launcher.ts");
 const hariEntry = join(harnessRoot, "src", "index.ts");
 const workspaceCreateEntry = join(harnessRoot, "src", "workspace-create.ts");
+const sessionObserverEntry = join(harnessRoot, "src", "session-observer.ts");
+const personaLoaderEntry = join(repositoryRoot, "extensions", "subagents", "personas.ts");
+
+const compatibleSubagentModule = `
+export const SUBAGENT_EXTENSION_CAPABILITIES = { validateRestoredSubagent: true };
+export { loadSubagentPersonas } from ${JSON.stringify(pathToFileURL(personaLoaderEntry).href)};
+export default function () { throw new Error("must not start an observer during resource validation"); }
+`;
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "hari-setup-"));
@@ -30,7 +38,7 @@ async function fixture(t) {
   const coordination = join(home, "Projects", "primeradiant");
   for (const directory of [home, other, join(dependency, "extensions", "workspace"), join(dependency, "extensions", "subagents"), bin, runtimeBin]) await mkdir(directory, { recursive: true });
   await writeFile(join(dirname(launcher), "index.ts"), "export default function () {}\n");
-  await writeFile(join(dependency, "extensions", "subagents", "index.ts"), "export default function () {}\n");
+  await writeFile(join(dependency, "extensions", "subagents", "index.ts"), compatibleSubagentModule);
   await writeFile(launcher, "export const WORKSPACE_LAUNCH_CAPABILITIES = { beforeActivate: true }; export async function resolveLaunch() { throw new Error('must not activate during init'); }\n");
   await writeFile(fakePi, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
@@ -80,7 +88,7 @@ test("root hari initializes bundled resources and runs from arbitrary and symlin
   assert.equal(launched.manager, undefined);
   assert.ok(launched.args.includes("--continue"));
   assert.equal(launched.args[launched.args.indexOf("--session-dir") + 1], join(f.coordination, ".hari", "sessions"));
-  assert.deepEqual(launched.args.slice(launched.args.indexOf("--no-extensions"), launched.args.indexOf("--no-extensions") + 5), ["--no-extensions", "-e", workspaceCreateEntry, "-e", hariEntry]);
+  assert.deepEqual(launched.args.slice(launched.args.indexOf("--no-extensions"), launched.args.indexOf("--no-extensions") + 7), ["--no-extensions", "-e", workspaceCreateEntry, "-e", sessionObserverEntry, "-e", hariEntry]);
   const nested = join(f.other, "nested", "cwd");
   const linkedHari = join(f.root, "hari-link");
   await mkdir(nested, { recursive: true });
@@ -149,6 +157,56 @@ test("missing setup and incompatible resources fail without creating coordinatio
   await assert.rejects(lstat(f.settings), /ENOENT/);
 });
 
+test("an older configured subagent factory fails before init writes or helper startup", async t => {
+  for (const capability of ["", "export const SUBAGENT_EXTENSION_CAPABILITIES = { validateRestoredSubagent: false };"]) {
+    const f = await fixture(t);
+    const subagent = join(f.dependency, "extensions", "subagents", "index.ts");
+    const oldModule = `
+${capability}
+export function loadSubagentPersonas() { throw new Error("must not read personas before the capability check"); }
+export default function () { throw new Error("must not start an incompatible helper factory"); }
+`;
+    await writeFile(subagent, oldModule);
+    failed(f.run("init", "--pi-squared", f.dependency, "--pi", f.fakePi), /Configured subagent extension lacks validateRestoredSubagent/);
+    await assert.rejects(lstat(f.coordination), /ENOENT/);
+    await assert.rejects(lstat(f.settings), /ENOENT/);
+    await assert.rejects(lstat(f.log), /ENOENT/);
+    assert.equal(await readFile(subagent, "utf8"), oldModule);
+  }
+});
+
+test("an incompatible saved dependency blocks init and launch without migrating settings", async t => {
+  const f = await fixture(t);
+  succeeded(f.run("init", "--pi-squared", f.dependency, "--pi", f.fakePi));
+  await captureInbox(f.coordination, "Keep this pending note unchanged");
+  const session = join(f.coordination, ".hari", "sessions", "retained.jsonl");
+  await mkdir(dirname(session), { recursive: true });
+  await writeFile(session, "retained synthetic conversation\n");
+  const configPath = join(f.coordination, ".hari", "launcher.json");
+  const before = {
+    config: await readFile(configPath, "utf8"),
+    inbox: await readFile(join(f.coordination, "INBOX.md"), "utf8"),
+    index: await readFile(join(f.coordination, "PROJECTS.md"), "utf8"),
+    head: f.git("rev-parse", "HEAD"),
+    status: f.git("status", "--short"),
+  };
+  const subagent = join(f.dependency, "extensions", "subagents", "index.ts");
+  const oldModule = compatibleSubagentModule.replace("export const SUBAGENT_EXTENSION_CAPABILITIES = { validateRestoredSubagent: true };", "");
+  await writeFile(subagent, oldModule);
+  // The bundled factory is compatible, but does not replace a saved selection.
+  for (const args of [[], ["init"]]) {
+    failed(f.run(...args), /Configured subagent extension lacks validateRestoredSubagent/);
+    assert.equal(await readFile(configPath, "utf8"), before.config);
+    assert.equal(await readFile(join(f.coordination, "INBOX.md"), "utf8"), before.inbox);
+    assert.equal(await readFile(join(f.coordination, "PROJECTS.md"), "utf8"), before.index);
+    assert.equal(await readFile(session, "utf8"), "retained synthetic conversation\n");
+    assert.equal(f.git("rev-parse", "HEAD"), before.head);
+    assert.equal(f.git("status", "--short"), before.status);
+    assert.equal(await readFile(subagent, "utf8"), oldModule);
+    await assert.rejects(lstat(f.log), /ENOENT/);
+  }
+});
+
 test("missing workspace or subagent entries fail before setup writes", async t => {
   for (const extension of ["workspace", "subagents"]) {
     const f = await fixture(t);
@@ -212,6 +270,9 @@ test("internal manager start/resume uses the global store without directory argu
   assert.equal(launched.manager, "manager");
   assert.equal(launched.coordinationOverride, undefined);
   assert.deepEqual(launched.args.slice(0, 2), ["--session", session]);
+  const managerResources = ["--no-extensions", "-e", await realpath(join(dirname(f.launcher), "index.ts")), "-e", await realpath(join(f.dependency, "extensions", "subagents", "index.ts")), "-e", hariEntry];
+  assert.deepEqual(launched.args.slice(2, 9), managerResources);
+  assert.equal(launched.args.includes(sessionObserverEntry), false);
   const config = roleConfigFromEnvironment({ HOME: f.home, HARI_ROLE: "manager", HARI_PROJECT_ID: project.id, HARI_MANAGER_ID: "manager" });
   assert.equal(config.coordinationDir, f.coordination);
   const identity = { type: "custom", customType: "hari-manager-identity", data: { coordinationDir: f.coordination, projectId: project.id, managerId: "manager" } };
@@ -219,6 +280,8 @@ test("internal manager start/resume uses the global store without directory argu
   succeeded(f.run("internal", "manager", "resume", project.id, "manager"));
   launched = JSON.parse(await readFile(f.log, "utf8"));
   assert.deepEqual(launched.args.slice(0, 2), ["--session", session]);
+  assert.deepEqual(launched.args.slice(2, 9), managerResources);
+  assert.equal(launched.args.includes(sessionObserverEntry), false);
   // The existing exact-session identity safeguard remains in place.
   identity.data.coordinationDir = join(f.home, "hari-coordination");
   const oldIdentity = JSON.stringify(identity) + "\n";
@@ -239,6 +302,8 @@ test("explicit resource overrides remain saved instead of falling back to bundle
   const configPath = join(f.coordination, ".hari", "launcher.json");
   const configured = JSON.parse(await readFile(configPath, "utf8"));
   assert.equal(configured.workspaceLauncher, await realpath(f.launcher));
+  // The configured dependency supplies native extensions, not Hari's local persona/policy.
+  await assert.rejects(lstat(join(f.dependency, "harnesses", "hari")), /ENOENT/);
   succeeded(f.run("init"));
   assert.deepEqual(JSON.parse(await readFile(configPath, "utf8")), configured);
 });

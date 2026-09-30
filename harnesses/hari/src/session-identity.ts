@@ -89,6 +89,51 @@ function observePristineWorkspaceEntry(state: PristineWorkspaceState, entry: Jso
   state.disqualified = true;
 }
 
+function createIdentityObserver() {
+  const pristine: PristineWorkspaceState = { next: 0, disqualified: false };
+  let identity: HariManagerSessionIdentity | undefined;
+  let uncertainty: string | undefined;
+  return {
+    get uncertain(): boolean { return uncertainty !== undefined; },
+    refuse(reason: string): void { uncertainty ??= reason; },
+    observe(entry: unknown): void {
+      if (uncertainty) return;
+      if (!record(entry)) {
+        pristine.disqualified = true;
+        return;
+      }
+      if (entry.customType === IDENTITY_CUSTOM_TYPE) {
+        const parsed = parseIdentity(entry);
+        if (!parsed) {
+          uncertainty = `Native session has malformed ${IDENTITY_CUSTOM_TYPE} data; refusing uncertain identity`;
+          return;
+        }
+        if (identity && !sameIdentity(identity, parsed)) {
+          uncertainty = `Native session has conflicting ${IDENTITY_CUSTOM_TYPE} entries; refusing uncertain identity`;
+          return;
+        }
+        identity = parsed;
+        pristine.disqualified = true;
+        return;
+      }
+      observePristineWorkspaceEntry(pristine, entry);
+    },
+    result(): SessionIdentityInspection {
+      if (uncertainty) return { uncertain: uncertainty };
+      if (identity) return { identity };
+      if (!pristine.disqualified && pristine.next === 4) return { pristineWorkspace: true };
+      return {};
+    },
+  };
+}
+
+/** Inspect parsed native entries without I/O. The caller must validate and bound its input. */
+export function inspectHariManagerSessionEntries(entries: Iterable<unknown>): SessionIdentityInspection {
+  const observer = createIdentityObserver();
+  for (const entry of entries) observer.observe(entry);
+  return observer.result();
+}
+
 /**
  * Stream native session JSONL from source with bounded memory. Conversation text
  * is never assembled into a prompt: ordinary lines are discarded after parsing.
@@ -98,18 +143,15 @@ function observePristineWorkspaceEntry(state: PristineWorkspaceState, entry: Jso
  */
 export async function inspectHariManagerSession(sessionPath: string): Promise<SessionIdentityInspection> {
   await stat(sessionPath);
-  const pristine: PristineWorkspaceState = { next: 0, disqualified: false };
-  let identity: HariManagerSessionIdentity | undefined;
-  let uncertainty: string | undefined;
+  const observer = createIdentityObserver();
   let line = "";
   let lineBytes = 0;
   let oversized = false;
 
   const observeLine = (raw: string, wasOversized: boolean): void => {
-    if (uncertainty) return;
+    if (observer.uncertain) return;
     if (wasOversized) {
-      pristine.disqualified = true;
-      uncertainty = `Native session has a JSONL entry over the ${MAX_PARSED_LINE_BYTES}-byte line limit; refusing uncertain identity`;
+      observer.refuse(`Native session has a JSONL entry over the ${MAX_PARSED_LINE_BYTES}-byte line limit; refusing uncertain identity`);
       return;
     }
     if (raw.length === 0) return;
@@ -117,28 +159,10 @@ export async function inspectHariManagerSession(sessionPath: string): Promise<Se
     try {
       entry = JSON.parse(raw);
     } catch {
-      uncertainty = "Native session contains malformed JSONL; refusing uncertain identity";
+      observer.refuse("Native session contains malformed JSONL; refusing uncertain identity");
       return;
     }
-    if (!record(entry)) {
-      pristine.disqualified = true;
-      return;
-    }
-    if (entry.customType === IDENTITY_CUSTOM_TYPE) {
-      const parsed = parseIdentity(entry);
-      if (!parsed) {
-        uncertainty = `Native session has malformed ${IDENTITY_CUSTOM_TYPE} data; refusing uncertain identity`;
-        return;
-      }
-      if (identity && !sameIdentity(identity, parsed)) {
-        uncertainty = `Native session has conflicting ${IDENTITY_CUSTOM_TYPE} entries; refusing uncertain identity`;
-        return;
-      }
-      identity = parsed;
-      pristine.disqualified = true;
-      return;
-    }
-    observePristineWorkspaceEntry(pristine, entry);
+    observer.observe(entry);
   };
 
   const appendPart = (part: string, complete: boolean): void => {
@@ -175,8 +199,5 @@ export async function inspectHariManagerSession(sessionPath: string): Promise<Se
     }
   }
   if (line.length > 0 || oversized) appendPart("", true);
-  if (uncertainty) return { uncertain: uncertainty };
-  if (identity) return { identity };
-  if (!pristine.disqualified && pristine.next === 4) return { pristineWorkspace: true };
-  return {};
+  return observer.result();
 }
