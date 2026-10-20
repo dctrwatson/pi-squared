@@ -10,6 +10,7 @@ provider request or proves model behavior.
 | Source | When it enters context | Responsibility |
 | --- | --- | --- |
 | Repository `AGENTS.md` | Context-file discovery or an explicit read | Repository constraints and required checks |
+| `system-prompts/sre-writer.md` | Explicit `--system-prompt` selection or a user-installed `SYSTEM.md` | SRE document writing, evidence, and operational safety |
 | `extensions/agent-tools` | While each tool is active | Call contracts, bounded output, error and artifact recovery |
 | `extensions/subagents` | Active tool metadata; selected child profile; dispatch and completion | Scope, ownership, continuity, and concise evidence reports |
 | `extensions/workspace` | A session owns its workspace | Stable coding guidance and the conditional PM skill hint |

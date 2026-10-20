@@ -1,6 +1,6 @@
 # π²
 
-Repository for [Pi](https://buildwithpi.ai/) skills and extensions.
+Repository for [Pi](https://buildwithpi.ai/) skills, extensions, and system prompts.
 
 Requires Pi 1.2.0 or newer and Node.js 22.19.0 or newer.
 
@@ -12,6 +12,10 @@ extension quick suite. Run `npm test` for all extension and skill tests.
 See the [production audit gate](docs/production-audit.md),
 [model context map](docs/model-context.md), and
 [bundle-loader reference](docs/bundle-loader.md).
+
+## System prompts
+
+- [**sre-writer**](system-prompts/sre-writer.md) — A distinguished SRE and technical document writer. Run `pi-sre-writer` from your document directory; it accepts Pi options and prompts.
 
 ## Skills
 
