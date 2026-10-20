@@ -37,8 +37,8 @@ async function fixture(t, { mode = "print", tools, extraTools = [], beforeRefres
           async execute() { return { content: [{ type: "text", text: "done" }], details: undefined }; } });
         for (const tool of extraTools) pi.registerTool(tool);
         pi.on("session_start", (_event, ctx) => { lifecycleContext = ctx; });
-        pi.on("before_agent_start", (event) => {
-          beforeRefresh?.();
+        pi.on("before_agent_start", (event, ctx) => {
+          beforeRefresh?.(event, ctx);
           event.systemPromptOptions.sections.keep = "KEEP_SECTION";
           event.systemPromptOptions.promptGuidelines.push("KEEP_GLOBAL_RULE");
           event.systemPromptOptions.toolSnippets.noop = "MUTATED_NOOP_SNIPPET";
@@ -121,7 +121,7 @@ test("real default registration declares only available tools and retains reques
   assert.deepEqual(f.session.getActiveToolNames(), active);
 });
 
-test("real two-request contexts retain tombstones and later enable, hide, and preserve user disables", async (t) => {
+test("real two-request contexts omit unavailable guidance and later enable, hide, and preserve user disables", async (t) => {
   const f = await fixture(t);
   const active = f.session.getActiveToolNames();
   f.provider.setResponses([
@@ -134,7 +134,7 @@ test("real two-request contexts retain tombstones and later enable, hide, and pr
     for (const name of ["ask_user", "gh", "web_search", "bash_job"]) {
       hasDeclaration(capture, name, false);
       hasMetadata(capture, f.session.getToolDefinition(name), false);
-      assert.equal(f.eventOptions.toolSnippets[name], "");
+      assert.ok(!f.eventOptions.toolSnippets[name]);
       assert.deepEqual(f.eventOptions.toolGuidelines[name], []);
     }
     assert.ok(capture.text.includes("KEEP_SECTION"));
@@ -174,6 +174,43 @@ test("real two-request contexts retain tombstones and later enable, hide, and pr
     hasMetadata(f.captures.at(-1), f.session.getToolDefinition(name), false);
   }
   assert.deepEqual(f.session.getActiveToolNames(), active);
+});
+
+test("custom-triggered runs refresh availability and retain prompt metadata across tool calls", async (t) => {
+  const starts = [];
+  const f = await fixture(t, { beforeRefresh: (event, ctx) => {
+    starts.push({ messageType: event.messageType, idle: ctx.isIdle(), hasPrompt: "prompt" in event });
+  } });
+  const active = f.session.getActiveToolNames();
+  f.provider.setResponses([
+    f.response(fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })),
+    f.response(fauxAssistantMessage("done")),
+  ]);
+  const gh = f.session.getToolDefinition("gh");
+  assert.deepEqual(gh.prepareLoadout({}), { hiddenDeclarations: ["gh"] });
+  const enabledBin = join(f.root, "custom-enabled");
+  await mkdir(enabledBin);
+  await writeFile(join(enabledBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  process.env.PATH = enabledBin;
+  await f.session.sendCustomMessage({ customType: "availability-test", content: "Check availability.", display: false }, { triggerTurn: true });
+  assert.deepEqual(starts, [{ messageType: "custom", idle: false, hasPrompt: false }]);
+  assert.equal(f.captures.length, 2);
+  for (const capture of f.captures) {
+    hasDeclaration(capture, "gh", true);
+    hasMetadata(capture, gh, true);
+    for (const name of ["ask_user", "web_search", "bash_job"]) {
+      hasDeclaration(capture, name, false);
+      hasMetadata(capture, f.session.getToolDefinition(name), false);
+    }
+    for (const value of ["KEEP_SECTION", "KEEP_GLOBAL_RULE", "MUTATED_NOOP_SNIPPET", "MUTATED_NOOP_RULE"]) {
+      assert.ok(capture.text.includes(value));
+    }
+  }
+  assert.deepEqual(f.session.getActiveToolNames(), active);
+  assert.equal(f.session.isIdle, true);
+  f.provider.setResponses([f.response(fauxAssistantMessage("user run"))]);
+  await f.session.prompt("Check the next user run.");
+  assert.deepEqual(starts.at(-1), { messageType: "user", idle: false, hasPrompt: true });
 });
 
 test("real TUI, print, JSON, and RPC contexts use mode rather than hasUI", async (t) => {
@@ -233,13 +270,13 @@ test("real setter during before_agent_start preserves earlier request-local meta
   await f.session.prompt("refresh changes the signature");
   hasDeclaration(f.captures[0], "gh", true);
   for (const value of ["KEEP_SECTION", "KEEP_GLOBAL_RULE", "MUTATED_NOOP_SNIPPET", "MUTATED_NOOP_RULE"]) assert.ok(f.captures[0].text.includes(value));
-  assert.equal(f.eventOptions.toolSnippets.ask_user, "");
+  assert.ok(!f.eventOptions.toolSnippets.ask_user);
   assert.deepEqual(f.eventOptions.toolGuidelines.ask_user, []);
   assert.deepEqual(f.eventOptions.selectedTools, active);
   assert.deepEqual(f.session.getActiveToolNames(), active);
 });
 
-test("real late job controls declare immediately but restore prompt metadata only on the next run", async (t) => {
+test("real late job controls refresh declarations during a run and metadata on the next prompt", async (t) => {
   const f = await fixture(t);
   const active = f.session.getActiveToolNames();
   const jobTool = f.session.getToolDefinition("bash_job");
@@ -250,6 +287,7 @@ test("real late job controls declare immediately but restore prompt metadata onl
   await f.session.prompt("start a job");
   hasDeclaration(f.captures[0], "bash_job", false);
   hasDeclaration(f.captures[1], "bash_job", true);
+  // before_agent_start metadata changes stay in effect until the next prompt.
   for (const capture of f.captures) {
     hasMetadata(capture, jobTool, false);
     assert.ok(!capture.text.includes("JOB_RULE_FIXTURE"));

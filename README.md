@@ -2,7 +2,7 @@
 
 Repository for [Pi](https://buildwithpi.ai/) skills and extensions.
 
-Requires Node.js 22.19.0 or newer.
+Requires Pi 1.2.0 or newer and Node.js 22.19.0 or newer.
 
 ## Validation
 

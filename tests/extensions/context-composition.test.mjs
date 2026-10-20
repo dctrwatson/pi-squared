@@ -109,7 +109,8 @@ ${skillBody}
     model: provider.getModel(),
     noTools: "all",
     tools: selectedTools,
-    customTools: [...registration.tools.values()],
+    // Test static prompt composition. Live sessions test availability hooks.
+    customTools: [...registration.tools.values()].map((tool) => ({ ...tool, prepareLoadout: undefined })),
   });
   t.after(() => session.dispose());
 
