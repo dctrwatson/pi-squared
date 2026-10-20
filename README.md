@@ -15,7 +15,7 @@ See the [production audit gate](docs/production-audit.md) and
 ## Skills
 
 - [**address-pr-feedback**](skills/address-pr-feedback/SKILL.md) — Handles GitHub PR feedback end-to-end: reviews comments and inline threads, makes or plans the appropriate changes, and posts replies on GitHub.
-- [**create-pr**](skills/create-pr/SKILL.md) — Creates or updates a GitHub pull request, analyzes changes, and turns local `pi:` checkpoints into logical commits before it pushes.
+- [**publish-pr**](skills/publish-pr/SKILL.md) — Creates PRs, publishes branch changes, or edits requested PR text. Cleans local `pi:` checkpoints before a push; branch-only updates preserve PR text and metadata.
 
 ## Manual skills
 

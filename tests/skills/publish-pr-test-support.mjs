@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "../..");
-const skillDir = join(repoRoot, "skills/create-pr/scripts");
+const skillDir = join(repoRoot, "skills/publish-pr/scripts");
 const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
 
 function run(command, args, options = {}) {
@@ -85,6 +85,12 @@ async function initializeFixture(root) {
   const ghScript = `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$FAKE_GH_DIR/gh.log"
+if [[ "$1 $2" == "issue view" || "$1 $2" == "pr view" ]]; then
+  if [[ " $* " == *" --comments "* && " $* " == *" --json "* ]]; then
+    echo "specify only one of --comments or --json" >&2
+    exit 1
+  fi
+fi
 if [[ "$1 $2" == "auth status" ]]; then exit 0; fi
 if [[ "$1 $2" == "repo view" ]]; then cat "$FAKE_GH_DIR/repo.json"; exit 0; fi
 if [[ "$1 $2" == "pr list" ]]; then
@@ -96,7 +102,7 @@ if [[ "$1 $2" == "pr list" ]]; then
   exit 0
 fi
 if [[ "$1 $2" == "pr view" ]]; then
-  jq '.headRepository //= {"nameWithOwner":"octo/example"} | .isCrossRepository //= false' "$FAKE_GH_DIR/pr-view.json"
+  jq -e 'select(.number != null) | .headRepository //= {"nameWithOwner":"octo/example"} | .isCrossRepository //= false' "$FAKE_GH_DIR/pr-view.json"
   exit 0
 fi
 if [[ "$1 $2" == "issue view" ]]; then cat "$FAKE_GH_DIR/issue-view.json"; exit 0; fi
@@ -120,12 +126,12 @@ exec "$REAL_GIT" "$@"
   await writeFile(join(ghData, "gh.log"), "");
 }
 
-const fixtureTemplate = await mkdtemp(join(tmpdir(), "create-pr-template-"));
+const fixtureTemplate = await mkdtemp(join(tmpdir(), "publish-pr-template-"));
 await initializeFixture(fixtureTemplate);
 test.after(() => rm(fixtureTemplate, { recursive: true, force: true }));
 
 async function createFixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "create-pr-test-"));
+  const root = await mkdtemp(join(tmpdir(), "publish-pr-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await cp(fixtureTemplate, root, { recursive: true });
   const fixture = fixtureAt(root);
@@ -163,6 +169,26 @@ async function writePlan(root, state, groups) {
   return plan;
 }
 
+async function setExistingPR(fixture, overrides = {}) {
+  const pr = {
+    number: 21,
+    title: "Feature",
+    url: "https://github.com/octo/example/pull/21",
+    state: "OPEN",
+    baseRefName: "main",
+    headRefName: git(fixture.work, "branch", "--show-current"),
+    headRefOid: git(fixture.work, "rev-parse", "HEAD"),
+    body: "Existing PR body",
+    headRepository: { nameWithOwner: "octo/example" },
+    isCrossRepository: false,
+    isDraft: false,
+    ...overrides,
+  };
+  await writeJson(join(fixture.ghData, "pr-view.json"), pr);
+  await writeJson(join(fixture.ghData, "pr-list.json"), [pr]);
+  return pr;
+}
+
 export {
   test,
   assert,
@@ -177,6 +203,7 @@ export {
   parseOutput,
   prepare,
   writePlan,
+  setExistingPR,
   mkdir,
   writeJson,
 };

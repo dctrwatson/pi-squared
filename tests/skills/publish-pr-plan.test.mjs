@@ -12,7 +12,7 @@ import {
   parseOutput,
   prepare,
   writePlan,
-} from "./create-pr-test-support.mjs";
+} from "./publish-pr-test-support.mjs";
 
 test("commit planning rejects stale state and merge commits", async (t) => {
   const staleFixture = await createFixture(t);

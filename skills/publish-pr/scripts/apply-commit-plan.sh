@@ -21,7 +21,7 @@ root=$(pr_json_value "$state_file" '.root')
 cd "$root"
 
 mode=$(pr_json_value "$state_file" '.mode')
-[ "$mode" = "publish" ] || pr_die "Commit plans require state prepared with --mode publish"
+[ "$mode" = "publish" ] || [ "$mode" = "push" ] || pr_die "Commit plans require state prepared with --mode publish or push"
 branch=$(pr_json_value "$state_file" '.branch')
 [ "$(git branch --show-current)" = "$branch" ] || pr_die "Current branch does not match prepared branch '$branch'"
 prepared_head=$(pr_json_value "$state_file" '.head')
@@ -113,7 +113,7 @@ if [ "${#pi_commits[@]}" -eq 0 ]; then
   exit 0
 fi
 
-backup_ref="refs/create-pr/backups/$(date +%s)-$$"
+backup_ref="refs/publish-pr/backups/$(date +%s)-$$"
 git update-ref "$backup_ref" HEAD
 
 todo_file=$(mktemp)

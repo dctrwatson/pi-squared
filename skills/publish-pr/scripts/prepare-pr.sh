@@ -10,7 +10,7 @@ usage() {
 Usage: prepare-pr.sh [options]
 
 Options:
-  --mode draft|publish       Preparation intent. Default: draft.
+  --mode draft|publish|push|edit  Preparation intent. Default: draft.
   --base branch              Requested base branch.
   --pr-number number         Existing PR to update.
   --reference reference      GitHub issue or PR reference. Repeatable.
@@ -69,8 +69,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$mode" in
-  draft|publish) ;;
-  *) pr_die "Mode must be draft or publish" ;;
+  draft|publish|push|edit) ;;
+  *) pr_die "Mode must be draft, publish, push, or edit" ;;
 esac
 [ "${#references[@]}" -le 20 ] || pr_die "At most 20 GitHub references are supported"
 if [ -n "$pr_number" ] && [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
@@ -85,10 +85,13 @@ root=$(git rev-parse --show-toplevel)
 cd "$root"
 branch=$(git branch --show-current)
 [ -n "$branch" ] || pr_die "HEAD is detached. Check out a branch before preparing a PR"
-if [ "$mode" = "publish" ]; then pr_require_clean_tree; fi
+if [ "$mode" = "publish" ] || [ "$mode" = "push" ]; then pr_require_clean_tree; fi
+if [ "$mode" = "push" ] || [ "$mode" = "edit" ]; then
+  [ -z "$template_selector" ] || pr_die "Templates are not used in $mode mode"
+fi
 
 if [ -z "$workdir" ]; then
-  workdir=$(mktemp -d "${TMPDIR:-/tmp}/create-pr-XXXXXX")
+  workdir=$(mktemp -d "${TMPDIR:-/tmp}/publish-pr-XXXXXX")
 else
   mkdir -p "$workdir"
   workdir=$(pr_absolute_path "$workdir")
@@ -102,6 +105,7 @@ repo_url=$(jq -r '.url // empty' <<<"$repo_json")
 [ -n "$repo_url" ] || repo_url="https://github.com/$repo"
 
 pr_fields='number,title,url,state,baseRefName,headRefName,headRefOid,headRepository,isCrossRepository,isDraft'
+if [ "$mode" = "edit" ]; then pr_fields+=',body'; fi
 existing_pr='null'
 if [ -n "$pr_number" ]; then
   existing_pr=$(gh pr view "$pr_number" --repo "$repo" --json "$pr_fields")
@@ -114,6 +118,10 @@ else
   elif [ "$open_count" -eq 1 ]; then
     existing_pr=$(jq '.[0]' <<<"$open_prs")
   fi
+fi
+
+if [ "$mode" = "push" ] || [ "$mode" = "edit" ]; then
+  [ "$existing_pr" != "null" ] || pr_die "$mode mode requires an existing PR"
 fi
 
 if [ "$existing_pr" != "null" ]; then
@@ -130,26 +138,29 @@ if [ "$existing_pr" != "null" ]; then
 else
   base="${base_arg:-$default_branch}"
 fi
-[ "$branch" != "$base" ] || pr_die "Current branch is the base branch '$base'"
-
-base_ref="refs/remotes/origin/$base"
-git fetch --quiet origin "+refs/heads/$base:$base_ref" || pr_die "Could not fetch base branch origin/$base"
-base_sha=$(git rev-parse "$base_ref")
-merge_base=$(git merge-base "$base_ref" HEAD) || pr_die "Cannot find a merge base with origin/$base"
 head=$(git rev-parse HEAD)
-[ "$merge_base" != "$head" ] || pr_die "No commits exist between origin/$base and HEAD"
-
-remote_branch_sha=$(pr_remote_head origin "$branch")
+base_ref=""
+base_sha=""
+merge_base=""
+remote_branch_sha=""
 remote_was_ancestor=false
-if [ -n "$remote_branch_sha" ]; then
-  git fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" || pr_die "Could not fetch origin/$branch"
-  if git merge-base --is-ancestor "$remote_branch_sha" "$head"; then
-    remote_was_ancestor=true
+if [ "$mode" != "edit" ]; then
+  [ "$branch" != "$base" ] || pr_die "Current branch is the base branch '$base'"
+  base_ref="refs/remotes/origin/$base"
+  git fetch --quiet origin "+refs/heads/$base:$base_ref" || pr_die "Could not fetch base branch origin/$base"
+  base_sha=$(git rev-parse "$base_ref")
+  merge_base=$(git merge-base "$base_ref" HEAD) || pr_die "Cannot find a merge base with origin/$base"
+  [ "$merge_base" != "$head" ] || pr_die "No commits exist between origin/$base and HEAD"
+
+  remote_branch_sha=$(pr_remote_head origin "$branch")
+  if [ -n "$remote_branch_sha" ]; then
+    git fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch" || pr_die "Could not fetch origin/$branch"
+    if git merge-base --is-ancestor "$remote_branch_sha" "$head"; then remote_was_ancestor=true; fi
   fi
-fi
-if [ "$existing_pr" != "null" ]; then
-  existing_head_oid=$(jq -er '.headRefOid' <<<"$existing_pr")
-  [ "$remote_branch_sha" = "$existing_head_oid" ] || pr_die "Existing PR head does not match origin/$branch"
+  if [ "$existing_pr" != "null" ]; then
+    existing_head_oid=$(jq -er '.headRefOid' <<<"$existing_pr")
+    [ "$remote_branch_sha" = "$existing_head_oid" ] || pr_die "Existing PR head does not match origin/$branch"
+  fi
 fi
 
 status_file="$workdir/status.txt"
@@ -158,17 +169,24 @@ dirty=false
 if [ -s "$status_file" ]; then dirty=true; fi
 
 commits_file="$workdir/commits.json"
-pr_write_commit_json "$merge_base..$head" "$repo_url" "$commits_file"
 changed_files="$workdir/changed-files.txt"
 diff_stat="$workdir/diff-stat.txt"
 diff_file="$workdir/diff.patch"
-git diff --name-only "$merge_base...$head" > "$changed_files"
-git diff --stat "$merge_base...$head" > "$diff_stat"
-git diff "$merge_base...$head" > "$diff_file"
+if [ "$mode" != "edit" ]; then
+  pr_write_commit_json "$merge_base..$head" "$repo_url" "$commits_file"
+  git diff --name-only "$merge_base...$head" > "$changed_files"
+  git diff --stat "$merge_base...$head" > "$diff_stat"
+  git diff "$merge_base...$head" > "$diff_file"
+fi
+existing_pr_file="$workdir/existing-pr.json"
+if [ "$mode" = "edit" ]; then printf '%s\n' "$existing_pr" > "$existing_pr_file"; fi
 
 recent_file="$workdir/recent-prs.json"
-if ! gh pr list --repo "$repo" --state merged --limit 5 --json number,title,url > "$recent_file"; then
-  printf '[]\n' > "$recent_file"
+printf '[]\n' > "$recent_file"
+if [ "$mode" = "draft" ] || [ "$mode" = "publish" ]; then
+  if ! gh pr list --repo "$repo" --state merged --limit 5 --json number,title,url > "$recent_file"; then
+    printf '[]\n' > "$recent_file"
+  fi
 fi
 
 is_template_path() {
@@ -193,7 +211,7 @@ while IFS= read -r template_path; do
   artifact="$workdir/templates/$template_index-$(basename "$template_path")"
   git show "$base_ref:$template_path" > "$artifact"
   jq -cn --arg path "$template_path" --arg artifact "$artifact" '{path:$path,artifact:$artifact}' >> "$template_records"
-done < <(git ls-tree -r --name-only "$base_ref")
+done < <(if [ "$mode" = "draft" ] || [ "$mode" = "publish" ]; then git ls-tree -r --name-only "$base_ref"; fi)
 templates_file="$workdir/templates.json"
 jq -s '.' "$template_records" > "$templates_file"
 rm -f "$template_records"
@@ -233,14 +251,14 @@ for reference in "${references[@]}"; do
 
   artifact="$workdir/references/$reference_index.json"
   if [ "$target_kind" = "pr" ]; then
-    gh pr view "$target_number" --repo "$target_repo" --comments --json number,title,url,state,body,comments > "$artifact"
+    gh pr view "$target_number" --repo "$target_repo" --json number,title,url,state,body,comments > "$artifact"
   elif [ "$target_kind" = "issue" ]; then
-    gh issue view "$target_number" --repo "$target_repo" --comments --json number,title,url,state,body,comments > "$artifact"
-  elif gh pr view "$target_number" --repo "$target_repo" --comments --json number,title,url,state,body,comments > "$artifact" 2>/dev/null; then
+    gh issue view "$target_number" --repo "$target_repo" --json number,title,url,state,body,comments > "$artifact"
+  elif gh pr view "$target_number" --repo "$target_repo" --json number,title,url,state,body,comments > "$artifact" 2>/dev/null; then
     target_kind="pr"
   else
     target_kind="issue"
-    gh issue view "$target_number" --repo "$target_repo" --comments --json number,title,url,state,body,comments > "$artifact"
+    gh issue view "$target_number" --repo "$target_repo" --json number,title,url,state,body,comments > "$artifact"
   fi
   canonical_number=$(jq -er '.number' "$artifact")
   title=$(jq -er '.title' "$artifact")
@@ -291,6 +309,7 @@ jq -n \
   --arg recent_file "$recent_file" \
   --arg templates_file "$templates_file" \
   --arg references_file "$references_file" \
+  --arg existing_pr_file "$existing_pr_file" \
   --argjson existing_pr "$existing_pr" \
   --argjson selected_template "$selected_template" \
   '{
@@ -300,7 +319,11 @@ jq -n \
     remote_branch_sha:(if $remote_branch_sha == "" then null else $remote_branch_sha end),
     remote_was_ancestor:$remote_was_ancestor, dirty:$dirty, workdir:$workdir,
     existing_pr:$existing_pr, selected_template:$selected_template,
-    artifacts:{commits:$commits_file,changed_files:$changed_files,diff_stat:$diff_stat,diff:$diff_file,recent_prs:$recent_file,templates:$templates_file,references:$references_file,status:$workdir + "/status.txt"}
+    artifacts:({references:$references_file,status:$workdir + "/status.txt"} +
+      if $mode == "edit" then {existing_pr:$existing_pr_file}
+      else {commits:$commits_file,changed_files:$changed_files,diff_stat:$diff_stat,diff:$diff_file} +
+        if $mode == "push" then {} else {recent_prs:$recent_file,templates:$templates_file} end
+      end)
   }' > "$state_file"
 
 context_file="$workdir/context.md"
@@ -310,7 +333,7 @@ context_file="$workdir/context.md"
   printf -- '- Intent: `%s`\n' "$mode"
   printf -- '- Repository: `%s`\n' "$repo"
   printf -- '- Branch: `%s` at `%s`\n' "$branch" "${head:0:12}"
-  printf -- '- Base: `%s` at `%s`\n' "$base" "${base_sha:0:12}"
+  printf -- '- Base: `%s`\n' "$base"
   if [ "$existing_pr" != "null" ]; then
     existing_number=$(jq -r '.number' <<<"$existing_pr")
     existing_url=$(jq -r '.url' <<<"$existing_pr")
@@ -319,51 +342,59 @@ context_file="$workdir/context.md"
     echo '- Existing PR: none'
   fi
   if [ "$dirty" = true ]; then echo '- Working tree: dirty (see status artifact)'; else echo '- Working tree: clean'; fi
-  if [ -n "$remote_branch_sha" ]; then
+  if [ "$mode" = "edit" ]; then
+    printf -- '- Current text: `%s`\n' "$existing_pr_file"
+  elif [ -n "$remote_branch_sha" ]; then
     printf -- '- Remote branch: `%s`\n' "${remote_branch_sha:0:12}"
   else
     echo '- Remote branch: not found'
   fi
-  echo
-  echo '## Commits'
-  commit_count=$(jq 'length' "$commits_file")
-  jq -r '.[0:20][] | "- " + .markdown + " " + .subject' "$commits_file"
-  if [ "$commit_count" -gt 20 ]; then printf -- '- ... %s more commit(s); read `%s`\n' "$((commit_count - 20))" "$commits_file"; fi
-  echo
-  echo '## Recent PR titles'
-  if [ "$(jq 'length' "$recent_file")" -eq 0 ]; then
-    echo '- None'
-  else
-    jq -r '.[] | "- " + .title' "$recent_file"
+  if [ "$mode" != "edit" ]; then
+    echo
+    echo '## Commits'
+    commit_count=$(jq 'length' "$commits_file")
+    jq -r '.[0:20][] | "- " + .markdown + " " + .subject' "$commits_file"
+    if [ "$commit_count" -gt 20 ]; then printf -- '- ... %s more commit(s); read `%s`\n' "$((commit_count - 20))" "$commits_file"; fi
   fi
-  echo
-  echo '## Templates'
-  if [ "$template_count" -eq 0 ]; then
-    echo '- None'
-  else
-    jq -r '.[0:20][] | "- `" + .path + "` -> `" + .artifact + "`"' "$templates_file"
-    if [ "$template_count" -gt 20 ]; then printf -- '- ... %s more template(s); read `%s`\n' "$((template_count - 20))" "$templates_file"; fi
-    if [ "$selected_template" = "null" ] && [ "$template_count" -gt 1 ]; then echo '- Select one template and rerun preparation with `--template`.'; fi
+  if [ "$mode" = "draft" ] || [ "$mode" = "publish" ]; then
+    echo
+    echo '## Recent PR titles'
+    if [ "$(jq 'length' "$recent_file")" -eq 0 ]; then
+      echo '- None'
+    else
+      jq -r '.[] | "- " + .title' "$recent_file"
+    fi
+    echo
+    echo '## Templates'
+    if [ "$template_count" -eq 0 ]; then
+      echo '- None'
+    else
+      jq -r '.[0:20][] | "- `" + .path + "` -> `" + .artifact + "`"' "$templates_file"
+      if [ "$template_count" -gt 20 ]; then printf -- '- ... %s more template(s); read `%s`\n' "$((template_count - 20))" "$templates_file"; fi
+      if [ "$selected_template" = "null" ] && [ "$template_count" -gt 1 ]; then echo '- Select one template if needed for the body; rerun with `--template`.'; fi
+    fi
   fi
-  echo
-  echo '## References'
-  if [ "$(jq 'length' "$references_file")" -eq 0 ]; then
-    echo '- None'
-  else
+  if [ "$(jq 'length' "$references_file")" -gt 0 ]; then
+    echo
+    echo '## References'
     jq -r '.[] | "- " + .markdown + " " + .title + " -> `" + .artifact + "`"' "$references_file"
   fi
   echo
   echo '## Artifacts'
-  printf -- '- Diff stat: `%s`\n' "$diff_stat"
-  printf -- '- Changed files: `%s`\n' "$changed_files"
-  printf -- '- Full diff: `%s`\n' "$diff_file"
+  if [ "$mode" != "edit" ]; then
+    printf -- '- Diff stat: `%s`\n' "$diff_stat"
+    printf -- '- Changed files: `%s`\n' "$changed_files"
+    printf -- '- Full diff: `%s`\n' "$diff_file"
+  fi
   printf -- '- State: `%s`\n' "$state_file"
 } > "$context_file"
 
 printf 'WORKDIR=%s\n' "$workdir"
 printf 'STATE=%s\n' "$state_file"
 printf 'CONTEXT=%s\n' "$context_file"
-printf 'DIFF=%s\n' "$diff_file"
-printf 'COMMITS=%s\n' "$commits_file"
+if [ "$mode" != "edit" ]; then
+  printf 'DIFF=%s\n' "$diff_file"
+  printf 'COMMITS=%s\n' "$commits_file"
+fi
 printf 'REFERENCES=%s\n' "$references_file"
-printf 'TEMPLATES=%s\n' "$templates_file"
+if [ "$mode" = "draft" ] || [ "$mode" = "publish" ]; then printf 'TEMPLATES=%s\n' "$templates_file"; fi
