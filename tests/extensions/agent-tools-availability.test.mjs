@@ -153,6 +153,52 @@ test("mode and available-model refreshes use the execution selector and preserve
   assert.ok(state.applied.every((names) => names.join() === "write,unrelated"));
 });
 
+test("selected ask_user availability skips GitHub and web probes and limits metadata suppression", async () => {
+  const state = selection();
+  let ghChecks = 0;
+  let modelReads = 0;
+  const availability = new AgentToolAvailability(state.api, () => 0, async () => {
+    ghChecks++;
+    throw new Error("GitHub probe must be skipped");
+  }, ["ask_user"]);
+  const ctx = context(process.cwd(), "print");
+  ctx.modelRegistry.getAvailable = () => { modelReads++; return []; };
+  await availability.refresh(ctx);
+  assert.equal(ghChecks, 0);
+  assert.equal(modelReads, 0);
+  assert.equal(availability.isAvailable("ask_user"), false);
+  assert.equal(availability.isAvailable("gh"), false);
+  assert.equal(availability.isAvailable("web_search"), false);
+
+  const options = {
+    toolSnippets: Object.fromEntries(OPTIONAL_AGENT_TOOL_NAMES.map((name) => [name, `${name}-snippet`])),
+    toolGuidelines: Object.fromEntries(OPTIONAL_AGENT_TOOL_NAMES.map((name) => [name, [`${name}-guideline`]])),
+  };
+  availability.suppressUnavailablePromptMetadata({ systemPromptOptions: options });
+  assert.equal(options.toolSnippets.ask_user, "");
+  assert.deepEqual(options.toolGuidelines.ask_user, []);
+  for (const name of ["gh", "web_search", "bash_job"]) {
+    assert.equal(options.toolSnippets[name], `${name}-snippet`);
+    assert.deepEqual(options.toolGuidelines[name], [`${name}-guideline`]);
+  }
+});
+
+test("selected web_search availability skips the GitHub executable check", async () => {
+  let ghChecks = 0;
+  let modelReads = 0;
+  const availability = new AgentToolAvailability(selection().api, () => 0, async () => {
+    ghChecks++;
+    throw new Error("GitHub probe must be skipped");
+  }, ["web_search"]);
+  const ctx = context(process.cwd(), "print", undefined, [codex()]);
+  ctx.modelRegistry.getAvailable = () => { modelReads++; return [codex()]; };
+  await availability.refresh(ctx);
+  assert.equal(ghChecks, 0);
+  assert.equal(modelReads, 1);
+  assert.equal(availability.isAvailable("web_search"), true);
+  assert.equal(availability.isAvailable("gh"), false);
+});
+
 test("registry count callbacks are synchronous and independent of pending lifecycle checks", async (t) => {
   preservePath(t);
   const state = selection();

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ProcessArtifact } from "./process-artifacts.ts";
 import type { ProcessSnapshot } from "./process-output.ts";
-import { boundedProcessErrorMessage } from "./process-output.ts";
+import { boundedProcessErrorMessage, DEFAULT_PROCESS_OUTPUT_BYTES } from "./process-output.ts";
 import { BashProcessOwner, BashToolError, startBashProcess, type BashProcessController, type BashProcessOptions } from "./bash-process.ts";
 
 export class BashJobError extends Error {
@@ -125,7 +125,13 @@ export class BashJobRegistry {
     try {
       const controller = (this.options.startController ?? startBashProcess)(this.owner, {
         ...options, background: true, onUpdate: undefined, jobId: entry.id, lifetimeSignal: this.lifetime.signal,
-        reserveMetadata: (artifact) => reserveBashJobMetadataBytes(entry.id, artifact),
+        reserveMetadata: (artifact) => {
+          const requiredBytes = reserveBashJobMetadataBytes(entry.id, artifact);
+          if (requiredBytes > DEFAULT_PROCESS_OUTPUT_BYTES) {
+            throw new BashToolError("RESULT_BUDGET_TOO_SMALL", "Job metadata exceeds the bash_job control budget; the process did not run.");
+          }
+          return requiredBytes;
+        },
       });
       entry.controller = controller;
       controller.finished.then(() => this.settle(entry), () => { if (!controller.snapshot().process) this.remove(entry.id); });
@@ -169,15 +175,15 @@ export function formatBashJobHeader(job: BashJobSnapshot, tool = "bash_job"): st
   const process = job.process;
   return `[${tool}: job_id=${job.job_id}; state=${job.state}; deadline_at=${job.deadline_at}; registry_expires_at=${job.registry_expires_at}; exit_code=${process?.exit_code ?? null}; signal=${process?.signal ?? null}; timed_out=${process?.timed_out ?? null}; stop_reason=${process?.stop_reason ?? null}; cleanup=${process?.cleanup ?? null}; stdout_bytes=${process?.stdout.captured_raw_bytes ?? 0}; stderr_bytes=${process?.stderr.captured_raw_bytes ?? 0}${process?.stdout.artifact ? `; stdout_artifact=${process.stdout.artifact}` : ""}${process?.stderr.artifact ? `; stderr_artifact=${process.stderr.artifact}` : ""}]`;
 }
-export function formatBashJobStatus(job: BashJobSnapshot, tool = "bash_job"): string {
+export function formatBashJobStatus(job: BashJobSnapshot, tool = "bash_job", maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES): string {
   const header = formatBashJobHeader(job, tool);
   const text = job.error ? `[job process error: ${job.error.code}; ${boundedProcessErrorMessage(job.error.message)}]\n${header}` : header;
-  if (Buffer.byteLength(text) > 8192) throw new BashToolError("RESULT_BUDGET_TOO_SMALL", "Job metadata exceeds its status budget; the process did run. Do not rerun it");
+  if (Buffer.byteLength(text) > maxOutputBytes) throw new BashToolError("RESULT_BUDGET_TOO_SMALL", "Job metadata exceeds its status budget; the process did run. Do not rerun it");
   return text;
 }
-export function formatBashJobStart(job: BashJobSnapshot): { text: string; details: BashBackgroundDetails } {
+export function formatBashJobStart(job: BashJobSnapshot, maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES): { text: string; details: BashBackgroundDetails } {
   let text: string;
-  try { text = formatBashJobStatus(job, "bash"); }
+  try { text = formatBashJobStatus(job, "bash", maxOutputBytes); }
   catch {
     const error = { code: "RESULT_BUDGET_TOO_SMALL", message: "The process did run, but job metadata exceeds its status budget. Read the saved paths in job details. Do not rerun the command." };
     return { text: `[bash error: ${error.code}; job_id=${job.job_id}; ${error.message}]`,

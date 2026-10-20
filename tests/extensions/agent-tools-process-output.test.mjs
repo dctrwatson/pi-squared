@@ -6,6 +6,7 @@ import {
   buildPreview,
   createCapturedProcessStream,
   DEFAULT_PROCESS_OUTPUT_BYTES,
+  MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES,
   ProcessResultBudgetError,
   reserveProcessMetadataBytes,
   formatProcessFailure,
@@ -72,6 +73,55 @@ test("process output distinguishes raw and decoded UTF-8 byte counts", () => {
   assert.match(result.text, /\[stdout: preview_bytes=3\]\n�$/);
   assert.equal(result.details.stdout.captured_raw_bytes, 1);
   assert.equal(result.details.stdout.preview_bytes, 3);
+  assert.equal("stdout_text" in result, false);
+});
+
+test("process output retains complete stdout when its escaped JSON value exceeds the field budget", () => {
+  const result = format("\0".repeat(2000), "");
+  assert.equal(result.details.stdout.capture, "complete");
+  assert.equal(result.details.stdout.preview, "complete");
+  assert.equal(result.needsArtifact, true);
+  assert.equal("stdout_text" in result, false);
+  assert.equal(result.details.artifact.stdout_path, artifact.stdout_path);
+});
+
+test("complete stdout at and above the structured JSON byte limit selects inline text or an artifact", () => {
+  const maxInlineText = "x".repeat(MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES - 2);
+  const atLimit = formatProcessResult(
+    "bash", successStatus, undefined,
+    capture(artifact.stdout_path, maxInlineText), capture(artifact.stderr_path, ""),
+    { stdout: "complete", stderr: "complete" }, 40_960,
+  );
+  assert.equal(atLimit.stdout_text, maxInlineText);
+  assert.equal(Buffer.byteLength(JSON.stringify(atLimit.stdout_text), "utf8"), MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES);
+  assert.equal(atLimit.needsArtifact, false);
+
+  const aboveLimitText = `${maxInlineText}x`;
+  const aboveLimit = formatProcessResult(
+    "bash", successStatus, undefined,
+    capture(artifact.stdout_path, aboveLimitText), capture(artifact.stderr_path, ""),
+    { stdout: "complete", stderr: "complete" }, 40_960,
+  );
+  assert.equal(aboveLimit.details.stdout.preview, "complete");
+  assert.equal(aboveLimit.needsArtifact, true);
+  assert.equal("stdout_text" in aboveLimit, false);
+  assert.ok(Buffer.byteLength(aboveLimit.text, "utf8") <= 40_960);
+});
+
+test("process output omits structured stdout after a stop request even when captured streams are complete", () => {
+  const result = formatProcessResult(
+    "bash",
+    { exit_code: null, signal: "SIGTERM", timed_out: true, duration_ms: 7, stop_reason: "timeout", cleanup: "complete" },
+    undefined,
+    capture(artifact.stdout_path, '{"partial":true}'),
+    capture(artifact.stderr_path, ""),
+    { stdout: "complete", stderr: "complete" },
+  );
+  assert.equal(result.details.stdout.capture, "complete");
+  assert.ok(result.details.stdout.captured_raw_bytes > 0);
+  assert.equal(result.details.timed_out, true);
+  assert.equal(result.needsArtifact, true);
+  assert.equal("stdout_text" in result, false);
 });
 
 test("process output treats every control-shaped line in each stream as data", () => {
@@ -97,11 +147,12 @@ test("nonzero process output keeps full status and stream metadata", () => {
   const result = formatProcessResult(
     "bash",
     { exit_code: 2, signal: null, timed_out: false, duration_ms: 9, stop_reason: null, cleanup: "complete" },
-    artifact,
+    undefined,
     stdout,
     stderr,
     { stdout: "complete", stderr: "complete" },
   );
+  assert.equal(result.stdout_text, "bad");
   assert.match(result.text, /^\[bash: exit_code=2; signal=none; timed_out=false; stop_reason=null; cleanup=complete; duration_ms=9\]/);
   assert.match(result.text, /\[stdout: capture=complete; preview=complete; captured_raw_bytes=3\]/);
   assert.match(result.text, /\[stderr: capture=complete; preview=complete; captured_raw_bytes=5\]/);
@@ -111,6 +162,7 @@ test("process output exposes artifacts for truncated and incomplete streams", ()
   const truncated = format("H".repeat(40_000), "T".repeat(40_000));
   assert.equal(truncated.details.stdout.preview, "truncated");
   assert.equal(truncated.details.stderr.preview, "truncated");
+  assert.equal("stdout_text" in truncated, false);
   assert.ok(truncated.details.stdout.omitted_captured_raw_bytes > 0);
   assert.match(truncated.text, /\[process preview omitted: \d+ captured raw bytes\]/);
   assert.match(truncated.text, /artifact=\/tmp\/artifact\/stdout/);
@@ -125,6 +177,7 @@ test("process output exposes artifacts for truncated and incomplete streams", ()
   ].join("\n"));
   assert.equal(incomplete.details.stdout.capture, "incomplete");
   assert.equal(incomplete.details.stdout.preview, "complete");
+  assert.equal("stdout_text" in incomplete, false);
   assert.equal(incomplete.needsArtifact, true);
 });
 
@@ -213,7 +266,7 @@ function assertFragmentShares(details, share, unsuccessful, ascii = true) {
   assert.ok(details.preview_bytes <= share);
 }
 
-for (const budget of [2048, 8192, 40960]) {
+for (const budget of [2000, 2048, 8192, 40960]) {
   for (const unsuccessful of [false, true]) {
     test(`whole process text and exact ASCII fragment shares fit ${budget} bytes on ${unsuccessful ? "failure" : "success"}`, () => {
       const stdout = capture(artifact.stdout_path, `OUT_HEAD\n${"A".repeat(60000)}\nOUT_TAIL\n`);
@@ -392,7 +445,7 @@ test("live unknown status uses balanced shares and a known cancellation favors t
 });
 
 test("the whole-result formatter rejects budgets outside the integer contract", () => {
-  for (const budget of [2047, 40961, 2048.5, "8192", NaN, Infinity]) {
+  for (const budget of [1999, 40961, 2000.5, 2048.5, "8192", NaN, Infinity]) {
     assert.throws(() => format("data", "", undefined, budget), ProcessResultBudgetError);
     assert.throws(() => formatProcessFailure("bash", "CAPTURE_FAILED", "cause", undefined, budget), ProcessResultBudgetError);
   }

@@ -357,7 +357,8 @@ test("bash keeps timeout enforcement and captured grace-period output", async ()
   await withDirectory(async (directory) => {
     const result = await execute(bashModule.createAgentBashTool(), {
       command: "trap 'printf \"TERM\\n\"; exit 0' TERM; while :; do printf 'tick\\n'; sleep 0.01; done",
-      timeout_seconds: 0.1,
+      // Give the shell time to install its trap under suite load.
+      timeout_seconds: 1,
     }, directory);
     try {
       assert.equal(result.ok, true);
@@ -378,7 +379,8 @@ test("bash reports final incomplete capture per stream", async () => {
     const command = "perl -e 'setpgrp(0,0); open(my $fh, \">\", \"escaped.pid\") or die $!; print $fh \"$$\\n\"; close($fh); sleep 10' 2>/dev/null & while [ ! -s escaped.pid ]; do sleep 0.01; done";
     const result = await execute(
       bashModule.createAgentBashTool({ cleanupLimitMs: 500 }),
-      { command, timeout_seconds: 0.1 },
+      // Give the child time to leave the process group and write its PID.
+      { command, timeout_seconds: 1 },
       directory,
     );
     try {
@@ -391,11 +393,16 @@ test("bash reports final incomplete capture per stream", async () => {
       assert.doesNotMatch(result.text, /\[stderr:/);
       assert.equal((await readFile(result.artifact.stdout_path)).length, 0);
     } finally {
-      const pid = Number.parseInt(await readFile(join(directory, "escaped.pid"), "utf8"), 10);
-      if (Number.isSafeInteger(pid)) {
-        try { process.kill(pid, "SIGKILL"); } catch {}
+      try {
+        const pid = Number.parseInt(await readFile(join(directory, "escaped.pid"), "utf8"), 10);
+        if (Number.isSafeInteger(pid)) {
+          try { process.kill(pid, "SIGKILL"); } catch {}
+        }
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      } finally {
+        await removeArtifact(result);
       }
-      await removeArtifact(result);
     }
   });
 });
@@ -421,9 +428,8 @@ test("bash returns stable failures for cancellation and validation", async () =>
   await withDirectory(async (directory) => {
     const tool = bashModule.createAgentBashTool();
     const controller = new AbortController();
-    const pending = execute(tool, { command: "sleep 10" }, directory, controller.signal);
-    setTimeout(() => controller.abort(), 25);
-    const cancelled = await pending;
+    // The first progress update confirms that the process has started.
+    const cancelled = await execute(tool, { command: "sleep 10" }, directory, controller.signal, () => controller.abort());
     assert.deepEqual(cancelled.error, { code: "CANCELLED", message: "Bash command was cancelled" });
     assert.match(cancelled.text, /^\[bash error: CANCELLED; Bash command was cancelled\]\n\[bash:/);
     assert.equal(cancelled.process.stop_reason, "cancelled");

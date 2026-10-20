@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, stat, writeFile } from "node:fs/promises";
 import path, { delimiter } from "node:path";
 import { Type, type Static } from "typebox";
+import type { JsonValue } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { omitNullOptionalFields, prepareInputArguments } from "./optional-input.ts";
 import {
@@ -25,6 +26,7 @@ import {
 } from "./process-artifacts.ts";
 
 const MAX_SEARCH_TEXT_BYTES = 50 * 1024;
+const MAX_SEARCH_STRUCTURED_BYTES = 48 * 1024;
 const MAX_SEARCH_CAPTURE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_FIND_LIMIT = 100;
 const DEFAULT_GREP_LIMIT = 50;
@@ -121,6 +123,79 @@ export type AgentGrepToolDetails = SearchSuccessDetails<"grep"> & (
 export type AgentFindResultDetails = AgentFindToolDetails | ToolFailureDetails<"find", SearchErrorCode>;
 export type AgentGrepResultDetails = AgentGrepToolDetails | ToolFailureDetails<"grep", SearchErrorCode>;
 
+const structuredArtifactSchema = Type.Object({
+  path: Type.String(),
+  metadata_path: Type.String(),
+  format: Type.Literal("text"),
+  capture: Type.Union([Type.Literal("complete"), Type.Literal("incomplete")]),
+  captured_records: Type.Integer({ minimum: 0 }),
+  captured_bytes: Type.Integer({ minimum: 0 }),
+  expires_at: Type.Number(),
+}, { additionalProperties: false });
+
+const structuredPathRecordSchema = Type.Object({ path: Type.String() }, { additionalProperties: false });
+const structuredContentRecordSchema = Type.Object({
+  path: Type.String(),
+  line_number: Type.Integer({ minimum: 1 }),
+  text: Type.String(),
+  match: Type.Boolean(),
+}, { additionalProperties: false });
+const structuredCountRecordSchema = Type.Object({
+  path: Type.String(),
+  matching_lines: Type.Integer({ minimum: 1 }),
+}, { additionalProperties: false });
+
+const structuredErrorSchema = Type.Object({
+  code: Type.Union([
+    Type.Literal("INVALID_INPUT"),
+    Type.Literal("CANCELLED"),
+    Type.Literal("EXECUTABLE_NOT_FOUND"),
+    Type.Literal("SEARCH_FAILED"),
+    Type.Literal("ARTIFACT_FAILED"),
+    Type.Literal("INTERNAL_ERROR"),
+  ]),
+  message: Type.String(),
+}, { additionalProperties: false });
+
+const structuredOutputFields = (tool: SearchToolName) => ({
+  ok: Type.Boolean(),
+  tool: Type.Literal(tool),
+  error: Type.Optional(structuredErrorSchema),
+  result_count: Type.Optional(Type.Integer({ minimum: 0 })),
+  shown_count: Type.Optional(Type.Integer({ minimum: 0 })),
+  preview: Type.Optional(Type.Union([Type.Literal("complete"), Type.Literal("truncated")])),
+  capture: Type.Optional(Type.Union([Type.Literal("complete"), Type.Literal("incomplete")])),
+  artifact: Type.Optional(structuredArtifactSchema),
+  structured_truncated: Type.Optional(Type.Boolean()),
+  structured_record_count: Type.Optional(Type.Integer({ minimum: 0 })),
+});
+
+const findOutputSchema = Type.Object({
+  ...structuredOutputFields("find"),
+  records: Type.Optional(Type.Array(structuredPathRecordSchema)),
+  result_limit: Type.Optional(Type.Integer({ minimum: 1 })),
+}, { additionalProperties: false });
+
+const grepOutputSchema = Type.Object({
+  ...structuredOutputFields("grep"),
+  mode: Type.Optional(Type.Union([Type.Literal("content"), Type.Literal("files"), Type.Literal("count"), Type.Literal("exists")])),
+  records: Type.Optional(Type.Array(Type.Union([
+    structuredPathRecordSchema,
+    structuredContentRecordSchema,
+    structuredCountRecordSchema,
+  ]))),
+  match_limit: Type.Optional(Type.Integer({ minimum: 1 })),
+  lines_truncated: Type.Optional(Type.Boolean()),
+  total_matching_lines: Type.Optional(Type.Union([Type.Integer({ minimum: 0 }), Type.Null()])),
+  captured_matching_lines: Type.Optional(Type.Integer({ minimum: 0 })),
+  exists: Type.Optional(Type.Boolean()),
+  termination: Type.Optional(Type.Union([Type.Literal("match"), Type.Literal("eof")])),
+}, { additionalProperties: false });
+
+export type AgentFindStructuredContent = Static<typeof findOutputSchema>;
+export type AgentGrepStructuredContent = Static<typeof grepOutputSchema>;
+type SearchStructuredArtifact = Static<typeof structuredArtifactSchema>;
+
 interface SearchRecord {
   text: string;
   readPath: string;
@@ -147,6 +222,84 @@ interface SearchPreview {
   byteTruncated: boolean;
   lineTruncated: boolean;
   truncation?: NonNullable<FindToolDetails["truncation"]>;
+}
+
+function structuredArtifact(artifact: SearchArtifactDetails): SearchStructuredArtifact {
+  return {
+    path: artifact.path,
+    metadata_path: artifact.metadata_path,
+    format: artifact.format,
+    capture: artifact.capture,
+    captured_records: artifact.captured_records,
+    captured_bytes: artifact.captured_bytes,
+    expires_at: artifact.expires_at,
+  };
+}
+
+function fitStructuredContent(
+  base: Record<string, JsonValue>,
+  records: JsonValue[],
+  artifact?: SearchStructuredArtifact,
+): { content: JsonValue; truncated: boolean } {
+  const common = {
+    ...base,
+    ...(artifact ? { artifact } : {}),
+    records: [] as JsonValue[],
+    structured_truncated: false,
+    structured_record_count: 0,
+  };
+  let usedBytes = Buffer.byteLength(JSON.stringify(common));
+  const selected: JsonValue[] = [];
+  let truncated = false;
+  for (const record of records) {
+    const recordBytes = Buffer.byteLength(JSON.stringify(record));
+    const nextBytes = usedBytes + recordBytes + (selected.length > 0 ? 1 : 0);
+    if (nextBytes > MAX_SEARCH_STRUCTURED_BYTES - 32) {
+      truncated = true;
+      break;
+    }
+    selected.push(record);
+    usedBytes = nextBytes;
+  }
+  let content: JsonValue = {
+    ...common,
+    records: selected,
+    structured_truncated: truncated,
+    structured_record_count: selected.length,
+  };
+  while (Buffer.byteLength(JSON.stringify(content)) > MAX_SEARCH_STRUCTURED_BYTES && selected.length > 0) {
+    selected.pop();
+    truncated = true;
+    content = {
+      ...common,
+      records: selected,
+      structured_truncated: true,
+      structured_record_count: selected.length,
+    };
+  }
+  return { content, truncated };
+}
+
+function structuredFindRecords(records: SearchRecord[]): JsonValue[] {
+  return records.map((record) => ({ path: record.readPath }));
+}
+
+function structuredGrepRecords(mode: GrepMode, records: SearchRecord[]): JsonValue[] {
+  switch (mode) {
+    case "content":
+      return records.map((record) => ({
+        path: record.readPath,
+        line_number: record.lineNumber!,
+        text: truncateLine(record.sourceText ?? "").text,
+        match: record.match,
+      }));
+    case "files":
+      return records.map((record) => ({ path: record.readPath }));
+    case "count":
+      return records.map((record) => ({ path: record.readPath, matching_lines: record.matchingLines! }));
+    case "exists":
+      return [];
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -255,7 +408,11 @@ function searchFailure<ToolName extends SearchToolName>(
   tool: ToolName,
   error: unknown,
   signal: AbortSignal | undefined,
-): { content: [{ type: "text"; text: string }]; details: ToolFailureDetails<ToolName, SearchErrorCode> } {
+): {
+  content: [{ type: "text"; text: string }];
+  details: ToolFailureDetails<ToolName, SearchErrorCode>;
+  structuredContent: JsonValue;
+} {
   const message = error instanceof Error ? error.message : String(error);
   const code: SearchErrorCode = signal?.aborted || message === "Operation aborted"
     ? "CANCELLED"
@@ -270,6 +427,7 @@ function searchFailure<ToolName extends SearchToolName>(
   return {
     content: [{ type: "text", text: `[${tool} error: ${code}; ${singleLineErrorMessage(bounded)}]` }],
     details: { ok: false, tool, error: { code, message: bounded } },
+    structuredContent: { ok: false, tool, error: { code, message: bounded } },
   };
 }
 
@@ -1007,6 +1165,7 @@ export function createAgentFindTool(
     name: base.name,
     label: base.label,
     description: FIND_DESCRIPTION,
+    outputSchema: findOutputSchema,
     promptSnippet: "Find paths by glob; regular files work with read.",
     promptGuidelines: base.promptGuidelines,
     parameters: findParameters,
@@ -1057,12 +1216,19 @@ export function createAgentFindTool(
               capture: "complete",
               read_paths: [],
             },
+            structuredContent: fitStructuredContent({
+              ok: true,
+              tool: "find",
+              result_count: 0,
+              shown_count: 0,
+              preview: "complete",
+              capture: "complete",
+            }, []).content,
           };
         }
         const preview = buildPreview("find", capture, limit, capture.records.length, artifactDetails);
         const countLimited = capture.records.length > limit;
         const needsArtifact = countLimited || preview.byteTruncated || !capture.complete;
-        if (!needsArtifact) await removeSearchArtifact(artifact.directory);
         const readPaths = [...new Set(preview.outputRecords.map((record) => record.readPath))];
         const details: AgentFindToolDetails = {
           ok: true,
@@ -1076,9 +1242,33 @@ export function createAgentFindTool(
           ...(preview.truncation ? { truncation: preview.truncation } : {}),
           ...(needsArtifact ? { artifact: artifactDetails } : {}),
         };
+        const structuredBase = {
+          ok: true,
+          tool: "find",
+          result_count: details.result_count,
+          shown_count: details.shown_count,
+          preview: details.preview,
+          capture: details.capture,
+          ...(details.result_limit === undefined ? {} : { result_limit: details.result_limit }),
+        };
+        let structured = fitStructuredContent(
+          structuredBase,
+          structuredFindRecords(preview.outputRecords),
+          needsArtifact ? structuredArtifact(artifactDetails) : undefined,
+        );
+        const retainArtifact = needsArtifact || structured.truncated;
+        if (structured.truncated && !needsArtifact) {
+          structured = fitStructuredContent(
+            structuredBase,
+            structuredFindRecords(preview.outputRecords),
+            structuredArtifact(artifactDetails),
+          );
+        }
+        if (!retainArtifact) await removeSearchArtifact(artifact.directory);
         return {
           content: [{ type: "text", text: preview.text }],
           details,
+          structuredContent: structured.content,
         };
       } catch (error) {
         if (artifact) await removeSearchArtifact(artifact.directory).catch(() => undefined);
@@ -1114,6 +1304,7 @@ export function createAgentGrepTool(
     name: base.name,
     label: base.label,
     description: GREP_DESCRIPTION,
+    outputSchema: grepOutputSchema,
     promptSnippet: "Search text by regex or literal; results work with read.",
     promptGuidelines: base.promptGuidelines,
     parameters: grepParameters,
@@ -1163,6 +1354,17 @@ export function createAgentGrepTool(
               capture: "complete",
               read_paths: [],
             },
+            structuredContent: fitStructuredContent({
+              ok: true,
+              tool: "grep",
+              mode,
+              exists: witness,
+              termination,
+              result_count: witness ? 1 : 0,
+              shown_count: witness ? 1 : 0,
+              preview: "complete",
+              capture: "complete",
+            }, []).content,
           };
         }
         if (!artifact) throw new Error("Search artifact is not available");
@@ -1193,6 +1395,15 @@ export function createAgentGrepTool(
               capture: "complete",
               read_paths: [],
             },
+            structuredContent: fitStructuredContent({
+              ok: true,
+              tool: "grep",
+              mode,
+              result_count: 0,
+              shown_count: 0,
+              preview: "complete",
+              capture: "complete",
+            }, []).content,
           };
         }
         const limit = normalizeLimit(input.limit, mode === "content" ? DEFAULT_GREP_LIMIT : DEFAULT_GREP_FILES_LIMIT);
@@ -1200,7 +1411,6 @@ export function createAgentGrepTool(
         const countLimited = totalMatches > limit;
         const previewTruncated = countLimited || preview.byteTruncated || preview.lineTruncated;
         const needsArtifact = previewTruncated || !capture.complete;
-        if (!needsArtifact) await removeSearchArtifact(artifact.directory);
         const readPaths = [...new Set(preview.outputRecords.map((record) => record.readPath))];
         const details: AgentGrepToolDetails = {
           ok: true,
@@ -1223,7 +1433,43 @@ export function createAgentGrepTool(
             ...(preview.lineTruncated ? { lines_truncated: true } : {}),
           } : { mode }),
         };
-        return { content: [{ type: "text", text: preview.text }], details };
+        const structuredCommon = {
+          ok: true,
+          tool: "grep",
+          result_count: details.result_count,
+          shown_count: details.shown_count,
+          preview: details.preview,
+          capture: details.capture,
+        };
+        const structuredBase = details.mode === "content" ? {
+          ...structuredCommon,
+          mode: "content",
+          ...(details.match_limit === undefined ? {} : { match_limit: details.match_limit }),
+          ...(details.lines_truncated ? { lines_truncated: true } : {}),
+        } : details.mode === "count" ? {
+          ...structuredCommon,
+          mode: "count",
+          total_matching_lines: details.total_matching_lines,
+          captured_matching_lines: details.captured_matching_lines,
+        } : {
+          ...structuredCommon,
+          mode: "files",
+        };
+        let structured = fitStructuredContent(
+          structuredBase,
+          structuredGrepRecords(mode, preview.outputRecords),
+          needsArtifact ? structuredArtifact(artifactDetails) : undefined,
+        );
+        const retainArtifact = needsArtifact || structured.truncated;
+        if (structured.truncated && !needsArtifact) {
+          structured = fitStructuredContent(
+            structuredBase,
+            structuredGrepRecords(mode, preview.outputRecords),
+            structuredArtifact(artifactDetails),
+          );
+        }
+        if (!retainArtifact) await removeSearchArtifact(artifact.directory);
+        return { content: [{ type: "text", text: preview.text }], details, structuredContent: structured.content };
       } catch (error) {
         if (artifact) await removeSearchArtifact(artifact.directory).catch(() => undefined);
         return searchFailure("grep", error, signal);

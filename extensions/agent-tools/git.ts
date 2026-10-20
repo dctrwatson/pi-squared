@@ -44,7 +44,7 @@ const gitParameters = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory, relative to the session directory by default" })),
   stdin: Type.Optional(Type.String({ description: "Text to write to standard input" })),
   timeout_seconds: Type.Optional(Type.Number({ minimum: MIN_TIMEOUT_SECONDS, maximum: MAX_TIMEOUT_SECONDS, description: "Maximum run time in seconds; default: 120; range: 0.1 through 3600" })),
-  max_output_bytes: Type.Optional(Type.Integer({ minimum: MIN_PROCESS_OUTPUT_BYTES, maximum: MAX_PROCESS_OUTPUT_BYTES, description: "Total result bytes, including status and previews; default: 8192; range: 2048 through 40960" })),
+  max_output_bytes: Type.Optional(Type.Integer({ minimum: MIN_PROCESS_OUTPUT_BYTES, maximum: MAX_PROCESS_OUTPUT_BYTES, description: `Total result bytes, including status and previews; default: ${DEFAULT_PROCESS_OUTPUT_BYTES}; range: ${MIN_PROCESS_OUTPUT_BYTES} through ${MAX_PROCESS_OUTPUT_BYTES}` })),
 }, { additionalProperties: false });
 
 const GIT_OPTIONAL_FIELDS = ["max_output_bytes", "cwd", "stdin", "timeout_seconds"];
@@ -149,7 +149,7 @@ function normalizeInput(rawInput: unknown): NormalizedGitInput {
     typeof rawInput.max_output_bytes !== "number" || !Number.isSafeInteger(rawInput.max_output_bytes)
     || rawInput.max_output_bytes < MIN_PROCESS_OUTPUT_BYTES || rawInput.max_output_bytes > MAX_PROCESS_OUTPUT_BYTES
   )) {
-    throw new GitToolError("INVALID_INPUT", "max_output_bytes must be an integer from 2048 through 40960");
+    throw new GitToolError("INVALID_INPUT", `max_output_bytes must be an integer from ${MIN_PROCESS_OUTPUT_BYTES} through ${MAX_PROCESS_OUTPUT_BYTES}`);
   }
 
   return {

@@ -15,8 +15,8 @@ async function executeTool(tool, input, cwd, signal, onUpdate) {
   return tool.execute("tool-call", input, signal, onUpdate, context(cwd));
 }
 
-async function execute(tool, input, cwd, signal) {
-  const result = await executeTool(tool, input, cwd, signal);
+async function execute(tool, input, cwd, signal, onUpdate) {
+  const result = await executeTool(tool, input, cwd, signal, onUpdate);
   return { text: result.content[0].text, ...result.details };
 }
 
@@ -129,11 +129,12 @@ if (mode === "inspect") {
 } else if (mode === "signal") {
   process.kill(process.pid, args[1]);
 } else if (mode === "hold") {
-  const child = spawn("perl", ["-e", '$|=1; setpgrp(0,0); print "HOLD\\n"; sleep 10; print "END\\n"'], { stdio: ["ignore", "inherit", "ignore"] });
+  const child = spawn("perl", ["-e", '$|=1; setpgrp(0,0); print "HOLD\\n"; print STDERR "READY\\n"; sleep 10; print "END\\n"'], { stdio: ["ignore", "inherit", "pipe"] });
   child.once("spawn", () => {
     writeFileSync("escaped-git.pid", String(child.pid));
-    setTimeout(() => process.exit(0), 500);
   });
+  // Wait until the child has left the group before closing the tool's stderr.
+  child.stderr.once("data", () => process.exit(0));
 } else if (mode === "close-stdin") {
   process.stdin.destroy();
   process.stdout.write("closed\\n");
@@ -518,9 +519,8 @@ test("git cancellation returns a stable wrapper failure", async () => {
     let artifact;
     const tool = gitModule.createAgentGitTool({ onArtifactCreated: (created) => { artifact = created; } });
     const controller = new AbortController();
-    const pending = execute(tool, { args: ["sleep"] }, directory, controller.signal);
-    setTimeout(() => controller.abort(), 25);
-    const result = await pending;
+    // The first progress update confirms that the process has started.
+    const result = await execute(tool, { args: ["sleep"] }, directory, controller.signal, () => controller.abort());
     assert.equal(result.ok, false);
     assert.deepEqual(result.error, { code: "CANCELLED", message: "Git command was cancelled." });
     assert.match(result.text, /^\[git error: CANCELLED;/);

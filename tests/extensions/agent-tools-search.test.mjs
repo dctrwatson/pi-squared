@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { accessSync, constants } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { validateToolArguments } from "@earendil-works/pi-ai";
+import { Check } from "typebox/value";
 
 import {
   createAgentFindTool,
@@ -29,6 +31,8 @@ function nativeExecutable(names) {
 
 const nativeRg = nativeExecutable(["rg"]);
 const nativeFd = nativeExecutable(["fd", "fdfind"]);
+const codingAgentDirectory = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+const { createCodemodeToolDefinition } = await import(pathToFileURL(join(codingAgentDirectory, "extensions/codemode/tool.js")).href);
 
 function grepTool(options = {}) {
   return createAgentGrepTool({ executable: nativeRg ?? "/missing/offline-rg", ...options });
@@ -52,6 +56,13 @@ function context(cwd) {
 
 async function execute(tool, input, cwd) {
   return tool.execute("tool-call", input, undefined, undefined, context(cwd));
+}
+
+function assertStructured(tool, result) {
+  assert.ok(tool.outputSchema, `${tool.name} output schema`);
+  assert.ok(result.structuredContent, `${tool.name} structured result`);
+  assert.equal(Check(tool.outputSchema, result.structuredContent), true, JSON.stringify(result.structuredContent));
+  assert.ok(Buffer.byteLength(JSON.stringify(result.structuredContent)) <= 48 * 1024);
 }
 
 async function withDirectory(callback) {
@@ -121,6 +132,8 @@ test("small complete find output deletes its pre-created artifact", async () => 
       directory,
     );
     assert.equal(result.content[0].text, "one.ts");
+    assertStructured(findTool([]), result);
+    assert.deepEqual(result.structuredContent.records, [{ path: "one.ts" }]);
     assert.deepEqual(result.details, {
       ok: true,
       tool: "find",
@@ -144,6 +157,9 @@ test("find result limits retain complete plain-text artifacts", async () => {
     try {
       assert.match(result.content[0].text, /^one\.ts\n\n\[find: results=1\/2; preview=truncated; capture=complete; artifact=/);
       assert.equal(result.details.result_limit, 1);
+      assertStructured(findTool([]), result);
+      assert.deepEqual(result.structuredContent.records, [{ path: "one.ts" }]);
+      assert.equal(result.structuredContent.artifact.path, result.details.artifact.path);
       assert.equal(result.details.artifact.capture, "complete");
       assert.equal(result.details.artifact.format, "text");
       assert.equal(await readFile(result.details.artifact.path, "utf8"), "one.ts\ntwo.ts");
@@ -167,6 +183,9 @@ test("find byte truncation retains every captured result", async () => {
       assert.ok(Buffer.byteLength(result.content[0].text) <= 50 * 1024);
       assert.match(result.content[0].text, /\[find: results=\d+\/1000; preview=truncated; limit=50KiB; capture=complete; artifact=.*\/stdout\]$/);
       assert.equal(result.details.truncation.truncated, true);
+      assertStructured(findTool([]), result);
+      assert.ok(result.structuredContent.records.length <= result.details.shown_count);
+      assert.equal(result.structuredContent.artifact.path, result.details.artifact.path);
       assert.equal(result.details.truncation.truncatedBy, "bytes");
       const artifactText = await readFile(result.details.artifact.path, "utf8");
       assert.match(artifactText, /file-0999\.ts$/);
@@ -177,12 +196,61 @@ test("find byte truncation retains every captured result", async () => {
   });
 });
 
+test("find bounds structured records and keeps recovery when text is complete", async () => {
+  await withDirectory(async (directory) => {
+    const results = Array.from({ length: 2_200 }, (_, index) => `file-${String(index).padStart(4, "0")}.ts`);
+    const result = await execute(findTool(results), { pattern: "*", limit: 3_000 }, directory);
+    try {
+      assertStructured(findTool([]), result);
+      assert.equal(result.details.preview, "complete");
+      assert.equal(result.details.artifact, undefined);
+      assert.equal(result.structuredContent.structured_truncated, true);
+      assert.equal(result.structuredContent.structured_record_count, result.structuredContent.records.length);
+      assert.ok(result.structuredContent.records.length < result.details.shown_count);
+      assert.ok(result.structuredContent.artifact);
+      assert.equal(result.structuredContent.artifact.capture, "complete");
+      assert.equal((await readFile(result.structuredContent.artifact.path, "utf8")).split("\n").length, results.length);
+      assert.equal(result.content[0].text, results.join("\n"));
+    } finally {
+      if (result.structuredContent.artifact) await rm(dirname(result.structuredContent.artifact.path), { recursive: true, force: true });
+    }
+  });
+});
+
+test("grep bounds JSON-escaped structured text", async () => {
+  await withDirectory(async (directory) => {
+    const events = Array.from({ length: 100 }, (_, index) => JSON.stringify({
+      type: "match",
+      data: {
+        path: { text: `file-${String(index).padStart(3, "0")}.ts` },
+        lines: { text: `needle${"\u0001".repeat(90)}\n` },
+        line_number: 1,
+      },
+    })).join("\n") + "\n";
+    const executable = await nodeExecutable(directory, "escaped-rg", `process.stdout.write(${JSON.stringify(events)});\n`);
+    const result = await execute(grepTool({ executable }), { pattern: "needle", limit: 100 }, directory);
+    try {
+      assertStructured(grepTool({ executable }), result);
+      assert.equal(result.details.preview, "complete");
+      assert.equal(result.details.artifact, undefined);
+      assert.equal(result.structuredContent.structured_truncated, true);
+      assert.ok(result.structuredContent.records.length < 100);
+      assert.ok(Buffer.byteLength(JSON.stringify(result.structuredContent)) <= 48 * 1024);
+      assert.ok(result.structuredContent.artifact);
+    } finally {
+      if (result.structuredContent.artifact) await rm(dirname(result.structuredContent.artifact.path), { recursive: true, force: true });
+    }
+  });
+});
+
 test("find marks line-protocol filename omissions as incomplete", async () => {
   await withDirectory(async (directory) => {
     const result = await execute(findTool(["normal.ts", " trailing "]), { pattern: "*" }, directory);
     try {
       assert.match(result.content[0].text, /^normal\.ts\n\n\[find: results=1\/1; preview=complete; capture=incomplete; counts=lower_bounds; artifact=/);
       assert.equal(result.details.capture, "incomplete");
+      assertStructured(findTool([]), result);
+      assert.equal(result.structuredContent.capture, "incomplete");
       assert.equal(result.details.artifact.capture, "incomplete");
       assert.equal(await readFile(result.details.artifact.path, "utf8"), "normal.ts");
     } finally {
@@ -199,6 +267,8 @@ test("find rejects invalid paths and documents plain-line boundaries", async () 
       assert.equal(result.details.ok, false);
       assert.equal(result.details.tool, "find");
       assert.equal(result.details.error.code, "INVALID_INPUT");
+      assertStructured(tool, result);
+      assert.deepEqual(result.structuredContent, result.details);
       assert.match(result.details.error.message, /path must/);
     }
   });
@@ -228,6 +298,12 @@ nativeTest("grep normalizes directory, file, and outside paths", async () => {
       "3- after",
     ].join("\n"));
     assert.deepEqual(directoryResult.details.read_paths, ["nested/source.ts"]);
+    assertStructured(tool, directoryResult);
+    assert.deepEqual(directoryResult.structuredContent.records, [
+      { path: "nested/source.ts", line_number: 1, text: "before", match: false },
+      { path: "nested/source.ts", line_number: 2, text: "needle", match: true },
+      { path: "nested/source.ts", line_number: 3, text: "after", match: false },
+    ]);
 
     const fileResult = await execute(
       tool,
@@ -312,6 +388,8 @@ test("grep reports invalid regular expressions with literal-search guidance", as
     assert.equal(result.details.ok, false);
     assert.equal(result.details.tool, "grep");
     assert.equal(result.details.error.code, "INVALID_INPUT");
+    assertStructured(grepTool({ executable }), result);
+    assert.deepEqual(result.structuredContent, result.details);
     assert.equal(
       result.details.error.message,
       "Invalid regular expression: unclosed group. Set literal to true to search exact text.",
@@ -336,6 +414,9 @@ nativeTest("grep match limits retain omitted matches in a complete artifact", as
       assert.match(result.content[0].text, /^nested\/source\.ts\n1: needle one\n\n\[grep: mode=content; matches=1\/2; preview=truncated; capture=complete; artifact=/);
       assert.equal(result.content[0].text.match(/nested\/source\.ts/g)?.length, 1);
       assert.equal(result.details.match_limit, 1);
+      assertStructured(grepTool(), result);
+      assert.equal(result.structuredContent.records.length, 1);
+      assert.equal(result.structuredContent.artifact.path, result.details.artifact.path);
       assert.equal(result.details.artifact.capture, "complete");
       assert.equal(
         await readFile(result.details.artifact.path, "utf8"),
@@ -355,6 +436,10 @@ nativeTest("grep long-line truncation exposes the complete line artifact", async
     try {
       assert.match(result.content[0].text, /\[grep: mode=content; matches=1\/1; preview=truncated; lines_truncated=true; capture=complete; artifact=.*\/stdout\]$/);
       assert.equal(result.details.lines_truncated, true);
+      assertStructured(grepTool(), result);
+      assert.ok(result.structuredContent.records[0].text.length <= 515);
+      assert.match(result.structuredContent.records[0].text, /\.\.\. \[truncated\]$/);
+      assert.doesNotMatch(result.structuredContent.records[0].text, /x{600}/);
       assert.equal(result.details.artifact.capture, "complete");
       assert.equal(await readFile(result.details.artifact.path, "utf8"), `source.ts:1: ${longLine}`);
     } finally {
@@ -376,6 +461,9 @@ nativeTest("grep byte truncation retains every captured match", async () => {
       assert.ok(Buffer.byteLength(result.content[0].text) <= 50 * 1024);
       assert.match(result.content[0].text, /\[grep: mode=content; matches=\d+\/200; preview=truncated; limit=50KiB; capture=complete; artifact=.*\/stdout\]$/);
       assert.equal(result.details.truncation.truncatedBy, "bytes");
+      assertStructured(grepTool(), result);
+      assert.ok(result.structuredContent.records.length <= result.details.shown_count);
+      assert.equal(result.structuredContent.artifact.path, result.details.artifact.path);
       const artifactText = await readFile(result.details.artifact.path, "utf8");
       assert.match(artifactText, /source\.ts:200: needle-199-/);
       assert.equal(artifactText.split("\n").length, 200);
@@ -391,6 +479,8 @@ test("find retains records captured before an fd failure", async () => {
     const result = await execute(createAgentFindTool({ executable }), { pattern: "*" }, directory);
     try {
       assert.match(result.content[0].text, /^one\.ts\n\n\[find: results=1\/1; preview=complete; capture=incomplete; counts=lower_bounds; artifact=/);
+      assertStructured(createAgentFindTool({ executable }), result);
+      assert.equal(result.structuredContent.capture, "incomplete");
       assert.equal(result.details.capture, "incomplete");
       assert.equal(await readFile(result.details.artifact.path, "utf8"), "one.ts");
       const metadata = JSON.parse(await readFile(result.details.artifact.metadata_path, "utf8"));
@@ -416,6 +506,8 @@ test("grep retains matches captured before an rg failure", async () => {
     try {
       assert.match(result.content[0].text, /^source\.ts\n1: needle\n\n\[grep: mode=content; matches=1\/1; preview=complete; capture=incomplete; counts=lower_bounds; artifact=/);
       assert.equal(result.details.capture, "incomplete");
+      assertStructured(grepTool({ executable }), result);
+      assert.equal(result.structuredContent.capture, "incomplete");
       assert.equal(await readFile(result.details.artifact.path, "utf8"), "source.ts:1: needle");
       const metadata = JSON.parse(await readFile(result.details.artifact.metadata_path, "utf8"));
       assert.match(metadata.capture_error, /read failed/);
@@ -432,6 +524,7 @@ test("grep rejects malformed protocol without useful records", async () => {
     const result = await execute(grepTool({ executable, onArtifactCreated: (created) => { artifact = created; } }), { pattern: "needle" }, directory);
     assert.equal(result.details.ok, false);
     assert.equal(result.details.error.code, "SEARCH_FAILED");
+    assertStructured(grepTool({ executable }), result);
     assert.match(result.details.error.message, /Malformed search protocol/);
     await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
   });
@@ -453,6 +546,7 @@ test("grep cancellation waits for the child and removes its artifact", async () 
     assert.equal(result.details.ok, false);
     assert.equal(result.details.tool, "grep");
     assert.equal(result.details.error.code, "CANCELLED");
+    assertStructured(tool, result);
     await assert.rejects(stat(artifact.directory), { code: "ENOENT" });
   });
 });
@@ -478,6 +572,33 @@ test("search wrappers expose snake_case schemas and rendering hooks", () => {
   assert.match(find.description, /Preview cap: 50 KiB/);
   assert.match(grep.description, /Preview cap: 50 KiB; line cap: 500 characters/);
   assert.match(grep.promptSnippet, /regex or literal/);
+});
+
+test("Pi codemode loadout uses concise search output summaries", () => {
+  const find = createAgentFindTool();
+  const grep = grepTool();
+  const codemode = createCodemodeToolDefinition({ getMode: () => "on" });
+  const tools = [find, grep, codemode];
+  const loadout = {
+    declared: tools,
+    callable: tools,
+    registered: tools,
+    getExposure: () => "direct",
+    getNamespace: () => undefined,
+  };
+  const descriptions = codemode.prepareLoadout(loadout).descriptions;
+  const sharedFields = "ok, tool, error?: { code, message }, result_count?, shown_count?, preview?, capture?, artifact?: { path, metadata_path, format, capture, captured_records, captured_bytes, expires_at }, structured_truncated?, structured_record_count?";
+  const expected = {
+    find: `{ ${sharedFields}, records?, result_limit? }`,
+    grep: `{ ${sharedFields}, mode?, records?, match_limit?, lines_truncated?, total_matching_lines?, captured_matching_lines?, exists?, termination? }`,
+  };
+  for (const [name, summary] of Object.entries(expected)) {
+    const description = descriptions[name];
+    assert.ok(description, `${name} direct description`);
+    const codemodeLine = description.split("\n").find((line) => line.startsWith("Codemode:"));
+    assert.equal(codemodeLine, `Codemode: \`tools.${name}(args)\` resolves to \`${summary}\`.`);
+    assert.doesNotMatch(codemodeLine, /records\??: \[|Type\.Object|Type\.Union|additionalProperties/);
+  }
 });
 
 test("search renderers retain truncation warnings from snake_case details", () => {
@@ -535,17 +656,25 @@ nativeTest("grep modes count matching lines and keep compact file output", async
     await writeFile(join(directory, "c.ts"), "other\n");
     const tool = grepTool();
     const content = await execute(tool, { pattern: "target" }, directory);
+    assertStructured(tool, content);
+    assert.equal(content.structuredContent.mode, "content");
+    assert.equal(content.structuredContent.records.length, 3);
     assert.equal(content.details.mode, "content");
     assert.equal(content.details.result_count, 3);
     assert.equal(content.details.shown_count, 3);
     assert.deepEqual([...content.details.read_paths].sort(), ["a.ts", "b.ts"]);
     const files = await execute(tool, { pattern: "target", mode: "files" }, directory);
     assert.equal(files.content[0].text, "a.ts\nb.ts");
+    assertStructured(tool, files);
+    assert.deepEqual(files.structuredContent.records, [{ path: "a.ts" }, { path: "b.ts" }]);
     assert.equal(files.details.result_count, 2);
     assert.equal(files.details.artifact, undefined);
     const count = await execute(tool, { pattern: "target", mode: "count" }, directory);
     assert.equal(count.content[0].text, "2\ta.ts\n1\tb.ts\n\n[grep: mode=count; files=2/2; matching_lines=3; preview=complete; capture=complete]");
     assert.deepEqual(count.details.counts, [{ path: "a.ts", matching_lines: 2 }, { path: "b.ts", matching_lines: 1 }]);
+    assertStructured(tool, count);
+    assert.deepEqual(count.structuredContent.records, [{ path: "a.ts", matching_lines: 2 }, { path: "b.ts", matching_lines: 1 }]);
+    assert.equal(count.structuredContent.total_matching_lines, 3);
     assert.equal(count.details.total_matching_lines, 3);
     assert.equal(count.details.captured_matching_lines, 3);
     assert.equal(count.details.artifact, undefined);
@@ -553,10 +682,14 @@ nativeTest("grep modes count matching lines and keep compact file output", async
     assert.equal(exists.content[0].text, "[grep: mode=exists; exists=true; termination=match; capture=complete]");
     assert.equal(exists.details.result_count, 1);
     assert.equal(exists.details.exists, true);
+    assertStructured(tool, exists);
+    assert.equal(exists.structuredContent.exists, true);
+    assert.deepEqual(exists.structuredContent.records, []);
     assert.deepEqual(exists.details.read_paths, []);
     for (const mode of ["content", "files", "count", "exists"]) {
       const missing = await execute(tool, { pattern: "absent", mode }, directory);
       assert.equal(missing.details.ok, true);
+      assertStructured(tool, missing);
       assert.equal(missing.details.mode, mode);
       assert.equal(missing.details.result_count, 0);
       if (mode === "count") {

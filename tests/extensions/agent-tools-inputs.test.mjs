@@ -287,7 +287,9 @@ test("seconds retain finite fractions from 0.1 through 3600", async () => {
       assert.equal((await execute(bash, input, fixture.directory)).details.error.code, "CONTROL_UNAVAILABLE");
     }
     await assertInvalid(bash, { command: "true", background: true, timeout_seconds: 86400.1 }, fixture.directory);
-    await assertInvalid(bash, { command: "true", background: true, max_output_bytes: 8192 }, fixture.directory);
+    const backgroundBudget = { command: "true", background: true, max_output_bytes: 8192 };
+    assert.deepEqual(prepareAndValidate(bash, backgroundBudget), backgroundBudget);
+    assert.equal((await execute(bash, backgroundBudget, fixture.directory)).details.error.code, "CONTROL_UNAVAILABLE");
   });
 });
 

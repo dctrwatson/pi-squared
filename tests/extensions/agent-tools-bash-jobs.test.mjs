@@ -48,7 +48,10 @@ test("background input is strict, bounded, and requires active controls before a
   assert.equal(normalizeInput({ command: "true", background: null }).background, false);
   assert.equal(normalizeInput({ command: "true", background: true }).timeoutSeconds, 120);
   assert.equal(normalizeInput({ command: "true", background: true, timeout_seconds: 86400, max_output_bytes: null }).timeoutSeconds, 86400);
-  for (const input of [{ background: "true" }, { background: true, max_output_bytes: 8192 }, { background: true, timeout_seconds: 86400.1 }, { timeout_seconds: 3600.1 }]) {
+  for (const max_output_bytes of [2000, 2047, 2048, 8192, 40960]) {
+    assert.equal(normalizeInput({ command: "true", background: true, max_output_bytes }).maxOutputBytes, max_output_bytes);
+  }
+  for (const input of [{ background: "true" }, { background: true, max_output_bytes: 1999 }, { background: true, max_output_bytes: 40961 }, { background: true, max_output_bytes: 2048.5 }, { background: true, max_output_bytes: "8192" }, { background: true, timeout_seconds: 86400.1 }, { timeout_seconds: 3600.1 }]) {
     assert.throws(() => normalizeInput({ command: "true", ...input }), (error) => error.code === "INVALID_INPUT");
   }
   let allocated = 0;
@@ -84,6 +87,34 @@ test("background returns without source preview; output and final wait recover e
     assert.equal(eof.details.output.next_start_byte, 11);
     assert.equal(eof.details.output.has_more, false);
     assert.equal(eof.isError, false);
+  });
+});
+
+test("background output budgets bound startup text without limiting saved logs or later pages", async () => {
+  await fixture(async ({ start, execute, jobs, bash, cwd }) => {
+    const stdout = `OUT_HEAD\n${"A".repeat(60000)}\nOUT_TAIL\n`;
+    const stderr = `ERR_HEAD\n${"B".repeat(60000)}\nERR_TAIL\n`;
+    for (const max_output_bytes of [2000, 2048, 8192, 40960]) {
+      const input = { command: "true", background: true, max_output_bytes };
+      assert.deepEqual(bash.prepareArguments(input), input);
+      const result = await start(`const fs = require("node:fs"); fs.appendFileSync("executions", "once\\n"); fs.writeSync(1, ${JSON.stringify(stdout)}); fs.writeSync(2, ${JSON.stringify(stderr)});`, { max_output_bytes });
+      assert.equal(result.details.ok, true);
+      assert.ok(Buffer.byteLength(result.content[0].text) <= max_output_bytes);
+      assert.doesNotMatch(result.content[0].text, /OUT_HEAD|ERR_HEAD/);
+      const id = result.details.job.job_id;
+      const final = await execute(jobs, { action: "wait", job_id: id, wait_seconds: 3 });
+      assert.equal(final.details.job.state, "exited");
+      assert.equal(final.details.job.process.exit_code, 0);
+      assert.equal(final.details.job.process.stdout.captured_raw_bytes, Buffer.byteLength(stdout));
+      assert.equal(final.details.job.process.stderr.captured_raw_bytes, Buffer.byteLength(stderr));
+      assert.equal(await fs.readFile(final.details.job.process.stdout.artifact, "utf8"), stdout);
+      assert.equal(await fs.readFile(final.details.job.process.stderr.artifact, "utf8"), stderr);
+      const page = await execute(jobs, { action: "output", job_id: id, start_byte: 0 });
+      assert.equal(page.details.output.end_byte, 4096);
+      const larger = await execute(jobs, { action: "output", job_id: id, start_byte: 0, max_bytes: 40960 });
+      assert.equal(larger.details.output.end_byte, 40960);
+    }
+    assert.equal(await fs.readFile(join(cwd, "executions"), "utf8"), "once\nonce\nonce\nonce\n");
   });
 });
 
@@ -493,11 +524,14 @@ test("job preflight rejects long paths without spawn or a retained handle", asyn
   syncBuiltinESMExports();
   try {
     await fixture(async ({ execute,bash,registry }) => {
-      const result = await execute(bash,{command:"true",background:true});
-      assert.equal(result.details.error.code,"RESULT_BUDGET_TOO_SMALL");
-      assert.equal(result.details.process,undefined);
-      assert.equal(registry.retainedCount,0);
-      assert.equal(spawns,0);
+      for (const max_output_bytes of [2000, 2048, 8192, 40960]) {
+        const result = await execute(bash,{command:"true",background:true,max_output_bytes});
+        assert.equal(result.details.error.code,"RESULT_BUDGET_TOO_SMALL");
+        assert.equal(result.details.process,undefined);
+        assert.equal(registry.retainedCount,0);
+        assert.equal(spawns,0);
+        assert.ok(Buffer.byteLength(result.content[0].text) <= max_output_bytes);
+      }
     }, {bash:{onArtifactCreated:(artifact) => {artifact.stdout_path += "x".repeat(9000);}}});
   } finally {t.mock.restoreAll(); syncBuiltinESMExports();}
 });
@@ -669,6 +703,16 @@ test("background formatter overflow keeps its job snapshot and states execution 
   assert.equal(result.details.job.process.cleanup,"failed");
   assert.match(result.text,/The process did run/);
   assert.ok(Buffer.byteLength(result.text) <= 8192);
+  const larger = formatBashJobStart(snapshot, 40960);
+  assert.equal(larger.details.error.code, "PROCESS_CONTROL_FAILED");
+  assert.ok(larger.text.includes(snapshot.process.signal));
+  assert.ok(Buffer.byteLength(larger.text) > 8192);
+  assert.ok(Buffer.byteLength(larger.text) <= 40960);
+  snapshot.process.signal = "S".repeat(3000);
+  assert.equal(formatBashJobStart(snapshot).details.error.code, "PROCESS_CONTROL_FAILED");
+  const smaller = formatBashJobStart(snapshot, 2048);
+  assert.equal(smaller.details.error.code, "RESULT_BUDGET_TOO_SMALL");
+  assert.ok(Buffer.byteLength(smaller.text) <= 2048);
 });
 
 test("branch leaf changes keep handles; new, resume, and fork invalidate old IDs", async () => {

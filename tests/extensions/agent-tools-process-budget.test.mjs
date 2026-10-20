@@ -10,6 +10,7 @@ import { createAgentBashTool } from "../../extensions/agent-tools/bash.ts";
 import { createAgentGitTool } from "../../extensions/agent-tools/git.ts";
 import { createAgentGhTool } from "../../extensions/agent-tools/gh.ts";
 import { removeProcessArtifact } from "../../extensions/agent-tools/process-artifacts.ts";
+import { reserveProcessMetadataBytes } from "../../extensions/agent-tools/process-output.ts";
 
 const factories = { bash: createAgentBashTool, git: createAgentGitTool, gh: createAgentGhTool };
 const context = (cwd) => ({ cwd, sessionManager: { getSessionId: () => "budget", getSessionFile: () => undefined } });
@@ -44,27 +45,28 @@ for (const [name, create] of Object.entries(factories)) {
     const required = name === "bash" ? { command: "true" } : { args: ["--version"] };
     const schema = tool.parameters.properties.max_output_bytes;
     assert.equal(schema.type, "integer");
-    assert.equal(schema.minimum, 2048);
+    assert.equal(schema.minimum, 2000);
     assert.equal(schema.maximum, 40960);
-    assert.match(schema.description, /default: 8192/);
+    assert.match(schema.description, /default: 8192; range: 2000 through 40960/);
     for (const value of [undefined, null]) {
       const input = { ...required, max_output_bytes: value };
       assert.deepEqual(tool.prepareArguments(input), required);
       assert.equal(input.max_output_bytes, value);
     }
-    for (const value of [2048, 8192, 40960]) {
+    for (const value of [2000, 2047, 2048, 8192, 40960]) {
       const input = { ...required, max_output_bytes: value };
       assert.deepEqual(validateToolArguments(tool, {
         id: "budget", name, arguments: tool.prepareArguments(input),
       }), input);
       assert.equal(input.max_output_bytes, value);
     }
-    for (const value of [2047, 40961, 2048.5, "8192", NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    for (const value of [1999, 40961, 2000.5, 2048.5, "8192", NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
       const input = { ...required, max_output_bytes: value };
       assert.throws(() => tool.prepareArguments(input), (error) => error.code === "INVALID_INPUT");
       const result = await tool.execute("invalid-budget", input, undefined, undefined, context(process.cwd()));
       assert.equal(result.isError, true);
       assert.equal(result.details.error.code, "INVALID_INPUT");
+      assert.match(result.content[0].text, /max_output_bytes must be an integer from 2000 through 40960/);
       assert.equal(result.details.process, undefined);
       assert.ok(Buffer.byteLength(result.content[0].text) <= 8192);
       assert.equal(input.max_output_bytes, value);
@@ -72,7 +74,7 @@ for (const [name, create] of Object.entries(factories)) {
     assert.equal(allocations, 0);
   });
 
-  for (const budget of [2048, 8192, 40960]) {
+  for (const budget of [2000, 2048, 8192, 40960]) {
     test(`${name} applies ${budget} bytes to progress and final text without changing raw capture`, async () => {
       const stdout = Buffer.from(`OUT_HEAD\n${"A".repeat(60000)}\nOUT_TAIL\n`);
       const stderr = Buffer.from(`ERR_HEAD\n${"B".repeat(60000)}\nERR_TAIL\n`);
@@ -140,12 +142,16 @@ process.exitCode = 1;
     syncBuiltinESMExports();
     try {
       await withProcess(name, 'require("node:fs").writeFileSync("executed", "yes");', async ({ tool, input, directory, artifact }) => {
-        const result = await tool.execute("preflight", { ...input, max_output_bytes: 2048 }, undefined, undefined, context(directory));
+        const result = await tool.execute("preflight", { ...input, max_output_bytes: 2000 }, undefined, undefined, context(directory));
         assert.equal(result.isError, true);
         assert.equal(result.details.error.code, "RESULT_BUDGET_TOO_SMALL");
         assert.equal(result.details.process, undefined);
-        assert.match(result.content[0].text, /the process did not run/);
-        assert.ok(Buffer.byteLength(result.content[0].text) <= 2048);
+        if (name === "bash") assert.match(result.content[0].text, /the process did not run/);
+        else {
+          const requiredBytes = reserveProcessMetadataBytes(name, artifact());
+          assert.match(result.content[0].text, new RegExp(`requires at least ${requiredBytes} output bytes; max_output_bytes is 2000`));
+        }
+        assert.ok(Buffer.byteLength(result.content[0].text) <= 2000);
         assert.equal(spawns, 0);
         await assert.rejects(stat(join(directory, "executed")), { code: "ENOENT" });
         await assert.rejects(stat(artifact().directory), { code: "ENOENT" });

@@ -11,6 +11,7 @@ import {
   openProcessArtifactStreams,
   removeProcessArtifact,
   type ProcessArtifact,
+  type ProcessArtifactRetention,
 } from "./process-artifacts.ts";
 import {
   appendCapturedProcessStream,
@@ -28,7 +29,6 @@ import {
   type ProcessEvidence,
   type ProcessStopReason,
   type ProcessToolDetails,
-  type ProcessToolName,
 } from "./process-output.ts";
 
 const TERMINATE_GRACE_MS = 2_000;
@@ -48,7 +48,7 @@ export type DirectProcessErrorCode =
   | "RESULT_BUDGET_TOO_SMALL";
 
 export interface DirectProcessOptions {
-  tool: Exclude<ProcessToolName, "bash">;
+  tool: string;
   displayName: string;
   executable: string;
   args: string[];
@@ -57,6 +57,8 @@ export interface DirectProcessOptions {
   stdin?: string;
   timeoutSeconds: number;
   maxOutputBytes?: number;
+  artifactRoot?: string;
+  artifactRetention?: ProcessArtifactRetention;
   signal?: AbortSignal;
   onUpdate?: AgentToolUpdateCallback<ProcessToolDetails>;
   onArtifactCreated?: (artifact: ProcessArtifact) => void;
@@ -200,15 +202,15 @@ function closeStandardInput(
   });
 }
 
-async function createDirectArtifact(): Promise<ProcessArtifact> {
+async function createDirectArtifact(root?: string): Promise<ProcessArtifact> {
   try {
-    return await createProcessArtifact();
+    return await createProcessArtifact(root);
   } catch (error) {
     throw new DirectProcessError("ARTIFACT_FAILED", `Cannot create output artifact: ${String(error)}`);
   }
 }
 
-/** Run Git or GitHub CLI with exact capture and bounded partial evidence. */
+/** Run a typed CLI process with exact capture and bounded partial evidence. */
 export async function runDirectProcess(options: DirectProcessOptions): Promise<FormattedProcessResult | ReturnType<typeof formatProcessFailure>> {
   const signal = options.signal;
   const onUpdate = options.onUpdate;
@@ -216,7 +218,7 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_PROCESS_OUTPUT_BYTES;
   if (signal?.aborted) throw new DirectProcessError("CANCELLED", `${options.displayName} command was cancelled.`);
   const cleanupLimitMs = options.cleanupLimitMs ?? CLEANUP_LIMIT_MS;
-  const artifact = await createDirectArtifact();
+  const artifact = await createDirectArtifact(options.artifactRoot);
   pinProcessArtifact(artifact.directory);
   let stdoutFile: WriteStream | undefined;
   let stderrFile: WriteStream | undefined;
@@ -396,8 +398,12 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
 
   try {
     options.onArtifactCreated?.(artifact);
-    if (reserveProcessMetadataBytes(options.tool, artifact) > maxOutputBytes) {
-      throw new DirectProcessError("RESULT_BUDGET_TOO_SMALL", "Process metadata exceeds max_output_bytes; the process did not run.");
+    const requiredMetadataBytes = reserveProcessMetadataBytes(options.tool, artifact);
+    if (requiredMetadataBytes > maxOutputBytes) {
+      throw new DirectProcessError(
+        "RESULT_BUDGET_TOO_SMALL",
+        `Process metadata requires at least ${requiredMetadataBytes} output bytes; max_output_bytes is ${maxOutputBytes}. The process did not run.`,
+      );
     }
     try {
       const streams = await openProcessArtifactStreams(artifact);
@@ -518,18 +524,25 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
   }
   if (cleanup === "complete") {
     try {
-      if (!failure && preliminary && !preliminary.needsArtifact) {
-        await finalizeProcessArtifact(artifact, "when-needed", false);
-      } else if (!budgetError && failure && stdout.totalBytes === 0 && stderr.totalBytes === 0 && !artifactError) {
-        await finalizeProcessArtifact(artifact, "when-needed", false);
-        stdout.path = undefined;
-        stderr.path = undefined;
+      const finalEvidence = evidence();
+      const emptyFailure = !budgetError && failure && stdout.totalBytes === 0 && stderr.totalBytes === 0 && !artifactError;
+      const needed = emptyFailure ? false : !!failure || !preliminary || preliminary.needsArtifact;
+      const retainAlways = options.artifactRetention === "always" && !failure && stopReason === null
+        && finalEvidence.capture.stdout === "complete" && finalEvidence.capture.stderr === "complete";
+      const retained = await finalizeProcessArtifact(
+        artifact, retainAlways ? "always" : "when-needed", needed,
+      );
+      if (!retained) {
+        if (emptyFailure) {
+          stdout.path = undefined;
+          stderr.path = undefined;
+        }
       } else {
         const completedAt = Date.now();
         completedArtifact = await completeProcessArtifact(artifact, completedAt, {
           id: artifact.id, tool: options.tool, cwd, started_at: startedAt, finished_at: completedAt,
-          ...evidence().status,
-          streams_complete: evidence().capture.stdout === "complete" && evidence().capture.stderr === "complete",
+          ...finalEvidence.status,
+          streams_complete: finalEvidence.capture.stdout === "complete" && finalEvidence.capture.stderr === "complete",
           stdout: { bytes: stdout.totalBytes, lines: capturedProcessLines(stdout) },
           stderr: { bytes: stderr.totalBytes, lines: capturedProcessLines(stderr) },
         });
@@ -547,7 +560,7 @@ export async function runDirectProcess(options: DirectProcessOptions): Promise<F
       ? `; capture: ${captureError.code}: ${captureError.detailMessage}` : "";
     return formatProcessFailure(options.tool, failure.code, failure.detailMessage + cause + captureCause, evidence(completedArtifact), maxOutputBytes);
   }
-  if (preliminary && !preliminary.needsArtifact) return preliminary;
+  if (preliminary && !preliminary.needsArtifact && !completedArtifact) return preliminary;
   try {
     return format(completedArtifact);
   } catch {

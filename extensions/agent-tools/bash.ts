@@ -53,7 +53,7 @@ export const agentBashParameters = Type.Object({
   cwd: Type.Optional(Type.String({ description: "Working directory, relative to the session directory by default" })),
   timeout_seconds: Type.Optional(Type.Number({ minimum: 0.1, maximum: 86_400, description: "Run deadline in seconds; default: 120; foreground: 0.1–3600; background: 0.1–86400" })),
   background: Type.Optional(Type.Boolean({ description: "Start a managed Bash job; default false. Requires active bash_job." })),
-  max_output_bytes: Type.Optional(Type.Integer({ minimum: MIN_PROCESS_OUTPUT_BYTES, maximum: MAX_PROCESS_OUTPUT_BYTES, description: "Total result bytes, including status and previews; default: 8192; range: 2048 through 40960" })),
+  max_output_bytes: Type.Optional(Type.Integer({ minimum: MIN_PROCESS_OUTPUT_BYTES, maximum: MAX_PROCESS_OUTPUT_BYTES, description: `Total result bytes, including status and previews; background: startup response only; default: ${DEFAULT_PROCESS_OUTPUT_BYTES}; range: ${MIN_PROCESS_OUTPUT_BYTES} through ${MAX_PROCESS_OUTPUT_BYTES}` })),
 }, { additionalProperties: false });
 
 const bashParameters = agentBashParameters;
@@ -106,9 +106,6 @@ export function normalizeInput(rawInput: unknown): NormalizedBashInput {
   if (rawInput.background !== undefined && typeof rawInput.background !== "boolean") {
     throw new BashToolError("INVALID_INPUT", "background must be a boolean");
   }
-  if (rawInput.background === true && rawInput.max_output_bytes !== undefined) {
-    throw new BashToolError("INVALID_INPUT", "max_output_bytes is foreground-only");
-  }
   if (
     rawInput.timeout_seconds !== undefined &&
     (typeof rawInput.timeout_seconds !== "number" ||
@@ -124,7 +121,7 @@ export function normalizeInput(rawInput: unknown): NormalizedBashInput {
     typeof rawInput.max_output_bytes !== "number" || !Number.isSafeInteger(rawInput.max_output_bytes)
     || rawInput.max_output_bytes < MIN_PROCESS_OUTPUT_BYTES || rawInput.max_output_bytes > MAX_PROCESS_OUTPUT_BYTES
   )) {
-    throw new BashToolError("INVALID_INPUT", "max_output_bytes must be an integer from 2048 through 40960");
+    throw new BashToolError("INVALID_INPUT", `max_output_bytes must be an integer from ${MIN_PROCESS_OUTPUT_BYTES} through ${MAX_PROCESS_OUTPUT_BYTES}`);
   }
 
   return {
@@ -193,7 +190,7 @@ export function createAgentBashTool(options: AgentBashToolOptions = {}): ToolDef
             onArtifactCreated: options.onArtifactCreated, cleanupLimitMs: options.cleanupLimitMs,
             controlAvailable: options.controlAvailable });
           if (signal?.aborted && job.process?.cleanup === "pending") job = await registry.cancel(job.job_id);
-          const result = formatBashJobStart(job);
+          const result = formatBashJobStart(job, input.maxOutputBytes);
           registry.transfer(job.job_id);
           return { content: [{ type: "text", text: result.text }], details: result.details,
             isError: hasUnsuccessfulProcessStatus(result.details) };

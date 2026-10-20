@@ -4,10 +4,11 @@ import type { ProcessArtifact } from "./process-artifacts.ts";
 export const MAX_PROCESS_STREAM_BYTES = 67_108_864;
 export const MAX_PROCESS_TOTAL_BYTES = 134_217_728;
 export const MAX_PROCESS_RESULT_BYTES = 48 * 1024;
+export const MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES = 8 * 1024;
 export const PROCESS_PREVIEW_FRAGMENT_BYTES = 65_536;
 
 export const DEFAULT_PROCESS_OUTPUT_BYTES = 8192;
-export const MIN_PROCESS_OUTPUT_BYTES = 2048;
+export const MIN_PROCESS_OUTPUT_BYTES = 2000;
 export const MAX_PROCESS_OUTPUT_BYTES = 40960;
 const MAX_ERROR_MESSAGE_BYTES = 512;
 
@@ -23,7 +24,7 @@ function validateOutputBudget(bytes: number): void {
   }
 }
 
-export type ProcessToolName = "bash" | "git" | "gh";
+export type ProcessToolName = "bash" | "git" | "gh" | (string & {});
 export type ProcessCaptureState = "complete" | "incomplete";
 export type ProcessPreviewState = "complete" | "truncated";
 
@@ -104,6 +105,15 @@ export interface FormattedProcessResult {
   text: string;
   details: ProcessSuccessDetails;
   needsArtifact: boolean;
+  /** Complete decoded UTF-8 stdout for small no-artifact results. */
+  stdout_text?: string;
+}
+
+export interface FormattedProcessFailure {
+  text: string;
+  details: ProcessFailureDetails;
+  /** Complete decoded UTF-8 stdout for small no-artifact results. */
+  stdout_text?: string;
 }
 
 /** Create counters and bounded raw fragments for one stream. */
@@ -320,14 +330,29 @@ function processResult(
   if (Buffer.byteLength(text) > budget || Buffer.byteLength(text) > MAX_PROCESS_RESULT_BYTES) {
     throw new ProcessResultBudgetError();
   }
+  const stdoutTextBytes = Buffer.byteLength(stdout.text, "utf8");
+  const encodedStdoutText = stdoutTextBytes <= MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES
+    ? JSON.stringify(stdout.text) : undefined;
+  const stdoutTextCanBeInline = status.cleanup === "complete"
+    && status.stop_reason === null && !status.timed_out
+    && stdout.details.artifact === undefined && stderr.details.artifact === undefined
+    && stdout.details.capture === "complete" && stdout.details.preview === "complete"
+    && stdout.details.captured_raw_bytes === stdoutTextBytes
+    && stderr.details.capture === "complete" && stderr.details.preview === "complete"
+    && typeof encodedStdoutText === "string"
+    && Buffer.byteLength(encodedStdoutText, "utf8") <= MAX_PROCESS_STRUCTURED_STDOUT_JSON_BYTES;
+  const needsArtifact = stdout.details.capture === "incomplete" || stderr.details.capture === "incomplete"
+    || stdout.details.preview === "truncated" || stderr.details.preview === "truncated"
+    || (stdoutTextBytes > 0 && !stdoutTextCanBeInline);
+  const stdoutTextIsSafe = !artifact && !needsArtifact && stdoutTextCanBeInline;
   return {
     text,
     details: {
       ok: true, tool, ...status, stdout: stdout.details, stderr: stderr.details,
       ...(artifact && status.cleanup === "complete" ? { artifact: { ...artifact } } : {}),
     },
-    needsArtifact: stdout.details.capture === "incomplete" || stderr.details.capture === "incomplete"
-      || stdout.details.preview === "truncated" || stderr.details.preview === "truncated",
+    needsArtifact,
+    ...(stdoutTextIsSafe ? { stdout_text: stdout.text } : {}),
   };
 }
 
@@ -463,7 +488,7 @@ export function formatProcessFailure(
   message: string,
   process?: ProcessEvidence,
   maxOutputBytes = DEFAULT_PROCESS_OUTPUT_BYTES,
-): { text: string; details: ProcessFailureDetails } {
+): FormattedProcessFailure {
   validateOutputBudget(maxOutputBytes);
   const boundedMessage = boundedProcessErrorMessage(message);
   const errorText = `[${tool} error: ${code}; ${boundedMessage}]`;
@@ -475,6 +500,7 @@ export function formatProcessFailure(
       return {
         text: formatted.text,
         details: { ok: false, tool, error: { code, message: boundedMessage }, process: nestedProcessSnapshot(formatted.details) },
+        ...(formatted.stdout_text !== undefined ? { stdout_text: formatted.stdout_text } : {}),
       };
     } catch {
       return formatProcessBudgetFailure(tool, process);

@@ -12,6 +12,14 @@ Unavailable optional tools have no model declaration or tool-specific prompt met
 
 If your configuration names `extensions/codex-tools` or `extensions/ask-user.ts` explicitly, use `extensions/agent-tools` instead. Load `extensions/agent-tools` only once.
 
+`agentTools(pi)` keeps the full default registration. An extension host can use the named `createAgentToolsExtension(selectedTools)` export to register only selected tools:
+
+```ts
+createAgentToolsExtension(["read", "find", "grep", "web_search", "ask_user"])(pi);
+```
+
+Availability checks run only for selected optional tools. The Bash owner, job registry, and their lifecycle hooks are created only when `bash` or `bash_job` is selected.
+
 `edit` is unchanged. The extension corrects the built-in `write` success message to report UTF-8 byte count. The custom `read` and `bash` tools use Pi's preferred strict JSON-schema sampling when the provider supports it. It does not add a patch tool.
 
 `web_search` sends only its query to a separate Codex request with native web search required. It does not send project files or the current conversation. Success requires a completed native search and a successful final answer. Native citations are counted separately; zero citations are allowed with a warning. An answer or URL alone is not retrieval proof. Billed usage remains in the result if a later check fails.
@@ -30,6 +38,30 @@ Each tool result has `details.ok` and `details.tool`. A recoverable failure has 
 
 Search results report `result_count`, `shown_count`, `preview`, `capture`, and `read_paths`. `grep.mode` supports `content` (default), `files`, `count`, and `exists`. Counts mean matching lines, not occurrences. Incomplete count capture has `total_matching_lines=null`. `exists` uses a native boolean witness, has no artifact, and rejects a supplied `limit`. Positive `context` is valid only in content mode.
 
+`find` and `grep` declare an output schema. Their text `content` and `details` stay unchanged. Codemode scripts receive `structuredContent` instead of text `content` on success and failure. Success fields include `ok`, `tool`, `result_count`, `shown_count`, `preview`, `capture`, and typed `records`. Find and files records have a canonical `path`. Content records have `path`, `line_number`, display-bounded `text`, and `match` (`false` marks context). Count records have `path` and `matching_lines`; count results also have `total_matching_lines` and `captured_matching_lines`. Exists results have `exists` and `termination`. Failures have `ok=false` and an `error` with `code` and `message`.
+
+Structured output is limited to 48 KiB after JSON encoding. Records come only from the displayed preview, and content text uses the same 500-character line limit. If the structured limit removes records, `structured_truncated=true`, `structured_record_count` gives the retained record count, and `artifact` identifies the complete or incomplete plain-text capture with `path`, `metadata_path`, and capture counts. That artifact may appear only in `structuredContent` when text output itself was not truncated.
+
+A codemode script can filter content records and keep the search status with the selected lines:
+
+```js
+const result = await tools.grep({ pattern: "TODO", mode: "content", limit: 100 });
+if (!result.ok) return result;
+
+return {
+  selection: "matches from displayed preview; context lines omitted",
+  matches: result.records
+    .filter((record) => record.match)
+    .map(({ path, line_number, text }) => ({ path, line_number, text })),
+  result_count: result.result_count,
+  shown_count: result.shown_count,
+  preview: result.preview,
+  capture: result.capture,
+  structured_truncated: result.structured_truncated,
+  ...(result.artifact ? { artifact: result.artifact } : {}),
+};
+```
+
 ## Non-obvious behavior
 
 ### Files and search
@@ -46,14 +78,31 @@ Search results report `result_count`, `shown_count`, `preview`, `capture`, and `
 - `git` and `gh` run direct argument arrays, not a shell. `bash` runs `bash -c`. Relative `cwd` values resolve from the Pi session directory.
 - `git` and `gh` have no TTY. Their pagers use `cat`. Git disables terminal prompts and askpass helpers. GitHub CLI disables prompts. Editors and browsers are no-ops.
 - Do not use commands or flags that need an interactive UI. Supply messages, bodies, and choices with arguments or standard input. Do not rely on hooks that need input.
-- Foreground process text defaults to an 8192-byte total budget, including status, paths, omission markers, and both streams. `max_output_bytes` accepts integers from 2048 through 40960. Failed command previews keep more tail output. Full capture limits are unchanged. If recovery metadata cannot fit, `RESULT_BUDGET_TOO_SMALL` prevents execution.
+- Foreground process text defaults to an 8192-byte total budget, including status, paths, omission markers, and both streams. `max_output_bytes` accepts integers from 2000 through 40960. Failed command previews keep more tail output. Full capture limits are unchanged. If recovery metadata cannot fit, `RESULT_BUDGET_TOO_SMALL` prevents execution.
 - The default timeout is 120 seconds. Timeout, cancellation, and capture failures trigger bounded process-group cleanup. A cleanup failure returns `PROCESS_CONTROL_FAILED` and keeps the original stop reason and readable evidence. A command that leaves its process group is outside this guarantee.
 - Tool rows show the invocation, working directory, standard input, and timeout. They use one line and truncate to terminal width.
 - A nonzero exit, signal, authentication failure, or timeout includes full process status. Check `exit_code`, `signal`, `timed_out`, and stream capture state before you act. Bash and GitHub CLI tool rows use the error background for these states. A Git status 1 with no Git error diagnostic remains normal. This supports boolean Git commands. Wrapper and capture failures are tool errors.
+- Direct-process results have optional decoded `stdout_text` for small complete no-artifact output. A complete nonempty stdout capture that cannot use this field keeps a readable process artifact, even when its text preview is complete. `runDirectProcess` accepts `artifactRetention: "when-needed" | "always"`; `when-needed` is the default. `always` retains both completed streams, including empty streams, after a normal capture and omits `stdout_text`. Stopped or incomplete captures keep the existing evidence-retention rules. Pass `stdout_text` as the fourth argument to `createProcessEnvelope(preview, details, isError, stdoutText?)` from `extensions/agent-tools/process-envelope.ts`. Host tools can use `processEnvelopeOutputSchema` as `outputSchema` and the envelope as `structuredContent` for codemode. The helper keeps `details` unchanged and bounds the JSON envelope to 48 KiB by shortening only `preview`, with `preview_truncated=true`. It includes `stdout_text` only when both streams have complete captures and previews, stdout matches its captured UTF-8 byte count, cleanup is normal, no artifact exists, and the JSON-encoded string fits 8 KiB. It throws `RangeError` if metadata alone exceeds the envelope limit. The helper does not change text `content` or parse framing; `bash`, `git`, and `gh` do not use it.
+
+#### Reusable bounded child process
+
+`extensions/agent-tools/bounded-child-process.ts` exports `startBoundedChildProcess(executable, args, options)`. Set `stdoutLimitBytes` and `stderrLimitBytes` to cap retained bytes per stream. Each stream's `bytes` field reports observed bytes and can exceed its cap; `overflow` marks a cap breach. If a stream cap is omitted, the helper drains that stream without retaining bytes or applying a per-stream cap. `totalOutputLimitBytes` sets `totalOutputOverflow` when combined observed bytes exceed its cap. With `stopOnLimit=true`, any configured cap breach requests `SIGTERM`.
+
+The constructor's `signal` requests `SIGTERM` when it aborts. A signal passed to `waitForClose()` cancels only that wait; it does not terminate the child. `stop()` sends `SIGTERM` to a live child, waits, sends `SIGKILL` if the child is still live, then waits for close. `cleanupTimeoutMs` must be a positive safe integer and defaults to 300 ms per wait.
+
+A child can exit while a descendant keeps a pipe open. `stop()` waits for close, then throws `BoundedChildCleanupError` if close is not observed in time. It does not signal a child that has already exited. Repeated calls share the cleanup attempt. If close is observed after a cleanup error, a later call returns that status. The helper does not manage process groups or descendants. An outer owner must retain any required cleanup authority and must not treat this error as verified cleanup.
+
+### Failed codemode call references
+
+`extensions/agent-tools/completed-call-references.ts` exports `registerCompletedCallReferences(pi, options?)`. It tracks nested `tool_result` events only while a codemode parent call is open. On a failed codemode result, it appends a bounded JSON index to text content and adds the same value at `details.completed_call_references`. Successful codemode results stay unchanged. It clears buffers when a parent finishes and at session start or shutdown. A late `tool_result` is ignored; only `tool_call` opens a buffer.
+
+Register it after the host's existing `tool_result` redaction and grant hook. An optional synchronous `projectResult(event, ctx)` callback receives the current event and `ExtensionContext`; it can return host-approved JSON metadata for that nested result. The helper does not copy raw output or infer artifact paths or grants when no projection is supplied. It retains call ID, tool, error state, and observation time. Defaults cap open parents at 8, calls per parent at 32, the complete index at 12 KiB of JSON, and each projected reference at 1 KiB. Parent IDs must be non-empty, at most 128 UTF-8 bytes and 256 code units, and contain no control characters. Invalid IDs and calls arriving while the concurrent-parent cap is full are not indexed. Omitted nested calls and references within an indexed parent are reported with `truncated`, `omitted_call_count`, `reference_omitted_count`, and `completed_observed_count`. The helper registers lifecycle and tool-result observers only; it adds no tools or authority.
 
 ### Managed Bash jobs
 
-`bash` with `background=true` returns a runtime/session-owned job ID after startup. Active `bash_job` controls are required before allocation or spawn, even while the empty registry's declaration is hidden. The first retained job makes its schema available for the next request without changing selected names. Its prompt guidance can remain hidden until the next user run. The registry permits eight live or reserved jobs. The default deadline remains 120 seconds; explicit background deadlines can reach 86400 seconds. A supplied non-null `max_output_bytes` is invalid in background mode.
+`bash` with `background=true` returns a runtime/session-owned job ID after startup. Active `bash_job` controls are required before allocation or spawn, even while the empty registry's declaration is hidden. The first retained job makes its schema available for the next request without changing selected names. Its prompt guidance can remain hidden until the next user run. The registry permits eight live or reserved jobs. The default deadline remains 120 seconds; explicit background deadlines can reach 86400 seconds.
+
+`max_output_bytes` sets the startup response budget, with the same default and range as foreground calls. It does not limit saved logs or later `bash_job` responses. Startup fails before spawn if the metadata cannot fit the selected budget or the separate 8192-byte job control budget. Use `bash_job.output.max_bytes` to set the size of later saved-log pages.
 
 `bash_job` supports `status`, `wait`, `output`, and `cancel`. Wait is bounded to 0–5 seconds, default 1; cancelling a wait does not stop the job. Output defaults to the last 4096 saved bytes. Use its numeric `next_start_byte` as the next `start_byte`; Base64 supports non-UTF-8 logs. Pages freeze the current saved size and permit append growth. A successful evidence read stays successful even if the job failed.
 
@@ -63,9 +112,21 @@ Graceful shutdown supervises foreground and background Bash controllers, includi
 
 ### Artifacts
 
-Artifacts contain omitted process or search output and are readable with `read`. They use owner-only temporary files. Use byte mode or Base64 for non-UTF-8 process output.
+Artifacts contain retained process streams and search output omitted from a preview. Read them with `read`. They use owner-only temporary files. Use byte mode or Base64 for non-UTF-8 process output.
 
 An artifact with `capture=incomplete` contains only captured data. It does not claim to contain complete output or a strict prefix. Published stream paths are verified as readable. `saved_raw_bytes`, when present, can differ from the observed `captured_raw_bytes`.
+
+`extensions/agent-tools/artifact-read.ts` exports `createArtifactReadTool(options)`. It is a reusable factory and is not registered by `extensions/agent-tools`. A host must register it explicitly and provide `resolveArtifact(id, stream, ctx)`, which returns `{ path, provenance }`. The resolver runs for every page, including cached JSON pages. Use it to enforce the host's exact-path and branch grants. The factory returns supplied provenance unchanged in `structuredContent`; JSON item counts describe the saved document and do not prove that capture was complete. `openFile` is an optional host file opener; the default uses positioned reads of a regular file.
+
+A resolver can throw `new ArtifactResolutionError(message)` for a denied or unavailable grant. It returns `ARTIFACT_NOT_FOUND` and preserves the message (bounded to 512 UTF-8 bytes). The second argument can set `{ code: "UNSUPPORTED_FILE_TYPE" | "INVALID_INPUT", route?: "bytes" | "json" }`. Set `route` to the supported mode for an unsupported-mode error. An unexpected resolver exception returns `INTERNAL_ERROR` without its diagnostic. Cancellation takes precedence if the signal aborts while the resolver runs. The exact API is `new ArtifactResolutionError(message, options?)`.
+
+The tool name is `artifact_read`. It accepts a UUID `artifact_id`, optional `stream` (`stdout` or `stderr`, default `stdout`), and optional `mode` (`bytes` or `json`, default `bytes`). Success and failure results have an output schema and structured content. Model-facing text is the same JSON envelope as `structuredContent`, with `data`, `page`, and `provenance` in separate fields. Both the envelope and text are limited to 48 KiB after JSON encoding. `RESULT_BUDGET_TOO_SMALL` means provenance or metadata leaves no room for a complete next byte or UTF-8 code point. A mode-mismatched argument reports the route where that argument is supported; for example, `fields` supplied in bytes mode reports `route=json`.
+
+- **Bytes route:** `start_byte` is a zero-based offset, `max_bytes` is an upper bound of 1–40960 UTF-8 bytes or 1–30720 Base64 bytes (default 16384), and `encoding` is `utf8` (default) or `base64`. UTF-8 pages keep code points whole. The 48-KiB envelope limit can shorten a page to a smaller complete byte prefix. Use `page.next_start_byte` to continue; the cursor identifies the first byte not returned. The output envelope includes complete byte offsets, total source bytes, encoding, continuation state, and provenance.
+- **JSON array route:** `fields` is required. It maps output aliases to RFC 6901 pointers relative to each selected array item. `array_pointer` selects the array (default root `''`). `offset` defaults to 0, `limit` defaults to 100 and is at most 1000, and `max_bytes` defaults to 16384 and is at most 40960. The input schema permits `max_bytes=1`, but JSON mode requires at least 2 bytes for the encoded empty row array. The byte budget includes the complete JSON encoding of the returned row array. Missing field pointers omit that alias. The tool reduces each page to complete rows that fit the 48-KiB result envelope. A row is never truncated; if the first row cannot fit, the tool returns `ROW_TOO_LARGE`.
+- **JSON object route:** `fields` is required. `object_pointer` selects one object; set it to `''` for the root object. It is mutually exclusive with `array_pointer`. Each field pointer is relative to that object. The tool returns one object and does not page it; `offset` and `limit` are invalid. Missing pointers omit aliases. `page.requested_fields`, `page.returned_fields`, `page.missing_fields`, and `page.projection_complete` describe only the requested projection. They do not describe capture completeness; the separate `provenance` retains capture state. The complete encoded object must fit `max_bytes` and the 48-KiB envelope or the tool returns `ROW_TOO_LARGE`; values are never truncated. `json_start_byte` defaults to 0 for either JSON route; set it explicitly to skip a known wrapper or login preamble. The tool never skips a prefix silently.
+
+All routes reject source files larger than 64 MiB. JSON projection output is limited to 8 MiB; array projections also have a 100000-row cap. Object projections accept at most 64 field aliases. The factory caches only compact projected data in a bounded LRU; it does not retain parsed source inventory. Each cached request opens the stream and checks its file snapshot. A changed stream returns `FILE_CHANGED` instead of using the cached projection.
 
 Process artifacts expire seven days after verified completion. Active logs and logs with unverified cleanup or metadata are pinned in the current runtime. Other artifacts use creation-based seven-day retention. Expired unpinned directories are removed when a new artifact is created.
 

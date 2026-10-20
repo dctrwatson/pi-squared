@@ -628,6 +628,8 @@ export interface BytePageOptions {
   signal?: AbortSignal;
   /** Withhold a valid partial UTF-8 code point at a live prefix end. */
   allowIncompleteUtf8?: boolean;
+  /** Return the selected raw bytes with the decoded page. */
+  includeBytes?: boolean;
 }
 
 export interface BytePage {
@@ -637,6 +639,7 @@ export interface BytePage {
   end_byte: number;
   has_more: boolean;
   next_start_byte: number | null;
+  bytes?: Buffer;
 }
 
 function utf8Width(lead: number): number {
@@ -702,6 +705,7 @@ export function decodeBytePage(bytes: Buffer, options: BytePageOptions): BytePag
   return {
     encoding: options.encoding, content,
     start_byte: startByte, end_byte: endByte, has_more: hasMore, next_start_byte: hasMore ? endByte : null,
+    ...(options.includeBytes ? { bytes: bytes.subarray(0, selected) } : {}),
   };
 }
 
