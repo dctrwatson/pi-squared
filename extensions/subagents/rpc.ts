@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { RpcExtensionUIResponse, RpcSessionState, SessionStats } from "@earendil-works/pi-coding-agent";
-import type { SubagentThinkingLevel } from "./personas.ts";
+import type { SubagentProcessEnvironment, SubagentProcessInvocation, SubagentThinkingLevel } from "./backend.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Do not delay a user interrupt on an unavailable clear_queue response. */
@@ -38,7 +38,8 @@ type ExitDetails = {
 export interface SubagentRpcClientOptions {
     cwd: string;
     args: string[];
-    invocation?: { command: string; args: string[] };
+    env?: SubagentProcessEnvironment;
+    invocation?: SubagentProcessInvocation;
     onOutput: (output: SubagentRpcOutput) => void;
     onExit: (details: ExitDetails) => void;
 }
@@ -83,9 +84,9 @@ export class SubagentRpcClient {
     async start(): Promise<void> {
         if (this.process) throw new Error("Subagent RPC process already started");
         const invocation = this.options.invocation ?? getPiInvocation(this.options.args);
-        const subagent = spawn(invocation.command, invocation.args, {
+        const subagent = spawn(invocation.command, [...invocation.args], {
             cwd: this.options.cwd,
-            env: process.env,
+            env: this.options.env ? { ...this.options.env } : process.env,
             shell: false,
             stdio: ["pipe", "pipe", "pipe"],
         });

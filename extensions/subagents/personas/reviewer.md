@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Review implementation changes; report actionable defects only; do not suggest fixes, edit files, or run tests
-model: fireworks/accounts/fireworks/models/glm-5p3
+model: anthropic/claude-opus-5-5
 thinking: high
 context-requirements: Provide the review focus, expected behavior, scope, constraints, and Git base when relevant.
 skills:

@@ -65,9 +65,9 @@ subagent({
   action: "create",
   mode: "fresh",
   persona: "worker",
-  name: "create-pr",
-  purpose: "Create the requested pull request",
-  skills: ["create-pr", "writing-style"],
+  name: "publish-pr",
+  purpose: "Publish the requested pull request",
+  skills: ["publish-pr", "writing-style"],
   context: "Own the PR workflow. Preserve concurrent changes. Validate the created pull request.",
   prompt: "Execute the requested PR workflow.",
 })
@@ -78,16 +78,22 @@ subagent({
   purpose: "Investigate the reported production incident",
   prompt: "Inspect the evidence and recommend a local fix.",
 })
-subagent({ action: "list" })
+subagent({ action: "list", limit: 5 })
 subagent({ action: "prompt", id: "incident-investigator", prompt: "Check the latest error pattern." })
 subagent({ action: "status", id: "incident-investigator" })
 ```
 
-Use `subagent({ action: "list", kind: "personas" })` to find up to 20 persona templates. The result includes each persona runtime. If more personas exist, use the returned `offset`. `limit` selects 1 through 50 entries. A persona name must match exactly.
+Use `subagent({ action: "list", limit: 5 })` to find up to five reusable subagents. The list excludes stopped instances and puts the most recently active instance first. Text and tool-result details contain the same entries.
+
+Both list kinds accept `limit` from 1 through 50, with a default of 20, and `offset` from 0 through 10,000, with a default of 0. A page can contain fewer entries to stay within the response size limits. If more entries remain, use the returned `offset` for the next page. Tool-result details include the remaining count in `omitted`.
+
+Use `subagent({ action: "list", kind: "personas" })` to find persona templates. The result includes each persona runtime. A persona name must match exactly.
 
 A model-tool `create` defaults to a `task` lifetime. Pi creation requires a persona. Persona-less creation is available only with an explicit `cursor-cloud` runtime and purpose. The `skills` input is valid only for Pi. Cursor Cloud rejects skills. It does not ignore them.
 
 Selected Pi skills add to persona skills. The extension rejects a selected skill with the same name as a different persona skill. Each skill name must match a skill that Pi discovered in the parent session. The model tool accepts skill names, not paths.
+
+A Pi `create` may include `target_contract: { targets: string[] }`. The shared limit is 20 targets, each 1 through 128 characters. The extension stores a frozen copy on the Pi record and restores it with that record. A host may apply stricter validation and reject live calls outside these exact targets. It does not grant skills, tools, filesystem access, or other authority. Cursor Cloud does not accept this field.
 
 Reuse a retained subagent with `prompt` before you consider creating another. For a new subagent, `mode` is `fresh` by default. This default does not mean that related work needs a new instance. A fresh subagent can receive concise `context`. `context` is not a standalone input. A model-tool call that includes `context` must include a non-empty `prompt` in the same call. To create a dormant task or persistent subagent, omit both fields.
 
@@ -98,9 +104,15 @@ Reuse a retained subagent with `prompt` before you consider creating another. Fo
 
 A Pi model-tool fork can fall back to fresh context when the parent session is ephemeral. The tool reports that fallback. A Cursor fork summary failure returns an error. It does not change the request to fresh mode.
 
+Before a Pi child starts from a fork, the extension checks that the source is a regular file with stable metadata and inspects a bounded header prefix. This preflight has no total-file-size cap and does not reject later malformed or torn JSONL records that Pi's loader can skip. It uses UTF-8 replacement behavior for header inspection, validates the first parsed session header when it appears within the prefix, and leaves the full stream to Pi's loader. The preflight reads at most 1 MiB; if it cannot find a header within that prefix of a larger file, Pi's loader remains authoritative. Failure details report the `category` (`unavailable`, `stale`, `unreadable`, or `over_limit`) and a safe `recovery_action`. `over_limit` is available only when a host delegates its own existing loader cap; shared preflight imposes no total-size cap. The shared classifier accepts bounded `name`, `category`, `recoveryAction`, and `message` fields, so a host can report a plain error without importing the shared runtime class. Preflight failures say that no child was launched; loader errors remain the host's errors. These checks do not relax grants or active-turn latest-user selection, and they preserve the existing ephemeral-parent fallback.
+
 Give each subagent an exact objective, scope, and requested output. For a worker, also give acceptance criteria, explicit file or responsibility ownership, concurrent-work constraints, and required validation. Check retained subagents before you create a new instance. Use `list` or `status` when their scope or state is unknown. Reuse relevant context even when the new request uses different words. Model-facing creation rejects an exact active purpose match in the same runtime. It does not detect all related work. A persona-based create can omit `purpose`. The extension then uses the initial prompt or persona description.
 
-A parent `create` with an initial prompt and a parent `prompt` wait for the subagent result. A human can steer or continue Pi work from the subagent panel. A human can continue Cursor work after settlement.
+A parent `create` with an initial prompt and a parent `prompt` wait for the subagent result. A create without a prompt returns a dormant subagent. A human can steer or continue Pi work from the subagent panel. A human can continue Cursor work after settlement.
+
+If the parent cancels a wait before Pi dispatch, the delegate stays available and the failure does not claim that this request started or produced captures. Retry the request when ready. A cancelled Pi one-shot becomes a task so the delegate can retain useful startup context. If Pi dispatched the request, the failure reports its run ID when known. Any session reference or report is session-level and may include earlier requests. Check `status`, then prompt the same delegate to verify which retained captures cover this request. Repeat only reads the delegate confirms are missing. A cancelled Cursor run keeps the existing remote-state and result-delivery rules.
+
+A parent-owned Pi run that settles as aborted produces an error, not a successful empty response. An earlier successful assistant message does not change that result.
 
 Subagent conversation stays private from the parent model context. `app.message.copy` places a response in the parent editor. A parent-tool result returns a response to the parent. Cursor runtime prompts are sent to Cursor Cloud.
 
@@ -122,7 +134,7 @@ The model-tool `context` field is limited to 8,000 characters. The Cursor runtim
 
 A model-tool create defaults to `task`. An explicit `lifetime` overrides this default. Human `/subagent` sessions are always `persistent`.
 
-- `one-shot` is for bounded independent work when continuity cannot help. A model-tool one-shot requires an explicit lifetime and an initial prompt. A Pi one-shot stops after success, cancellation, or failure. A Cursor one-shot archives only after result delivery.
+- `one-shot` is for bounded independent work when continuity cannot help. A model-tool one-shot requires an explicit lifetime and an initial prompt. A Pi one-shot stops after a complete result or an ordinary failure; blocked, incomplete, or cancelled work stays available as a task. A Cursor one-shot archives only after result delivery.
 - `task` retains context for follow-up, integration, and validation across parent turns.
 - `persistent` retains context for related work until you stop it.
 
@@ -143,10 +155,10 @@ The bundled personas use these initial settings:
 | Persona | Pi model | Thinking |
 | --- | --- | --- |
 | `explorer` | `openai-codex/gpt-6-luna` | `high` |
-| `reviewer` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
-| `test-analyst` | `fireworks/accounts/fireworks/models/glm-5p3` | `high` |
-| `worker` | `openai-codex/gpt-6.1-sol` | `xhigh` |
-| `doc-auditor` | `fireworks/accounts/fireworks/models/glm-5p3-flash` | `high` |
+| `reviewer` | `anthropic/claude-opus-5-5` | `high` |
+| `test-analyst` | `anthropic/claude-opus-5-5` | `high` |
+| `worker` | `openai-codex/gpt-6-luna` | `max` |
+| `doc-auditor` | `anthropic/claude-haiku-5-5` | `xhigh` |
 
 ## Completion reports
 
@@ -264,8 +276,17 @@ New persona frontmatter rejects `preferred-lifetime` and `preferred-profile`. Re
 
 Pi-only fields are:
 
-- `extensions` or `extension`: Trusted extension files or directories. Paths are relative to the persona file. Lists and comma-separated strings are supported.
+- `extensions` or `extension`: Trusted extension files or directories, or exact Pi built-in references: `builtin:codemode`, `builtin:tool-search`, `builtin:mcp`, and `builtin:llama.cpp`. File paths are relative to the persona file. Lists and comma-separated strings are supported.
 - `skills` or `skill`: Skill files or directories. Paths are relative to the persona file. Lists and comma-separated strings are supported.
+
+To opt into codemode for a Pi persona, add this to its frontmatter:
+
+```yaml
+extensions:
+  - builtin:codemode
+```
+
+Then add `"defaultTools": ["+codemode"]` to `~/.pi/agent/settings.json`. This adds codemode to Pi's normal default tools when the persona loads the extension. The subagent keeps `--tools` unset.
 
 Cursor-only fields are:
 
@@ -386,11 +407,45 @@ A Pi subagent starts with:
 
 Pi loads `agent-tools` and `prevent-idle` explicitly. For all models, `agent-tools` provides `read`, `find`, `grep`, `bash`, `git`, `gh`, and Codex-backed `web_search`. It also corrects the built-in `write` byte count. On macOS, `prevent-idle` prevents system sleep while the Pi subagent works.
 
-Built-in extensions stay disabled.
+Built-in extensions stay disabled unless a Pi persona lists a supported `builtin:` reference. Unknown built-in references fail during persona discovery. Pi adds each requested reference with `--extension` while it keeps `--no-extensions` enabled.
 
 The Pi runtime leaves `--tools` unset. A Pi subagent receives Pi's normal configured tool set. Pi's built-in default is `read`, `bash`, `edit`, and `write`. A Pi persona extension can register additional active tools.
 
 Pi disables ambient extension, skill, prompt-template, and theme discovery. Pi adds persona resources and selected skills explicitly. This prevents recursive subagent loading and unrelated startup code.
+
+### Host launch policy
+
+`SubagentExtensionOptions.piLaunchPolicy` lets a host adjust each Pi child launch. The synchronous callback runs before backend construction for fresh, forked, and restored Pi sessions. It does not run for Cursor Cloud. The callback receives the generated `args`, child `cwd`, a copy of the inherited environment, the parent `ExtensionContext`, and a frozen deep-readonly copy of the stored Pi record.
+
+Return all three controlled values: `args`, `cwd`, and `env`. The extension validates and copies them before it passes them to the child. It passes the returned environment as-is; it does not merge it with `process.env`. An optional `invocation` has `command` and `args`. Pi passes this pair to `spawn` exactly. It replaces the normal Pi command selection and argument list. An exception or invalid result prevents backend construction and child startup. Launch values are not saved in the registry.
+
+The policy may also define `getPersonaMetadata(persona)`. It returns an optional `{ skills, tools }` display object. Each list is limited to 20 non-empty strings of at most 128 characters. The extension shows this metadata when it lists personas. A callback failure or invalid result omits the metadata. This hook does not authorize or add skills or tools; the extension still validates selected skills against the parent session.
+
+```ts
+import subagents, { type SubagentPiLaunchPolicy } from "./subagents/index.ts";
+
+const piLaunchPolicy: SubagentPiLaunchPolicy = (launch, _context, _stored) => ({
+    args: [...launch.args],
+    cwd: launch.cwd,
+    env: { ...launch.env },
+    invocation: {
+        command: hostPiExecutable,
+        args: [...launch.args],
+    },
+});
+piLaunchPolicy.getPersonaMetadata = (persona) => ({
+    skills: persona.skills,
+    tools: [],
+});
+
+subagents(pi, { piLaunchPolicy });
+```
+
+`buildSubagentProcessArgs` accepts an optional `defaultExtensionPaths` option. If you omit it, the builder uses its current default extension paths. Set it to `[]` to add no default extension paths. The builder still adds persona-selected extensions. It does not add a persona extension again when its path is in the selected default paths.
+
+`SUBAGENT_PROCESS_ARGS_CAPABILITIES.defaultExtensionPaths` in `personas.ts` is `true` when the builder supports this option. A host that selects extension paths must include the child tools and lifecycle hooks it needs through the selected extensions. An empty list only omits default extension paths; it does not grant or restrict operating-system authority.
+
+`SUBAGENT_EXTENSION_CAPABILITIES.piLaunchPolicy` is `true` when this option is supported.
 
 > **Trust boundary:** Separate Pi processes and conversation context do not sandbox tools or the filesystem. Pi subagents share the parent worktree and host authority. Give concurrent workers non-overlapping file, module, or responsibility ownership. A worker must preserve unrelated changes and stop when ownership overlaps. Attach only trusted Pi persona extensions. Cursor Cloud uses remote repository and configured MCP permissions. Cursor does not receive Pi extensions or Pi skills. Repository access does not automatically expose uncommitted or local-only worktree state. Parent prompts, context, and bounded fork summaries transfer to Cursor Cloud. Explicitly supplied text can describe or contain local changes. Credential redaction is a mitigation, not a complete data-loss boundary.
 

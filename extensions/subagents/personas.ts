@@ -75,16 +75,26 @@ export interface SubagentProcessOptions {
     thinking?: SubagentThinkingLevel;
     scopedModels?: readonly SubagentScopedModel[];
     skills?: readonly string[];
+    defaultExtensionPaths?: readonly string[];
 }
 
 const PERSONA_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const MAX_PERSONA_NAME_CHARS = 64;
+// This exact list matches Pi 1.0's built-in extension names.
+const PI_BUILTIN_EXTENSION_REFERENCES = new Set([
+    "builtin:codemode",
+    "builtin:tool-search",
+    "builtin:mcp",
+    "builtin:llama.cpp",
+]);
+const PI_BUILTIN_EXTENSION_REFERENCE_HELP = "builtin:codemode, builtin:tool-search, builtin:mcp, or builtin:llama.cpp";
 const SUBAGENT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 export const BUNDLED_PERSONA_DIRECTORY = path.resolve(SUBAGENT_DIRECTORY, "personas");
 export const SUBAGENT_EXTENSION_PATHS = [
     path.resolve(SUBAGENT_DIRECTORY, "../agent-tools/index.ts"),
     path.resolve(SUBAGENT_DIRECTORY, "../prevent-idle.ts"),
 ] as const;
+export const SUBAGENT_PROCESS_ARGS_CAPABILITIES = { defaultExtensionPaths: true } as const;
 const MAX_CONTEXT_REQUIREMENTS_CHARS = 240;
 const MAX_PERSONA_DESCRIPTION_CHARS = 240;
 const MAX_PERSONA_MODEL_CHARS = 256;
@@ -378,8 +388,17 @@ function loadPersona(filePath: string): SubagentPersona {
     if (runtime === "cursor-cloud" && (hasFrontmatterField(frontmatter, "skill") || hasFrontmatterField(frontmatter, "skills"))) {
         throw new Error("skills is not valid for runtime cursor-cloud");
     }
-    const extensions = extensionValues.map((value) => resolvePersonaPath(value, filePath));
-    const missingExtension = extensions.find((extension) => !fs.existsSync(extension));
+    const extensions = extensionValues.map((value) => {
+        if (value.startsWith("builtin:")) {
+            if (!PI_BUILTIN_EXTENSION_REFERENCES.has(value)) {
+                throw new Error(`unsupported built-in extension "${value}"; use ${PI_BUILTIN_EXTENSION_REFERENCE_HELP}`);
+            }
+            return value;
+        }
+        return resolvePersonaPath(value, filePath);
+    });
+    const missingExtension = extensions.find((extension) =>
+        !PI_BUILTIN_EXTENSION_REFERENCES.has(extension) && !fs.existsSync(extension));
     if (missingExtension) throw new Error(`extension path does not exist: ${missingExtension}`);
     const skills = skillValues.map((value) => resolvePersonaPath(value, filePath));
     const missingSkill = skills.find((skill) => !fs.existsSync(skill));
@@ -514,6 +533,7 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
     }
 
     const persona = options.persona;
+    const defaultExtensionPaths = options.defaultExtensionPaths ?? SUBAGENT_EXTENSION_PATHS;
     if (persona?.runtime === "cursor-cloud") {
         throw new Error(`Pi process arguments require runtime pi; persona "${persona.name}" uses ${persona.runtime}`);
     }
@@ -526,7 +546,7 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
         "--no-themes",
     ];
 
-    for (const extension of SUBAGENT_EXTENSION_PATHS) args.push("--extension", extension);
+    for (const extension of defaultExtensionPaths) args.push("--extension", extension);
 
     const modelScope = options.scopedModels?.length ? formatSubagentModelScope(options.scopedModels) : undefined;
     if (modelScope) args.push("--models", modelScope);
@@ -547,7 +567,7 @@ export function buildSubagentProcessArgs(options: SubagentProcessOptions): strin
         // for a file path by Pi's system-prompt resolver.
         args.push("--system-prompt", `${persona.systemPrompt}\n`);
         for (const extension of persona.extensions) {
-            if (!SUBAGENT_EXTENSION_PATHS.some((defaultExtension) => defaultExtension === extension)) {
+            if (!defaultExtensionPaths.includes(extension)) {
                 args.push("--extension", extension);
             }
         }

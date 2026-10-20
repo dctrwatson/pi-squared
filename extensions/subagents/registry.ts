@@ -16,7 +16,7 @@ import {
     type SubagentThinkingLevel,
     type SubagentLifetime,
 } from "./personas.ts";
-import { createActiveTurnForkSnapshot, type ModelForkContext } from "./fork.ts";
+import { createActiveTurnForkSnapshot, validateForkSourceFile, ForkSourceValidationError, type ModelForkContext } from "./fork.ts";
 import {
     parseStoredSubagentBlocker,
     parseSubagentBlockerResponse,
@@ -27,6 +27,7 @@ import {
     promptFingerprint,
     type SubagentPromptAttribution,
     type SubagentPromptCompletion,
+    type SubagentPromptDispatch,
 } from "./controller.ts";
 import { createSubagentBackend } from "./backend-factory.ts";
 import { createCursorSubagentLifecyclePort, type CursorCloudBackendConfiguration } from "./cursor-backend.ts";
@@ -38,7 +39,12 @@ import {
     normalizeCursorStartingRef,
 } from "./cursor-repositories.ts";
 import { runSubagentDialog } from "./ui.ts";
-import type { SubagentBackendFactory, SubagentRuntime } from "./backend.ts";
+import type {
+    SubagentBackendFactory,
+    SubagentProcessEnvironment,
+    SubagentProcessInvocation,
+    SubagentRuntime,
+} from "./backend.ts";
 
 const REGISTRY_ENTRY_TYPE = "persistent-subagents";
 export const SUBAGENT_REGISTRY_TOOL_DETAILS_KEY = "persistentSubagentRegistry";
@@ -113,8 +119,14 @@ export interface PersistentSubagentSummary {
     model?: string;
     thinking?: SubagentThinkingLevel;
     sessionFile?: string;
+    runId?: string;
     createdAt: number;
     lastActiveAt: number;
+}
+
+/** A bounded, display-only target declaration. It does not grant authority. */
+export interface SubagentTargetContract {
+    readonly targets: readonly string[];
 }
 
 export interface CreatePersistentSubagentOptions {
@@ -126,14 +138,22 @@ export interface CreatePersistentSubagentOptions {
     mode: SubagentContextMode;
     parentSessionFile?: string;
     skills?: readonly string[];
+    targetContract?: SubagentTargetContract;
     model?: string;
     thinking?: SubagentThinkingLevel;
+}
+
+export interface SubagentPromptRecovery extends SubagentPromptDispatch {
+    runId?: string;
+    sessionFile?: string;
+    sessionReport?: string;
 }
 
 export interface PromptPersistentSubagentOptions {
     signal?: AbortSignal;
     onStateChange?: (summary: PersistentSubagentSummary) => void;
     parentContextProvided?: boolean;
+    recovery?: SubagentPromptRecovery;
 }
 
 export interface CursorRemoteMetadata {
@@ -150,6 +170,10 @@ export interface CursorRemoteMetadata {
 /** Structured runtime state for details. It is not included in concise parent text. */
 export interface SubagentRuntimeMetadata {
     readonly kind: SubagentRuntime;
+    readonly runId?: string;
+    readonly resultRef?: { readonly kind: "pi-session"; readonly path: string };
+    readonly liveUsage?: object;
+    readonly report?: string;
     readonly remote?: CursorRemoteMetadata;
 }
 
@@ -228,11 +252,13 @@ export interface StoredSubagentBase {
 export interface StoredPiSubagent extends StoredSubagentBase {
     runtime: "pi";
     selectedSkillPaths: string[];
+    readonly targetContract?: SubagentTargetContract;
     parentSessionFile?: string;
     sessionFile?: string;
     sessionDir: string;
     model?: string;
     thinking: SubagentThinkingLevel;
+    lastRunId?: string;
     scopedModels: SubagentScopedModel[];
 }
 
@@ -291,6 +317,49 @@ export interface StoredCursorSubagent extends StoredSubagentBase {
 }
 
 export type StoredSubagent = StoredPiSubagent | StoredCursorSubagent;
+
+type DeepReadonly<T> = T extends (...args: never[]) => unknown
+    ? T
+    : T extends object
+        ? { readonly [Key in keyof T]: DeepReadonly<T[Key]> }
+        : T;
+
+/** Compact, display-only host metadata for a persona. It does not grant resources. */
+export interface SubagentPersonaMetadata {
+    readonly skills?: readonly string[];
+    readonly tools?: readonly string[];
+}
+
+/** Input for the optional synchronous Pi child-process launch policy. */
+export interface SubagentPiLaunchPolicyInput {
+    readonly args: readonly string[];
+    readonly cwd: string;
+    readonly env: SubagentProcessEnvironment;
+}
+
+/** Complete process configuration returned by the Pi launch policy. */
+export interface SubagentPiLaunchPolicyResult extends SubagentPiLaunchPolicyInput {
+    /** When set, these command and arguments are passed to spawn exactly. */
+    readonly invocation?: SubagentProcessInvocation;
+}
+
+/**
+ * Adjust each Pi child launch before backend construction. The stored record is
+ * a frozen copy; returned process settings are never saved in the registry.
+ */
+export type SubagentPiLaunchPolicy = ((
+    input: SubagentPiLaunchPolicyInput,
+    context: ExtensionContext,
+    stored: DeepReadonly<StoredPiSubagent>,
+) => SubagentPiLaunchPolicyResult) & {
+    /** Read bounded local metadata from a Pi session without starting or querying it. */
+    getResultMetadata?(stored: DeepReadonly<StoredPiSubagent>): {
+        readonly liveUsage?: object;
+        readonly report?: string;
+    } | undefined;
+    /** Return bounded display metadata only; it does not authorize skills or tools. */
+    getPersonaMetadata?(persona: DeepReadonly<SubagentPersona>): SubagentPersonaMetadata | undefined;
+};
 
 export interface CursorSubagentReconciliation {
     remoteLifecycle: CursorRemoteLifecycle;
@@ -365,6 +434,24 @@ function isSafeCursorValue(value: unknown): value is string {
     return typeof value === "string" && value.length <= MAX_CURSOR_ID_CHARS && SAFE_CURSOR_VALUE_PATTERN.test(value);
 }
 
+const MAX_SUBAGENT_TARGETS = 20;
+const MAX_SUBAGENT_TARGET_CHARS = 128;
+
+/** Validate and freeze a generic target contract without assigning it authority. */
+export function normalizeSubagentTargetContract(value: unknown): SubagentTargetContract | undefined {
+    if (value === undefined) return undefined;
+    if (!isRecord(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, "targets")
+        || !Array.isArray(value.targets) || value.targets.length > MAX_SUBAGENT_TARGETS) {
+        throw new Error("target_contract must contain at most 20 exact target strings");
+    }
+    const targets = Array.from(value.targets);
+    if (targets.some((target) => typeof target !== "string" || !target.trim()
+        || target.length > MAX_SUBAGENT_TARGET_CHARS || /[\u0000-\u001f\u007f-\u009f]/.test(target))) {
+        throw new Error("target_contract targets must be non-empty strings of at most 128 characters without controls");
+    }
+    return Object.freeze({ targets: Object.freeze(targets as string[]) });
+}
+
 export function normalizeSubagentPurpose(value: string): string {
     const purpose = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
     if (!purpose) throw new Error("Subagent purpose is required");
@@ -402,6 +489,60 @@ function cloneCursorPendingResult(pendingResult: CursorPendingResult): CursorPen
     return pendingResult.state === "none" ? { state: "none" } : { ...pendingResult };
 }
 
+function cloneSubagentTargetContract(contract: SubagentTargetContract): SubagentTargetContract {
+    return Object.freeze({ targets: Object.freeze([...contract.targets]) });
+}
+
+function deepFreeze<T>(value: T): DeepReadonly<T> {
+    if (value && typeof value === "object" && !Object.isFrozen(value)) {
+        for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+        Object.freeze(value);
+    }
+    return value as DeepReadonly<T>;
+}
+
+function validatePiLaunchPolicyResult(value: unknown): SubagentPiLaunchPolicyResult {
+    if (!isRecord(value)) throw new Error("Invalid Pi launch policy result: expected an object");
+    for (const key of ["args", "cwd", "env"] as const) {
+        if (!Object.hasOwn(value, key)) throw new Error(`Invalid Pi launch policy result: missing ${key}`);
+    }
+    const strings = (input: unknown, label: string): string[] => {
+        if (!Array.isArray(input) || input.some((item) => typeof item !== "string" || item.includes("\0"))) {
+            throw new Error(`Invalid Pi launch policy result: ${label} must be an array of strings without null characters`);
+        }
+        return [...input];
+    };
+    const text = (input: unknown, label: string): string => {
+        if (typeof input !== "string" || !input || input.includes("\0")) {
+            throw new Error(`Invalid Pi launch policy result: ${label} must be a non-empty string without null characters`);
+        }
+        return input;
+    };
+    if (!isRecord(value.env)) throw new Error("Invalid Pi launch policy result: env must be an object");
+    const env: Record<string, string | undefined> = Object.create(null);
+    for (const [key, item] of Object.entries(value.env)) {
+        if (!key || key.includes("=") || key.includes("\0")
+            || (item !== undefined && (typeof item !== "string" || item.includes("\0")))) {
+            throw new Error("Invalid Pi launch policy result: env must contain valid string values");
+        }
+        env[key] = item as string | undefined;
+    }
+    let invocation: SubagentProcessInvocation | undefined;
+    if (value.invocation !== undefined) {
+        if (!isRecord(value.invocation)) throw new Error("Invalid Pi launch policy result: invocation must be an object");
+        invocation = {
+            command: text(value.invocation.command, "invocation.command"),
+            args: strings(value.invocation.args, "invocation.args"),
+        };
+    }
+    return {
+        args: strings(value.args, "args"),
+        cwd: text(value.cwd, "cwd"),
+        env,
+        ...(invocation ? { invocation } : {}),
+    };
+}
+
 function cloneStoredSubagent(stored: StoredSubagent): StoredSubagent {
     const base = {
         ...stored,
@@ -413,6 +554,7 @@ function cloneStoredSubagent(stored: StoredSubagent): StoredSubagent {
             ...base,
             runtime: "pi",
             selectedSkillPaths: [...stored.selectedSkillPaths],
+            ...(stored.targetContract ? { targetContract: cloneSubagentTargetContract(stored.targetContract) } : {}),
             scopedModels: stored.scopedModels.map((model) => ({ ...model })),
         } as StoredPiSubagent;
     }
@@ -532,14 +674,24 @@ function parseStoredPiSubagent(value: Record<string, unknown>): StoredPiSubagent
     if (!base || typeof value.sessionDir !== "string") return undefined;
     if (typeof value.thinking !== "string" || !THINKING_LEVELS.has(value.thinking as SubagentThinkingLevel)) return undefined;
     if (!Array.isArray(value.scopedModels)) return undefined;
+    let targetContract: SubagentTargetContract | undefined;
+    try {
+        targetContract = normalizeSubagentTargetContract(value.targetContract);
+    } catch {
+        return undefined;
+    }
     return {
         ...base,
         runtime: "pi",
         selectedSkillPaths: Array.isArray(value.selectedSkillPaths)
             ? [...new Set(value.selectedSkillPaths.filter((skill): skill is string => typeof skill === "string"))]
             : [],
+        ...(targetContract ? { targetContract } : {}),
         ...(typeof value.parentSessionFile === "string" ? { parentSessionFile: value.parentSessionFile } : {}),
         ...(typeof value.sessionFile === "string" ? { sessionFile: value.sessionFile } : {}),
+        ...(typeof value.lastRunId === "string" && value.lastRunId.length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/.test(value.lastRunId)
+            ? { lastRunId: value.lastRunId }
+            : {}),
         sessionDir: value.sessionDir,
         ...(typeof value.model === "string" ? { model: value.model } : {}),
         thinking: value.thinking as SubagentThinkingLevel,
@@ -810,6 +962,7 @@ export class PersistentSubagentRegistry {
     private readonly backendFactory: SubagentBackendFactory;
     private readonly cursorLifecycle: CursorSubagentLifecyclePort;
     private readonly validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void;
+    private readonly piLaunchPolicy?: SubagentPiLaunchPolicy;
     private ownerSessionId: string | undefined;
     private readonly persistedFingerprints = new Map<string, string>();
     private readonly pendingRestoreRemovedIds = new Set<string>();
@@ -822,11 +975,13 @@ export class PersistentSubagentRegistry {
         backendFactory: SubagentBackendFactory = createSubagentBackend,
         cursorLifecycle: CursorSubagentLifecyclePort = createCursorSubagentLifecyclePort(),
         validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void,
+        piLaunchPolicy?: SubagentPiLaunchPolicy,
     ) {
         this.pi = pi;
         this.backendFactory = backendFactory;
         this.cursorLifecycle = cursorLifecycle;
         this.validateRestoredSubagent = validateRestoredSubagent;
+        this.piLaunchPolicy = piLaunchPolicy;
     }
 
     restore(ctx: ExtensionContext): void {
@@ -915,6 +1070,8 @@ export class PersistentSubagentRegistry {
     validateCreate(ctx: ExtensionContext, options: CreatePersistentSubagentOptions): void {
         this.ensureOwner(ctx);
         const runtime = options.runtime ?? options.persona?.runtime ?? "pi";
+        const targetContract = normalizeSubagentTargetContract(options.targetContract);
+        if (targetContract && runtime !== "pi") throw new Error("target_contract is only valid for runtime pi");
         if (options.persona && options.runtime && options.runtime !== options.persona.runtime) {
             throw new Error(`runtime "${options.runtime}" does not match persona "${options.persona.name}" runtime "${options.persona.runtime}"`);
         }
@@ -931,9 +1088,10 @@ export class PersistentSubagentRegistry {
         }
         if (runtime === "pi" && options.mode === "fork") {
             const parentSessionFile = options.parentSessionFile ?? ctx.sessionManager.getSessionFile();
-            if (!parentSessionFile || !fs.existsSync(parentSessionFile)) {
-                throw new Error("Cannot fork a parent session that has not been persisted yet");
+            if (!parentSessionFile) {
+                throw new ForkSourceValidationError("unavailable", "there is no persisted parent session file");
             }
+            validateForkSourceFile(parentSessionFile);
         }
     }
 
@@ -947,6 +1105,7 @@ export class PersistentSubagentRegistry {
         const id = `sa_${randomUUID().replaceAll("-", "").slice(0, 10)}`;
         const now = Date.now();
         const runtime = options.runtime ?? options.persona?.runtime ?? "pi";
+        const targetContract = normalizeSubagentTargetContract(options.targetContract);
         if (runtime === "cursor-cloud") {
             // Agent.create accepts a client-generated Cloud ID. Save it before a
             // handle or send can make a remote side effect.
@@ -997,6 +1156,7 @@ export class PersistentSubagentRegistry {
             purpose: normalizeSubagentPurpose(options.purpose),
             ...(options.persona ? { persona: clonePersona(options.persona) } : {}),
             selectedSkillPaths: [...new Set(options.skills ?? [])],
+            ...(targetContract ? { targetContract } : {}),
             lifetime: options.lifetime ?? "persistent",
             mode: options.mode,
             ...(parentSessionFile ? { parentSessionFile } : {}),
@@ -1087,7 +1247,7 @@ export class PersistentSubagentRegistry {
             unsubscribe = options.onStateChange
                 ? controller.subscribe(() => options.onStateChange!(this.summary(record)))
                 : undefined;
-            const result = await controller.promptAndWait(prompt, options.signal);
+            const result = await controller.promptAndWait(prompt, options.signal, options.recovery);
             record.stored.lastActiveAt = Date.now();
             // Prompt delivery normally persists this at message_start. Keep the
             // post-settlement assignment for injected controllers and old runtimes.
@@ -1111,6 +1271,22 @@ export class PersistentSubagentRegistry {
                 ...(delivery ? { delivery } : {}),
             };
         } catch (error) {
+            if (controller && record.stored.runtime === "pi") {
+                this.captureRuntimeState(record);
+                if (options.recovery?.dispatched && options.recovery.run?.runtime === "pi") {
+                    options.recovery.runId = options.recovery.run.id;
+                    try {
+                        const metadata = this.runtimeMetadataFor(record.stored.id);
+                        if (metadata.kind === "pi") {
+                            const sessionFile = metadata.resultRef?.path;
+                            if (sessionFile && fs.existsSync(sessionFile)) options.recovery.sessionFile = sessionFile;
+                            if (metadata.report) options.recovery.sessionReport = metadata.report;
+                        }
+                    } catch { /* Optional capture metadata must not replace the prompt failure. */ }
+                }
+                record.stored.lastActiveAt = Date.now();
+                this.persist();
+            }
             if (controller && record.stored.runtime === "cursor-cloud") {
                 // Pending or uncertain Cursor state is not evidence of delivery. Only
                 // the controller can attach a receipt after it surfaced an authoritative
@@ -1710,7 +1886,11 @@ export class PersistentSubagentRegistry {
         const sessionFile = isPi && stored.sessionFile && fs.existsSync(stored.sessionFile)
             ? stored.sessionFile
             : undefined;
-        if (isPi && stored.sessionFile && !sessionFile) stored.sessionFile = undefined;
+        const clearMissingSessionFile = isPi && stored.sessionFile !== undefined && sessionFile === undefined;
+        if (isPi && !sessionFile && stored.mode === "fork") {
+            if (!stored.parentSessionFile) throw new ForkSourceValidationError("unavailable", "the saved fork has no source session file");
+            validateForkSourceFile(stored.parentSessionFile);
+        }
         const args = isPi ? buildSubagentProcessArgs({
             mode: sessionFile ? "fresh" : stored.mode,
             parentSessionFile: sessionFile ? undefined : stored.parentSessionFile,
@@ -1725,13 +1905,29 @@ export class PersistentSubagentRegistry {
             scopedModels: stored.scopedModels,
             skills: stored.selectedSkillPaths,
         }) : [];
+        const piLaunch = isPi && this.piLaunchPolicy
+            ? validatePiLaunchPolicyResult(this.piLaunchPolicy(
+                Object.freeze({
+                    args: Object.freeze([...args]),
+                    cwd: stored.cwd,
+                    env: Object.freeze({ ...process.env }),
+                }),
+                ctx,
+                deepFreeze(cloneStoredSubagent(stored) as StoredPiSubagent),
+            ))
+            : undefined;
+        if (clearMissingSessionFile && stored.runtime === "pi") stored.sessionFile = undefined;
         const promptAttributions = isPi
             ? record.promptAttributions ?? this.readPromptAttributions(stored)
             : [];
         if (isPi) record.promptAttributions = promptAttributions;
         const controller = new SubagentSessionController(ctx, {
-            args,
-            cwd: stored.cwd,
+            args: [...(piLaunch?.args ?? args)],
+            cwd: piLaunch?.cwd ?? stored.cwd,
+            ...(piLaunch ? {
+                env: piLaunch.env,
+                ...(piLaunch.invocation ? { invocation: piLaunch.invocation } : {}),
+            } : {}),
             mode: stored.mode,
             persona: stored.persona,
             initialPrompt: "",
@@ -1833,7 +2029,21 @@ export class PersistentSubagentRegistry {
 
     private runtimeMetadata(record: RuntimePersistentSubagent): SubagentRuntimeMetadata {
         const { stored } = record;
-        if (stored.runtime === "pi") return { kind: "pi" };
+        if (stored.runtime === "pi") {
+            let resultMetadata: ReturnType<NonNullable<SubagentPiLaunchPolicy["getResultMetadata"]>>;
+            try {
+                resultMetadata = this.piLaunchPolicy?.getResultMetadata?.(deepFreeze(cloneStoredSubagent(stored) as StoredPiSubagent));
+            } catch {
+                resultMetadata = undefined;
+            }
+            return {
+                kind: "pi",
+                ...(stored.lastRunId ? { runId: stored.lastRunId } : {}),
+                ...(stored.sessionFile ? { resultRef: { kind: "pi-session" as const, path: stored.sessionFile } } : {}),
+                ...(resultMetadata?.liveUsage ? { liveUsage: resultMetadata.liveUsage } : {}),
+                ...(resultMetadata?.report ? { report: resultMetadata.report } : {}),
+            };
+        }
         return {
             kind: "cursor-cloud",
             remote: {
@@ -1855,6 +2065,12 @@ export class PersistentSubagentRegistry {
         let changed = false;
         if (state.sessionFile && fs.existsSync(state.sessionFile) && state.sessionFile !== record.stored.sessionFile) {
             record.stored.sessionFile = state.sessionFile;
+            changed = true;
+        }
+        const runId = state.lastRun?.id ?? state.run?.id;
+        if (typeof runId === "string" && runId.length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/.test(runId)
+            && runId !== record.stored.lastRunId) {
+            record.stored.lastRunId = runId;
             changed = true;
         }
         if (state.connected && state.model) {
@@ -1924,6 +2140,7 @@ export class PersistentSubagentRegistry {
                 thinking: state?.connected ? state.thinking : stored.thinking,
                 ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
             } : {}),
+            ...(stored.runtime === "pi" && stored.lastRunId ? { runId: stored.lastRunId } : {}),
             createdAt: stored.createdAt,
             lastActiveAt: stored.lastActiveAt,
         };

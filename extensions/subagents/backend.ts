@@ -244,7 +244,7 @@ export type SubagentExtensionUiResponse =
 export type SubagentBackendEvent =
     | { readonly type: "run_started"; readonly run: SubagentRun }
     | { readonly type: "run_ended"; readonly run: SubagentRun; readonly willRetry: boolean }
-    | { readonly type: "run_settled"; readonly run: SubagentRun }
+    | { readonly type: "run_settled"; readonly run: SubagentRun; readonly aborted?: boolean }
     | { readonly type: "message_started"; readonly run: SubagentRun; readonly message: SubagentUserMessage | SubagentAssistantMessage }
     | { readonly type: "message_delta"; readonly run: SubagentRun; readonly textDelta?: string; readonly thinkingDelta?: string; readonly toolCallStarted?: true; readonly toolCallId?: string; readonly toolName?: string; readonly truncated?: true }
     | { readonly type: "message_completed"; readonly run: SubagentRun; readonly message: SubagentAssistantMessage }
@@ -278,9 +278,20 @@ export interface SubagentBackendExit {
     readonly intentional: boolean;
 }
 
+export type SubagentProcessEnvironment = Readonly<Record<string, string | undefined>>;
+
+export interface SubagentProcessInvocation {
+    readonly command: string;
+    readonly args: readonly string[];
+}
+
 export interface SubagentBackendOptions {
     readonly cwd: string;
     readonly args: readonly string[];
+    /** Optional Pi child-process environment. Omitted values keep the inherited environment. */
+    readonly env?: SubagentProcessEnvironment;
+    /** Optional complete spawn invocation for a Pi child process. */
+    readonly invocation?: SubagentProcessInvocation;
     /** Cursor-only state and durable persistence callbacks. */
     readonly cursor?: CursorCloudBackendConfiguration;
     readonly onEvent: (event: SubagentBackendEvent) => void;

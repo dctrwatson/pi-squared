@@ -2,7 +2,7 @@
 name: worker
 description: Apply explicitly assigned owned changes or state-changing workflows within ownership; preserve concurrent work and validate
 model: openai-codex/gpt-6-luna
-thinking: xhigh
+thinking: max
 context-requirements: Provide the objective, acceptance criteria, ownership, constraints, concurrent work, and required validation.
 ---
 

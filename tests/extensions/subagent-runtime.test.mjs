@@ -16,6 +16,7 @@ test("cursor persona frontmatter validates and normalizes runtime metadata", asy
   t.after(() => rm(root, { recursive: true, force: true }));
   const personas = join(root, "personas");
   await mkdir(personas);
+  await writeFile(join(personas, "trusted.ts"), "export default function () {}\n");
 
   await writePersona(personas, "pi-default", "name: pi-default\ndescription: Existing Pi persona");
   await writePersona(personas, "pi-permissive", "name: pi-permissive\ndescription: 42\nunknown-pi-key: allowed");
@@ -39,6 +40,7 @@ cursor-repos:
   - url: ssh://git@github.com/example/platform-config.git`);
   await writePersona(personas, "pi-mcps", "name: pi-mcps\ncursor-mcps:\n  - datadog");
   await writePersona(personas, "cursor-extensions", "name: cursor-extensions\nruntime: cursor-cloud\nextensions: ./context.ts");
+  await writePersona(personas, "cursor-builtin-extensions", "name: cursor-builtin-extensions\nruntime: cursor-cloud\nextensions: builtin:codemode");
   await writePersona(personas, "cursor-skills", "name: cursor-skills\nruntime: cursor-cloud\nskills: ./SKILL.md");
   await writePersona(personas, "cursor-empty-extensions", "name: cursor-empty-extensions\nruntime: cursor-cloud\nextensions:");
   await writePersona(personas, "cursor-empty-skills", "name: cursor-empty-skills\nruntime: cursor-cloud\nskills:");
@@ -56,6 +58,22 @@ cursor-repos:
   await writePersona(personas, "cursor-invalid-thinking", "name: cursor-invalid-thinking\nthinking: extreme\nruntime: cursor-cloud");
   await writePersona(personas, "pi-malformed-model", "name: pi-malformed-model\nmodel: 42");
   await writePersona(personas, "pi-invalid-thinking", "name: pi-invalid-thinking\nthinking: extreme");
+  await writePersona(personas, "pi-builtins-mixed", `name: pi-builtins-mixed
+extension: builtin:codemode
+extensions:
+  - builtin:tool-search
+  - ./trusted.ts
+  - builtin:codemode
+  - ./trusted.ts`);
+  await writePersona(personas, "pi-builtins-all", `name: pi-builtins-all
+extensions:
+  - builtin:codemode
+  - builtin:tool-search
+  - builtin:mcp
+  - builtin:llama.cpp`);
+  await writePersona(personas, "pi-unknown-builtin", "name: pi-unknown-builtin\nextensions:\n  - builtin:codemode-extra");
+  await writePersona(personas, "pi-unknown-builtin-case", "name: pi-unknown-builtin-case\nextensions:\n  - builtin:Codemode");
+  await writePersona(personas, "pi-unknown-builtin-empty", "name: pi-unknown-builtin-empty\nextensions:\n  - \"builtin:\"");
   await writePersona(personas, "cursor-unknown-key", "name: cursor-unknown-key\nruntime: cursor-cloud\nunknown-cursor-key: rejected");
   await writePersona(personas, "invalid-mcps", "name: invalid-mcps\nruntime: cursor-cloud\ncursor-mcps: datadog");
   await writePersona(personas, "too-many-mcps", `name: too-many-mcps\nruntime: cursor-cloud\ncursor-mcps:\n${Array.from({ length: 9 }, (_, index) => `  - mcp-${index + 1}`).join("\n")}`);
@@ -67,7 +85,7 @@ cursor-repos:
   await writePersona(personas, "too-many-repos", `name: too-many-repos\nruntime: cursor-cloud\ncursor-repos:\n${Array.from({ length: 21 }, (_, index) => `  - url: https://github.com/example/repo-${index + 1}`).join("\n")}`);
 
   const discovery = personasModule.loadSubagentPersonas(personas);
-  assert.deepEqual(discovery.personas.map(({ name }) => name), ["cursor-default", "cursor-valid", "duplicate-heavy-mcps", "duplicate-heavy-repos", "pi-default", "pi-permissive"]);
+  assert.deepEqual(discovery.personas.map(({ name }) => name), ["cursor-default", "cursor-valid", "duplicate-heavy-mcps", "duplicate-heavy-repos", "pi-builtins-all", "pi-builtins-mixed", "pi-default", "pi-permissive"]);
   assert.deepEqual(discovery.personas.find(({ name }) => name === "pi-default"), {
     name: "pi-default",
     description: "Existing Pi persona",
@@ -78,6 +96,29 @@ cursor-repos:
     filePath: join(personas, "pi-default.md"),
   });
   assert.equal(discovery.personas.find(({ name }) => name === "pi-permissive")?.description, "Run the pi-permissive subagent persona");
+  assert.deepEqual(discovery.personas.find(({ name }) => name === "pi-builtins-mixed")?.extensions, [
+    "builtin:codemode",
+    "builtin:tool-search",
+    join(personas, "trusted.ts"),
+  ]);
+  assert.deepEqual(discovery.personas.find(({ name }) => name === "pi-builtins-all")?.extensions, [
+    "builtin:codemode",
+    "builtin:tool-search",
+    "builtin:mcp",
+    "builtin:llama.cpp",
+  ]);
+  for (const [persona, reference] of [
+    ["pi-unknown-builtin", "builtin:codemode-extra"],
+    ["pi-unknown-builtin-case", "builtin:Codemode"],
+    ["pi-unknown-builtin-empty", "builtin:"],
+  ]) {
+    assert.ok(discovery.diagnostics.some((diagnostic) =>
+      diagnostic.includes(persona) && diagnostic.includes(`unsupported built-in extension \"${reference}\"`)));
+  }
+  for (const persona of ["cursor-extensions", "cursor-builtin-extensions"]) {
+    assert.ok(discovery.diagnostics.some((diagnostic) =>
+      diagnostic.includes(persona) && diagnostic.includes("extensions is not valid for runtime cursor-cloud")));
+  }
   const cursorDefault = discovery.personas.find(({ name }) => name === "cursor-default");
   assert.equal(Object.hasOwn(cursorDefault, "model"), false);
   assert.equal(Object.hasOwn(cursorDefault, "thinking"), false);
@@ -121,6 +162,7 @@ cursor-repos:
   for (const field of [
     "cursor-mcps is only valid for runtime cursor-cloud",
     "extensions is not valid for runtime cursor-cloud",
+    "unsupported built-in extension \"builtin:codemode-extra\"; use builtin:codemode, builtin:tool-search, builtin:mcp, or builtin:llama.cpp",
     "skills is not valid for runtime cursor-cloud",
     "name must be a non-empty string",
     "description must be a non-empty string",
@@ -141,6 +183,29 @@ cursor-repos:
   ]) {
     assert.ok(discovery.diagnostics.some((diagnostic) => diagnostic.includes(field)), field);
   }
+});
+
+test("Pi persona built-in extensions stay explicit and retain normal tool selection", () => {
+  const persona = {
+    name: "codemode-scout",
+    description: "Inspect a bounded task",
+    systemPrompt: "Inspect the requested scope.",
+    runtime: "pi",
+    extensions: ["builtin:codemode", "/personas/extensions/trusted.ts", "builtin:tool-search"],
+    skills: [],
+    filePath: "/personas/codemode-scout.md",
+  };
+  const args = personasModule.buildSubagentProcessArgs({ mode: "fresh", persona });
+  const extensions = args.flatMap((value, index) => value === "--extension" ? [args[index + 1]] : []);
+
+  assert.equal(args.includes("--no-extensions"), true);
+  assert.deepEqual(extensions, [
+    ...personasModule.SUBAGENT_EXTENSION_PATHS,
+    "builtin:codemode",
+    "/personas/extensions/trusted.ts",
+    "builtin:tool-search",
+  ]);
+  assert.equal(args.includes("--tools"), false);
 });
 
 test("Pi persona model and thinking defaults apply only when a process starts", () => {

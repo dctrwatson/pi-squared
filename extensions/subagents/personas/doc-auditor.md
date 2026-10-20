@@ -1,8 +1,8 @@
 ---
 name: doc-auditor
 description: Report documentation defects for implemented behavior; exclude future designs; do not rewrite or edit files
-model: fireworks/accounts/fireworks/models/glm-5p3-flash
-thinking: high
+model: anthropic/claude-haiku-5-5
+thinking: xhigh
 context-requirements: Provide the objective, audience, documentation or code scope, and Git base when relevant.
 ---
 

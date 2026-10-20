@@ -18,6 +18,8 @@ import {
     type SubagentModel,
     type SubagentPromptCompletion as BackendPromptCompletion,
     type SubagentPromptRequestResult,
+    type SubagentProcessEnvironment,
+    type SubagentProcessInvocation,
     type SubagentRun,
     type SubagentRunCompletion,
     type SubagentSessionStats,
@@ -147,6 +149,8 @@ export interface SubagentViewState {
 export interface RunSubagentDialogOptions {
     args: string[];
     cwd: string;
+    env?: SubagentProcessEnvironment;
+    invocation?: SubagentProcessInvocation;
     mode: SubagentContextMode;
     persona?: SubagentPersona;
     initialPrompt: string;
@@ -176,6 +180,11 @@ export interface CursorCompletionDelivery {
 }
 
 type SettledRun = Omit<SubagentPromptCompletion, "usage"> | Error;
+
+export interface SubagentPromptDispatch {
+    dispatched: boolean;
+    run?: SubagentRun;
+}
 
 interface RunAccumulator {
     started: boolean;
@@ -314,6 +323,7 @@ export class SubagentSessionController {
     private latestSettledSequence = 0;
     private settlementEpoch = 0;
     private activeRun: SubagentRun | undefined;
+    private parentPromptDispatch: SubagentPromptDispatch | undefined;
     private readonly runStartedAt = new Map<string, number>();
     /** Cursor durable result that must return before the next parent dispatch. */
     private pendingCursorResult: SubagentRun | undefined;
@@ -384,6 +394,8 @@ export class SubagentSessionController {
         this.backend = backendFactory({
             cwd: options.cwd,
             args: options.args,
+            ...(options.env ? { env: options.env } : {}),
+            ...(options.invocation ? { invocation: options.invocation } : {}),
             ...(options.cursor ? { cursor: options.cursor } : {}),
             onEvent: (event) => this.handleEvent(event),
             onExit: (details) => {
@@ -689,8 +701,12 @@ export class SubagentSessionController {
         }
     }
 
-    async promptAndWait(text: string, signal?: AbortSignal): Promise<SubagentPromptCompletion> {
-        if (this.backend.runtime === "cursor-cloud") return this.promptAndWaitCursor(text, signal);
+    async promptAndWait(
+        text: string,
+        signal?: AbortSignal,
+        dispatch?: SubagentPromptDispatch,
+    ): Promise<SubagentPromptCompletion> {
+        if (this.backend.runtime === "cursor-cloud") return this.promptAndWaitCursor(text, signal, dispatch);
         let releasePrompt!: () => void;
         const previousPrompt = this.promptTail;
         this.promptTail = new Promise<void>((resolve) => {
@@ -705,10 +721,11 @@ export class SubagentSessionController {
             try {
                 signal?.throwIfAborted();
                 await this.start();
+                signal?.throwIfAborted();
                 const usageBefore = this.usageSnapshot();
                 const after = this.settledRevision;
                 const settlement = this.waitForSettlement(after, signal);
-                const submission = await this.submitInternal(text, this.state.busy ? "followUp" : "prompt", "parent", signal);
+                const submission = await this.submitInternal(text, this.state.busy ? "followUp" : "prompt", "parent", signal, dispatch);
                 if (!submission.accepted || !submission.runResult) {
                     const error = this.lastSubmissionError ?? new Error("Subagent prompt was not accepted");
                     this.rejectWaitersAfter(after, error);
@@ -734,7 +751,11 @@ export class SubagentSessionController {
     private cursorParentPromptInFlight = false;
 
     /** Cursor rejects concurrent parent prompts instead of entering Pi's local queue. */
-    private async promptAndWaitCursor(text: string, signal?: AbortSignal): Promise<SubagentPromptCompletion> {
+    private async promptAndWaitCursor(
+        text: string,
+        signal?: AbortSignal,
+        dispatch?: SubagentPromptDispatch,
+    ): Promise<SubagentPromptCompletion> {
         if (this.cursorParentPromptInFlight || this.commandPending) {
             throw new SubagentBackendError("BUSY", "Cursor Cloud already has an active run. Wait for it to settle, then retry.", "cursor-cloud");
         }
@@ -744,9 +765,11 @@ export class SubagentSessionController {
             try {
                 signal?.throwIfAborted();
                 await this.start();
+                signal?.throwIfAborted();
                 // A Cursor registry status reconciliation can update durable state
                 // while this controller stays connected. Refresh before accepting.
                 await this.refreshState();
+                signal?.throwIfAborted();
                 // A durable Cursor result remains available until an explicit delivery
                 // acknowledgement. A later request must return it instead of clearing it.
                 const pendingResult = await this.consumeCursorPendingResult(signal);
@@ -760,7 +783,7 @@ export class SubagentSessionController {
                 const usageBefore = this.usageSnapshot();
                 const after = this.settledRevision;
                 const settlement = this.waitForSettlement(after, signal);
-                const submission = await this.submitInternal(text, "prompt", "parent", signal);
+                const submission = await this.submitInternal(text, "prompt", "parent", signal, dispatch);
                 if (!submission.accepted || !submission.runResult) {
                     const error = this.lastSubmissionError ?? new Error("Subagent prompt was not accepted");
                     this.rejectWaitersAfter(after, error);
@@ -858,6 +881,7 @@ export class SubagentSessionController {
         requestedMode?: InputMode,
         source: SubagentPromptSource = "human",
         signal?: AbortSignal,
+        dispatch?: SubagentPromptDispatch,
     ): Promise<SubagentSubmission> {
         this.lastSubmissionError = undefined;
         const message = text.trim();
@@ -927,13 +951,24 @@ export class SubagentSessionController {
         }
         this.touch();
 
+        const previousParentPromptDispatch = this.parentPromptDispatch;
+        if (dispatch && startsRun) this.parentPromptDispatch = dispatch;
         try {
             let runResult: SubagentPromptRequestResult | undefined;
-            if (mode === "followUp") runResult = await this.backend.followUp(message, signal);
-            else if (sendAsPrompt) runResult = await this.backend.prompt(message, signal);
-            else await this.backend.steer(message);
+            if (mode === "followUp") {
+                signal?.throwIfAborted();
+                if (dispatch) dispatch.dispatched = true;
+                runResult = await this.backend.followUp(message, signal);
+            } else if (sendAsPrompt) {
+                signal?.throwIfAborted();
+                if (dispatch) dispatch.dispatched = true;
+                runResult = await this.backend.prompt(message, signal);
+            } else await this.backend.steer(message);
             if (runResult?.handledWithoutRun) this.completeHandledPrompt();
-            else if (runResult?.run && !this.isSettlingOrSettled(runResult.run)) this.activateRun(runResult.run);
+            else if (runResult?.run) {
+                if (dispatch && startsRun) dispatch.run = runResult.run;
+                if (!this.isSettlingOrSettled(runResult.run)) this.activateRun(runResult.run);
+            }
             const attribution = { source, fingerprint: promptFingerprint(message) };
             this.promptAttributions.push(attribution);
             try {
@@ -949,6 +984,7 @@ export class SubagentSessionController {
             // Agent.send can accept and emit a run before the cancellation check makes
             // backend.prompt reject. Retain that run identity for terminal inspection.
             if (acceptedRun && !this.isSettlingOrSettled(acceptedRun)) this.activateRun(acceptedRun);
+            if (acceptedRun && dispatch && startsRun) dispatch.run = acceptedRun;
             if (acceptedRun && (error instanceof SubagentBackendError && error.code === "CANCELLED")) {
                 this.cancelledCursorParentRuns.add(this.runKey(acceptedRun));
                 await this.discardCancelledCursorCompletionIfAborted(acceptedRun).catch(() => {});
@@ -971,6 +1007,9 @@ export class SubagentSessionController {
             return { accepted: false, ...(acceptedRun ? { acceptedRun } : {}) };
         } finally {
             this.commandPending = false;
+            if (dispatch && startsRun && this.parentPromptDispatch === dispatch) {
+                this.parentPromptDispatch = previousParentPromptDispatch;
+            }
         }
     }
 
@@ -1289,6 +1328,7 @@ export class SubagentSessionController {
     }
 
     private activateRun(run: SubagentRun): void {
+        if (this.parentPromptDispatch && !this.parentPromptDispatch.run) this.parentPromptDispatch.run = run;
         if (this.isSettlingOrSettled(run)) return;
         if (this.activeRun && this.runKey(this.activeRun) !== this.runKey(run)) return;
         const isNewRun = !this.activeRun;
@@ -1509,6 +1549,7 @@ export class SubagentSessionController {
         fallback: SettledRun,
         sequence: number,
         epoch: number,
+        aborted = false,
     ): Promise<void> {
         const parentOwned = this.isParentOwned(run);
         let settled = parentOwned ? fallback : {
@@ -1530,6 +1571,11 @@ export class SubagentSessionController {
             if (!this.stopping && epoch === this.settlementEpoch && !this.activeRun) {
                 this.addStatus(boundedError(`Could not read full subagent completion: ${failure.message}`).message, "warning");
             }
+        }
+        if (aborted) {
+            settled = fallback instanceof Error
+                ? fallback
+                : settled instanceof Error ? settled : new Error("Subagent response aborted");
         }
         if (this.stopping || epoch !== this.settlementEpoch) return;
 
@@ -1747,7 +1793,9 @@ export class SubagentSessionController {
                 const accumulator = this.getActiveRunAccumulator(event.run);
                 if (!accumulator) return;
                 this.observeCursorTerminalRunInPanel(event.run);
-                const fallback: SettledRun = this.isParentOwned(event.run)
+                const parentOwned = this.isParentOwned(event.run);
+                const aborted = this.backend.runtime === "pi" && parentOwned && event.aborted === true;
+                const fallback: SettledRun = parentOwned
                     ? accumulator.failure ?? {
                         text: accumulator.assistantText,
                         responseProduced: accumulator.hadAssistant,
@@ -1765,7 +1813,7 @@ export class SubagentSessionController {
                 const sequence = ++this.settlementSequence;
                 const epoch = this.settlementEpoch;
                 this.touch();
-                void this.finalizeRunSettlement(event.run, fallback, sequence, epoch);
+                void this.finalizeRunSettlement(event.run, fallback, sequence, epoch, aborted);
                 return;
             }
             case "message_started":

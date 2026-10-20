@@ -20,6 +20,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
 import type { ToolFailureDetails } from "../agent-tools/tool-result.ts";
+import { getForkSourceFailureDetails } from "./fork.ts";
 import type { SubagentBackendFactory, SubagentRuntime, SubagentThinkingLevel, SubagentUsage } from "./backend.ts";
 import { DEFAULT_CURSOR_MODEL, DEFAULT_CURSOR_THINKING } from "./cursor-models.ts";
 import { hasSubagentDetailsAvailable } from "./completion.ts";
@@ -40,6 +41,7 @@ import {
     MAX_RETAINED_SUBAGENTS,
     normalizeSubagentPurpose,
     PersistentSubagentRegistry,
+    normalizeSubagentTargetContract,
     registryErrorMessage,
     CURSOR_DELIVERY_RECEIPT_VERSION,
     SUBAGENT_CURSOR_DELIVERY_RECEIPT_KEY,
@@ -48,7 +50,10 @@ import {
     type CursorSubagentLifecyclePort,
     type CursorDeliveryReceipt,
     type PersistentSubagentSummary,
+    type SubagentPersonaMetadata,
     type StoredSubagent,
+    type SubagentPiLaunchPolicy,
+    type SubagentPromptRecovery,
 } from "./registry.ts";
 
 export {
@@ -91,6 +96,8 @@ export {
     type SubagentRun,
     type SubagentRunCompletion,
     type SubagentRuntime,
+    type SubagentProcessEnvironment,
+    type SubagentProcessInvocation,
 } from "./backend.ts";
 export { getSubagentPanelWidths } from "./ui.ts";
 export {
@@ -160,7 +167,10 @@ export {
 } from "./cursor-context.ts";
 export {
     createActiveTurnForkSnapshot,
+    getForkSourceFailureDetails,
     selectForkSnapshotEntries,
+    type ForkSourceFailureCategory,
+    type ForkSourceValidationFailureProtocol,
     type FreshForkFallback,
     type ModelForkContext,
     type ParentForkSnapshot,
@@ -184,6 +194,11 @@ export {
     type StoredCursorSubagent,
     type StoredPiSubagent,
     type StoredSubagent,
+    type SubagentPiLaunchPolicy,
+    type SubagentPiLaunchPolicyInput,
+    type SubagentPiLaunchPolicyResult,
+    type SubagentPersonaMetadata,
+    type SubagentTargetContract,
     type PersistentSubagentStatus,
     type PersistentSubagentSummary,
     type SubagentRuntimeMetadata,
@@ -210,36 +225,39 @@ type SubagentErrorCode = "INVALID_INPUT" | "CANCELLED" | "SUBAGENT_FAILED";
 
 const SubagentParameters = Type.Object({
     action: StringEnum(["create", "list", "prompt", "status", "stop"] as const),
-    id: Type.Optional(Type.String({ maxLength: 64, description: "Existing subagent name or ID (prompt, status, stop)" })),
-    name: Type.Optional(Type.String({ maxLength: 64, description: "New instance name; not a persona name" })),
+    id: Type.Optional(Type.String({ maxLength: 64, description: "Existing name or ID" })),
+    name: Type.Optional(Type.String({ maxLength: 64, description: "New instance name" })),
     purpose: Type.Optional(Type.String({ maxLength: 240, description: "Stable objective for creation and reuse" })),
     persona: Type.Optional(Type.String({
         maxLength: 64,
         description: "Exact listed persona; required for Pi",
     })),
     runtime: Type.Optional(StringEnum(["pi", "cursor-cloud"] as const, {
-        description: "Persona runtime; persona-less create requires cursor-cloud",
+        description: "Runtime; persona-less create requires cursor-cloud",
     })),
     lifetime: Type.Optional(StringEnum(SUBAGENT_LIFETIMES, {
-        description: "Create lifetime: task default; one-shot needs prompt",
+        description: "task default; one-shot needs prompt",
     })),
     mode: Type.Optional(StringEnum(["fresh", "fork"] as const, {
-        description: "Create context: fresh default; fork parent history",
+        description: "fresh default; fork parent history",
     })),
     skills: Type.Optional(Type.Array(Type.String({ maxLength: 64 }), {
         maxItems: 20,
         description: "Exact discovered parent skill names (Pi only)",
     })),
+    target_contract: Type.Optional(Type.Object({
+        targets: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 20 }),
+    }, { additionalProperties: false, description: "Host may enforce" })),
     prompt: Type.Optional(Type.String({ description: "Current request; starts create or prompt" })),
     context: Type.Optional(Type.String({
         maxLength: MAX_PARENT_CONTEXT_CHARS,
         description: "Concise background sent only with prompt; required by some personas first",
     })),
     kind: Type.Optional(StringEnum(["subagents", "personas"] as const, {
-        description: "List target; subagents default",
+        description: "List type",
     })),
-    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "Persona list offset" })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Persona list count; 20 default" })),
+    offset: Type.Optional(Type.Integer({ minimum: 0, maximum: 10_000, description: "List offset" })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "List count; 20 default" })),
 });
 
 type SubagentToolInput = Static<typeof SubagentParameters>;
@@ -262,10 +280,15 @@ function prepareSubagentArguments(rawInput: unknown): SubagentToolInput {
     const invalidSkills = prepared.skills !== undefined && (!Array.isArray(prepared.skills)
         || prepared.skills.length > 20
         || prepared.skills.some((skill) => typeof skill !== "string" || skill.length > 64));
+    let invalidTargetContract = false;
+    if (prepared.target_contract !== undefined) {
+        try { normalizeSubagentTargetContract(prepared.target_contract); }
+        catch { invalidTargetContract = true; }
+    }
     const invalidKind = prepared.kind !== undefined && !["subagents", "personas"].includes(prepared.kind as string);
     const invalidOffset = prepared.offset !== undefined && (!Number.isInteger(prepared.offset) || (prepared.offset as number) < 0 || (prepared.offset as number) > 10_000);
     const invalidLimit = prepared.limit !== undefined && (!Number.isInteger(prepared.limit) || (prepared.limit as number) < 1 || (prepared.limit as number) > 50);
-    if (invalidString || invalidLength || invalidAction || invalidRuntime || invalidLifetime || invalidMode || invalidSkills || invalidKind || invalidOffset || invalidLimit) {
+    if (invalidString || invalidLength || invalidAction || invalidRuntime || invalidLifetime || invalidMode || invalidSkills || invalidTargetContract || invalidKind || invalidOffset || invalidLimit) {
         return { action: "list", context: "invalid input" };
     }
     return prepared as SubagentToolInput;
@@ -275,10 +298,11 @@ function subagentFailure(error: unknown, signal: AbortSignal | undefined): {
     content: [{ type: "text"; text: string }];
     details: ToolFailureDetails<"subagent", SubagentErrorCode>;
 } {
-    const message = error instanceof Error ? error.message : String(error);
+    const forkSourceError = getForkSourceFailureDetails(error);
+    const message = forkSourceError?.message ?? (error instanceof Error ? error.message : String(error));
     const code: SubagentErrorCode = signal?.aborted
         ? "CANCELLED"
-        : /(^context |^runtime |^lifetime |^mode |^skills? |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
+        : /(^context |^runtime |^lifetime |^mode |^skills? |^target_contract |^offset |^persona |^purpose |^one-shot |^id |^prompt |^No subagent personas|^Unknown subagent (?:persona|skill)|^Ambiguous subagent skill|^Selected skill|^Persona-less|is not valid|requires an accompanying)/.test(message)
             ? "INVALID_INPUT"
             : "SUBAGENT_FAILED";
     const bounded = Buffer.byteLength(message) <= MAX_SUBAGENT_ERROR_BYTES
@@ -297,10 +321,38 @@ function subagentFailure(error: unknown, signal: AbortSignal | undefined): {
     const safeDisplay = Buffer.byteLength(display, "utf8") <= displayBytes
         ? display
         : `${utf8Prefix(display, displayBytes - 3)}...`;
+    const details = {
+        ok: false as const,
+        tool: "subagent" as const,
+        error: {
+            code,
+            message: bounded,
+            ...(forkSourceError ? { category: forkSourceError.category, recovery_action: forkSourceError.recoveryAction } : {}),
+        },
+    };
     return {
         content: [{ type: "text", text: `${prefix}${safeDisplay}]` }],
-        details: { ok: false, tool: "subagent", error: { code, message: bounded } },
+        details,
     };
+}
+
+const MAX_DIAGNOSTIC_NAMES = 20;
+const MAX_DIAGNOSTIC_NAME_CHARS = 128;
+
+function boundedNames(values: readonly string[]): { names: string[]; omitted: number } {
+    const unique = [...new Set(values.filter((value) => typeof value === "string" && value.trim()
+        && value.length <= MAX_DIAGNOSTIC_NAME_CHARS && !/\p{Cc}/u.test(value)))];
+    return { names: unique.slice(0, MAX_DIAGNOSTIC_NAMES), omitted: Math.max(0, unique.length - MAX_DIAGNOSTIC_NAMES) };
+}
+
+function allowedPersonaHint(personas: readonly SubagentPersona[]): string {
+    const { names, omitted } = boundedNames(personas.map((persona) => persona.name));
+    return names.length === 0 ? "none" : `${names.join(", ")}${omitted ? `, plus ${omitted} more` : ""}`;
+}
+
+function allowedSkillHint(skills: readonly ParentDiscoveredSkill[]): string {
+    const { names, omitted } = boundedNames(skills.map((skill) => skill.name));
+    return names.length === 0 ? "none" : `${names.join(", ")}${omitted ? `, plus ${omitted} more` : ""}`;
 }
 
 function personaByName(personas: readonly SubagentPersona[], name: string | undefined): SubagentPersona {
@@ -313,7 +365,7 @@ function personaByName(personas: readonly SubagentPersona[], name: string | unde
     }
     const persona = personas.find((candidate) => candidate.name === requested);
     if (persona) return persona;
-    throw new Error(`Unknown subagent persona "${requested}"; list personas with action "list" and kind "personas"`);
+    throw new Error(`Unknown subagent persona "${requested}"; allowed personas: ${allowedPersonaHint(personas)}. List personas with action "list" and kind "personas"`);
 }
 
 export interface ParentDiscoveredSkill {
@@ -361,7 +413,7 @@ export function validateSelectedPersonaSkills(
         const selectedPath = name ? selectedByName.get(name) : undefined;
         if (!name || !selectedPath || selectedPath === canonicalPath(personaSkillPath)) continue;
         throw new Error(
-            `Selected skill "${name}" conflicts with persona "${persona.name}", which declares the same skill name from a different path; omit the selected skill or use a different persona`,
+            `Selected skill "${name}" conflicts with persona "${persona.name}", which declares the same skill name from a different path; omit the selected skill or use a different persona. Allowed skills: ${allowedSkillHint(discoveredSkills)}`,
         );
     }
 }
@@ -377,10 +429,10 @@ export function resolveSelectedSubagentSkills(
         names.add(name);
         const matches = discoveredSkills.filter((skill) => skill.name === name);
         if (matches.length === 0) {
-            throw new Error(`Unknown subagent skill "${name}"; use an exact parent skill name`);
+            throw new Error(`Unknown subagent skill "${name}"; use an exact parent skill name. Allowed skills: ${allowedSkillHint(discoveredSkills)}`);
         }
         if (matches.length > 1) {
-            throw new Error(`Ambiguous subagent skill "${name}"; use a unique exact parent skill name`);
+            throw new Error(`Ambiguous subagent skill "${name}"; use a unique exact parent skill name. Allowed skills: ${allowedSkillHint(discoveredSkills)}`);
         }
         const filePath = matches[0]!.filePath;
         if (!resolved.includes(filePath)) resolved.push(filePath);
@@ -491,11 +543,59 @@ function formatSubagentForModel(summary: PersistentSubagentSummary, includeRunti
     return `${summary.name} [${runtime}${summary.status}, ${summary.lifetime}]: ${summary.purpose}${blocker}`;
 }
 
-export function formatPersonaForModel(persona: SubagentPersona): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const MAX_PERSONA_METADATA_ITEMS = 20;
+const MAX_PERSONA_METADATA_VALUE_CHARS = 128;
+
+function readPersonaMetadata(
+    policy: SubagentPiLaunchPolicy | undefined,
+    persona: SubagentPersona,
+): SubagentPersonaMetadata | undefined {
+    if (!policy?.getPersonaMetadata) return undefined;
+    const input = Object.freeze({
+        ...persona,
+        extensions: Object.freeze([...persona.extensions]),
+        skills: Object.freeze([...persona.skills]),
+        ...(persona.cursorMcps ? { cursorMcps: Object.freeze([...persona.cursorMcps]) } : {}),
+        ...(persona.cursorRepos ? {
+            cursorRepos: Object.freeze(persona.cursorRepos.map((repository) => Object.freeze({ ...repository }))),
+        } : {}),
+    });
+    try {
+        const raw: unknown = policy.getPersonaMetadata(input);
+        if (!isRecord(raw) || Object.keys(raw).some((key) => key !== "skills" && key !== "tools")) return undefined;
+        const values = (key: "skills" | "tools"): readonly string[] | undefined => {
+            if (!Object.hasOwn(raw, key) || raw[key] === undefined) return undefined;
+            const list = raw[key];
+            if (!Array.isArray(list) || list.length > MAX_PERSONA_METADATA_ITEMS
+                || list.some((value) => typeof value !== "string" || !value.trim()
+                    || value.length > MAX_PERSONA_METADATA_VALUE_CHARS || /\p{Cc}/u.test(value))) return undefined;
+            return Object.freeze([...list]) as string[];
+        };
+        const skills = values("skills");
+        const tools = values("tools");
+        if ((Object.hasOwn(raw, "skills") && raw.skills !== undefined && skills === undefined)
+            || (Object.hasOwn(raw, "tools") && raw.tools !== undefined && tools === undefined)) return undefined;
+        if (skills === undefined && tools === undefined) return undefined;
+        return Object.freeze({ ...(skills === undefined ? {} : { skills }), ...(tools === undefined ? {} : { tools }) });
+    } catch {
+        return undefined;
+    }
+}
+
+export function formatPersonaForModel(persona: SubagentPersona, metadata?: SubagentPersonaMetadata): string {
     const requirement = persona.contextRequirements
         ? ` [context required: ${persona.contextRequirements}]`
         : "";
-    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${requirement}`;
+    const displayMetadata = [
+        ...(metadata?.skills?.length ? [`skills: ${metadata.skills.join(", ")}`] : []),
+        ...(metadata?.tools?.length ? [`tools: ${metadata.tools.join(", ")}`] : []),
+    ];
+    const metadataText = displayMetadata.length ? ` [${displayMetadata.join("; ")}]` : "";
+    return `${persona.name} [${persona.runtime}]: ${normalizeSubagentPurpose(persona.description)}${requirement}${metadataText}`;
 }
 
 export type SubagentsCommandArgs =
@@ -504,7 +604,7 @@ export type SubagentsCommandArgs =
     | { action: "open"; target: ""; error: string };
 
 const SUBAGENT_ACTION_FIELDS: Record<string, ReadonlySet<string>> = {
-    create: new Set(["action", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "prompt", "context"]),
+    create: new Set(["action", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "target_contract", "prompt", "context"]),
     list: new Set(["action", "kind", "offset", "limit"]),
     prompt: new Set(["action", "id", "prompt", "context"]),
     status: new Set(["action", "id"]),
@@ -681,12 +781,15 @@ function getSubagentsArgumentCompletions(
 
 export const SUBAGENT_EXTENSION_CAPABILITIES = {
     validateRestoredSubagent: true,
+    piLaunchPolicy: true,
 } as const;
 
 export interface SubagentExtensionOptions {
     readonly personaDirectory?: string;
     /** Validate all restored records before installation or runtime effects. Throw to reject restore. */
     readonly validateRestoredSubagent?: (stored: Readonly<StoredSubagent>) => void;
+    /** Control every Pi child launch before the backend is constructed. */
+    readonly piLaunchPolicy?: SubagentPiLaunchPolicy;
 }
 
 export interface SubagentExtensionTestSeam {
@@ -711,6 +814,7 @@ export default function (
         options.backendFactory,
         options.cursorLifecycle,
         options.validateRestoredSubagent,
+        options.piLaunchPolicy,
     );
     let parentDiscoveredSkills: ParentDiscoveredSkill[] = [];
     let diagnosticsShown = false;
@@ -741,7 +845,8 @@ export default function (
             ...(runtimeWarnings.length ? [`Runtime warning: ${runtimeWarnings.join(" ")}`] : []),
         ].join("\n");
         const visibleResponse = result.text.trim() || "(no visible response)";
-        const visible = warningPrefix ? `${warningPrefix}\n\n${visibleResponse}` : visibleResponse;
+        const report = result.metadata?.report?.trim();
+        const visible = [warningPrefix, report, visibleResponse].filter(Boolean).join("\n\n");
         const partialUsage = result.summary.runtime === "cursor-cloud"
             ? partialToolUsage(result.usage)
             : undefined;
@@ -774,9 +879,8 @@ export default function (
             }
             : undefined;
         const detailsFor = (summary: PersistentSubagentSummary, receipt?: CursorDeliveryReceipt) => ({
-            // Keep runtime and remote identifiers in structured details. Concise
-            // parent text contains only the requested result and warnings.
-            runtime: runtimeDetailsFor(summary),
+            // Reuse the settlement snapshot; do not rescan the child transcript after prompt completion.
+            runtime: result.metadata ?? runtimeDetailsFor(summary),
             ...(result.artifacts?.length ? { artifacts: result.artifacts } : {}),
             ...(policyWarnings.length ? { policyWarnings } : {}),
             ...(runtimeWarnings.length ? { runtimeWarnings } : {}),
@@ -847,9 +951,39 @@ export default function (
         };
     };
 
-    const stopFailedOneShot = async (summary: PersistentSubagentSummary): Promise<void> => {
+    const stopFailedOneShot = async (summary: PersistentSubagentSummary, signal?: AbortSignal): Promise<void> => {
         if (summary.lifetime !== "one-shot") return;
+        if (signal?.aborted && summary.runtime === "pi") {
+            await registry.setLifetime(summary.id, "task");
+            return;
+        }
         await registry.stop(summary.id).catch(() => undefined);
+    };
+    const cancellationBeforeDispatchNotice = (summary: PersistentSubagentSummary): string => [
+        `Cancelled before dispatch. ${summary.name} remains available as ${summary.lifetime}.`,
+        "No work was started for this request. Retry it when ready.",
+        `Delegate ID: ${summary.id}.`,
+    ].join("\n");
+    const recoveryNotice = (summary: PersistentSubagentSummary, request: SubagentPromptRecovery): string => [
+        `Retained ${summary.name} as ${summary.lifetime} after the parent wait was cancelled.`,
+        `Request was dispatched. Delegate ID: ${summary.id}${request.runId ? `; Run ID: ${request.runId}` : ""}.`,
+        ...(request.sessionFile ? [`Shared Pi session reference (may include earlier requests): ${JSON.stringify(request.sessionFile)}.`] : []),
+        ...(request.sessionReport ? [`Session-level report (may include earlier requests): ${request.sessionReport}`] : []),
+        "Check which retained captures cover this request before deciding whether to repeat live reads. Ask the same delegate to verify coverage; repeat only reads it confirms are missing.",
+    ].join("\n");
+    const requestRuntimeDetails = (
+        summary: PersistentSubagentSummary,
+        request: SubagentPromptRecovery,
+    ): ReturnType<typeof runtimeDetailsFor> => summary.runtime === "pi"
+        ? {
+            kind: "pi",
+            ...(request.runId ? { runId: request.runId } : {}),
+            ...(request.sessionFile ? { resultRef: { kind: "pi-session" as const, path: request.sessionFile } } : {}),
+        }
+        : { kind: summary.runtime };
+    const withoutRuntimeCaptures = (summary: PersistentSubagentSummary): PersistentSubagentSummary => {
+        const { runId: _runId, sessionFile: _sessionFile, ...visible } = summary;
+        return visible;
     };
     const receiptForCursorFailure = (error: unknown): { readonly failure: SubagentCursorPromptFailure; readonly receipt?: CursorDeliveryReceipt } | undefined => {
         if (!(error instanceof SubagentCursorPromptFailure)) return undefined;
@@ -1070,6 +1204,8 @@ export default function (
         prepareArguments: prepareSubagentArguments,
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
             let deferredMutation: unknown;
+            let recoveryId: string | undefined;
+            let recoveryAttempt: SubagentPromptRecovery | undefined;
             let fallbackDetails: Record<string, unknown> = {};
             let fallbackText = "";
             try {
@@ -1093,6 +1229,7 @@ export default function (
                     if (runtime === "cursor-cloud" && params.skills?.length) {
                         throw new Error("skills are not valid for runtime cursor-cloud");
                     }
+                    const targetContract = normalizeSubagentTargetContract(params.target_contract);
                     const selectedSkillPaths = resolveSelectedSubagentSkills(params.skills, parentDiscoveredSkills);
                     validateSelectedPersonaSkills(persona, params.skills, parentDiscoveredSkills);
                     const initialPrompt = params.prompt?.trim();
@@ -1123,6 +1260,7 @@ export default function (
                         ...(params.name?.trim() ? { name: params.name.trim() } : {}),
                         ...(persona ? { persona } : {}),
                         skills: selectedSkillPaths,
+                        ...(targetContract ? { targetContract } : {}),
                         lifetime,
                         ...settings,
                     };
@@ -1162,6 +1300,7 @@ export default function (
                         }
                         throw error;
                     }
+                    recoveryId = summary.id;
                     fallbackDetails = fallback
                         ? { fork: { requested: "fork", mode: "fresh", fallback } }
                         : {};
@@ -1177,7 +1316,7 @@ export default function (
                                 tool: "subagent",
                                 action: "create",
                                 subagent: summary,
-                                runtime: runtimeDetailsFor(summary),
+                                runtime: { kind: summary.runtime },
                                 ...fallbackDetails,
                                 ...persistenceDetails,
                             },
@@ -1185,13 +1324,19 @@ export default function (
                     }
                     let lastProgress = "";
                     let promptReturned = false;
+                    onUpdate?.({
+                        content: [{ type: "text", text: `Created ${summary.name}; waiting for its result.` }],
+                        details: { ok: true, tool: "subagent", action: "create", subagent: summary, runtime: { kind: summary.runtime } },
+                    });
                     try {
+                        recoveryAttempt = { dispatched: false };
                         const result = await registry.prompt(
                             ctx,
                             summary.id,
                             formatSubagentRequest(initialPrompt, context),
                             {
                                 signal,
+                                recovery: recoveryAttempt,
                                 parentContextProvided: context !== undefined,
                                 onStateChange: (current) => {
                                     const progress = `${current.name} · ${current.status}`;
@@ -1199,7 +1344,7 @@ export default function (
                                     lastProgress = progress;
                                     onUpdate?.({
                                         content: [{ type: "text", text: progress }],
-                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current },
+                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current, runtime: { kind: current.runtime } },
                                     });
                                 },
                             },
@@ -1216,21 +1361,28 @@ export default function (
                         // Do not archive it when output preparation fails, but retry Pi
                         // one-shot cleanup when finalization or stop itself rejects.
                         if ((!promptReturned || summary.runtime === "pi") && !(error instanceof SubagentCursorPromptFailure)) {
-                            await stopFailedOneShot(summary);
+                            try { await stopFailedOneShot(summary, signal); }
+                            catch { /* Preserve the prompt failure and always release deferred fork persistence. */ }
                         }
                         finishForkPersistence();
                         throw error;
                     }
                 }
                 case "list": {
+                    const offset = params.offset ?? 0;
+                    const limit = params.limit ?? 20;
                     if (params.kind === "personas") {
-                        const offset = params.offset ?? 0;
-                        const limit = params.limit ?? 20;
                         const page: SubagentPersona[] = [];
+                        const personaMetadata = new Map<SubagentPersona, SubagentPersonaMetadata | undefined>();
+                        const metadataFor = (persona: SubagentPersona) => {
+                            if (!personaMetadata.has(persona)) personaMetadata.set(persona, readPersonaMetadata(options.piLaunchPolicy, persona));
+                            return personaMetadata.get(persona);
+                        };
+                        const displayPersona = (persona: SubagentPersona) => formatPersonaForModel(persona, metadataFor(persona));
                         let nextOffset = offset;
                         while (nextOffset < discovery.personas.length && page.length < limit) {
                             const persona = discovery.personas[nextOffset]!;
-                            const candidate = [...page, persona].map(formatPersonaForModel).join("\n");
+                            const candidate = [...page, persona].map(displayPersona).join("\n");
                             const candidateNextOffset = nextOffset + 1;
                             const candidateText = candidateNextOffset < discovery.personas.length
                                 ? `${candidate}\nMore personas available: repeat list with offset ${candidateNextOffset}.`
@@ -1244,7 +1396,7 @@ export default function (
                         }
                         const remaining = Math.max(0, discovery.personas.length - nextOffset);
                         const pageText = page.length > 0
-                            ? page.map(formatPersonaForModel).join("\n")
+                            ? page.map(displayPersona).join("\n")
                             : discovery.personas.length === 0
                                 ? "No subagent personas are configured."
                                 : offset >= discovery.personas.length
@@ -1253,48 +1405,67 @@ export default function (
                         const text = remaining > 0 && page.length > 0
                             ? `${pageText}\nMore personas available: repeat list with offset ${nextOffset}.`
                             : pageText;
-                        const personas = page.map(({
-                            name,
-                            description,
-                            runtime,
-                            contextRequirements,
-                        }) => ({
-                            name,
-                            description,
-                            runtime,
-                            ...(contextRequirements ? { contextRequirements } : {}),
-                        }));
+                        const personas = page.map((persona) => {
+                            const metadata = metadataFor(persona);
+                            return {
+                                name: persona.name,
+                                description: persona.description,
+                                runtime: persona.runtime,
+                                ...(persona.contextRequirements ? { contextRequirements: persona.contextRequirements } : {}),
+                                ...(metadata ? { metadata } : {}),
+                            };
+                        });
                         return {
                             content: [{ type: "text", text: boundedText(text, "Persona page truncated") }],
                             details: { ok: true, tool: "subagent", action: "list", kind: "personas", personas, omitted: remaining },
                         };
                     }
-                    if (params.offset !== undefined || params.limit !== undefined) {
-                        throw new Error("offset and limit are only valid for persona lists");
+                    const reusable = registry.list().filter((subagent) => subagent.status !== "stopped");
+                    const page: PersistentSubagentSummary[] = [];
+                    let nextOffset = offset;
+                    while (nextOffset < reusable.length && page.length < limit) {
+                        const subagent = reusable[nextOffset]!;
+                        const candidate = [...page, subagent].map((summary) => formatSubagentForModel(summary, true)).join("\n");
+                        const candidateNextOffset = nextOffset + 1;
+                        const candidateText = candidateNextOffset < reusable.length
+                            ? `${candidate}\nMore subagents available: repeat list with offset ${candidateNextOffset}.`
+                            : candidate;
+                        if (responseNeedsDiscovery(candidateText)) break;
+                        page.push(subagent);
+                        nextOffset = candidateNextOffset;
                     }
-                    const subagents = registry.list();
-                    const reusable = subagents.filter((subagent) => subagent.status !== "stopped");
-                    const text = reusable.length > 0
-                        ? reusable.map((subagent) => formatSubagentForModel(subagent, true)).join("\n")
-                        : "No reusable subagents.";
+                    const remaining = Math.max(0, reusable.length - nextOffset);
+                    const pageText = page.length > 0
+                        ? page.map((subagent) => formatSubagentForModel(subagent, true)).join("\n")
+                        : reusable.length === 0
+                            ? "No reusable subagents."
+                            : offset >= reusable.length
+                                ? "No reusable subagents at this offset."
+                                : "No reusable subagent fits in one result page.";
+                    const text = remaining > 0 && page.length > 0
+                        ? `${pageText}\nMore subagents available: repeat list with offset ${nextOffset}.`
+                        : pageText;
                     return {
-                        content: [{ type: "text", text: boundedText(text, "Subagent list truncated") }],
-                        details: { ok: true, tool: "subagent", action: "list", kind: "subagents", subagents: subagents.slice(0, 100), omitted: Math.max(0, subagents.length - 100) },
+                        content: [{ type: "text", text }],
+                        details: { ok: true, tool: "subagent", action: "list", kind: "subagents", subagents: page, omitted: remaining },
                     };
                 }
                 case "prompt": {
                     const id = requireText(params.id, "id");
                     const prompt = requireText(params.prompt, "prompt");
+                    recoveryId = id;
                     const summary = registry.summaryFor(id);
                     let lastProgress = "";
                     let promptReturned = false;
                     try {
+                        recoveryAttempt = { dispatched: false };
                         const result = await registry.prompt(
                             ctx,
                             id,
                             formatSubagentRequest(prompt, context),
                             {
                                 signal,
+                                recovery: recoveryAttempt,
                                 parentContextProvided: context !== undefined,
                                 onStateChange: (current) => {
                                     const progress = `${current.name} · ${current.status}`;
@@ -1302,7 +1473,7 @@ export default function (
                                     lastProgress = progress;
                                     onUpdate?.({
                                         content: [{ type: "text", text: progress }],
-                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current },
+                                        details: { ok: true, tool: "subagent", action: "prompt", subagent: current, runtime: { kind: current.runtime } },
                                     });
                                 },
                             },
@@ -1314,21 +1485,23 @@ export default function (
                         // Do not archive it when output preparation fails, but retry Pi
                         // one-shot cleanup when finalization or stop itself rejects.
                         if ((!promptReturned || summary.runtime === "pi") && !(error instanceof SubagentCursorPromptFailure)) {
-                            await stopFailedOneShot(summary);
+                            try { await stopFailedOneShot(summary, signal); }
+                            catch { /* Preserve the prompt failure. */ }
                         }
                         throw error;
                     }
                 }
                 case "status": {
                     const summary = await registry.status(requireText(params.id, "id"));
+                    const runtime = runtimeDetailsFor(summary);
                     return {
-                        content: [{ type: "text", text: formatSubagentForModel(summary) }],
+                        content: [{ type: "text", text: [formatSubagentForModel(summary), runtime.report].filter(Boolean).join("\n\n") }],
                         details: {
                             ok: true,
                             tool: "subagent",
                             action: "status",
                             subagent: summary,
-                            runtime: runtimeDetailsFor(summary),
+                            runtime,
                         },
                     };
                 }
@@ -1341,7 +1514,7 @@ export default function (
                             tool: "subagent",
                             action: "stop",
                             subagent: summary,
-                            runtime: runtimeDetailsFor(summary),
+                            runtime: { kind: summary.runtime },
                         },
                     };
                 }
@@ -1349,13 +1522,46 @@ export default function (
             } catch (error) {
                 const failure = subagentFailure(error, signal);
                 const cursorFailure = receiptForCursorFailure(error);
+                let recovery: { summary: PersistentSubagentSummary; metadata: ReturnType<typeof runtimeDetailsFor> } | undefined;
+                let cancelledBeforeDispatch = false;
+                let cancellationWithoutRequestRun = false;
+                if (recoveryId) {
+                    try {
+                        let summary = registry.summaryFor(recoveryId);
+                        if (signal?.aborted && summary.runtime === "pi" && summary.lifetime === "one-shot") {
+                            summary = await registry.setLifetime(recoveryId, "task");
+                        }
+                        cancellationWithoutRequestRun = Boolean(
+                            signal?.aborted && summary.runtime === "pi" && !recoveryAttempt?.runId,
+                        );
+                        cancelledBeforeDispatch = Boolean(cancellationWithoutRequestRun && !recoveryAttempt?.dispatched);
+                        const metadata = cancelledBeforeDispatch
+                            ? { kind: "pi" as const }
+                            : signal?.aborted && summary.runtime === "pi" && recoveryAttempt?.dispatched
+                                ? requestRuntimeDetails(summary, recoveryAttempt)
+                                : runtimeDetailsFor(summary);
+                        recovery = {
+                            summary: cancellationWithoutRequestRun ? withoutRuntimeCaptures(summary) : summary,
+                            metadata,
+                        };
+                    } catch { /* Preserve the original failure when no retained record is available. */ }
+                }
+                const recoveryText = recovery && signal?.aborted && recovery.summary.runtime === "pi"
+                    ? cancelledBeforeDispatch
+                        ? cancellationBeforeDispatchNotice(recovery.summary)
+                        : recoveryAttempt?.dispatched
+                            ? recoveryNotice(recovery.summary, recoveryAttempt)
+                            : ""
+                    : "";
                 return {
                     ...failure,
-                    content: fallbackText
-                        ? [{ type: "text" as const, text: `${fallbackText}${failure.content[0].text}` }]
-                        : failure.content,
+                    content: [{
+                        type: "text" as const,
+                        text: [fallbackText, failure.content[0].text, recoveryText].filter(Boolean).join("\n\n"),
+                    }],
                     details: {
                         ...failure.details,
+                        ...(recovery ? { subagent: recovery.summary, runtime: recovery.metadata } : {}),
                         ...(cursorFailure ? {
                             subagent: cursorFailure.failure.summary,
                             runtime: cursorFailure.failure.metadata,

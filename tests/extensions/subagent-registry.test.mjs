@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,7 @@ const {
 } = await import("../../extensions/subagents/registry.ts");
 const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("../../extensions/subagents/cursor-backend.ts");
 const { buildCursorCloudFollowUp } = await import("../../extensions/subagents/cursor-context.ts");
+const { SUBAGENT_EXTENSION_PATHS } = await import("../../extensions/subagents/personas.ts");
 
 test("registry creates controllers with its injected backend factory", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-factory-"));
@@ -82,10 +83,13 @@ test("registry creates controllers with its injected backend factory", async (t)
       respondToExtensionUI() {},
     };
   };
+  const piLaunchPolicy = Object.assign((input) => input, {
+    getResultMetadata: () => ({ liveUsage: { source: "recorded-call-ids" }, report: "Recorded live-call usage from the policy callback." }),
+  });
   const registry = new PersistentSubagentRegistry({
     getThinkingLevel: () => "low",
     appendEntry(...entry) { entries.push(entry); },
-  }, backendFactory);
+  }, backendFactory, undefined, undefined, piLaunchPolicy);
   registry.restore(context);
   const summary = registry.create(context, {
     mode: "fresh",
@@ -95,6 +99,10 @@ test("registry creates controllers with its injected backend factory", async (t)
 
   const result = await registry.prompt(context, summary.id, "Use the injected backend");
   assert.equal(result.text, "Factory result");
+  const metadata = registry.runtimeMetadataFor(summary.id);
+  assert.equal(metadata.runId, "factory-run");
+  assert.deepEqual(metadata.liveUsage, { source: "recorded-call-ids" });
+  assert.equal(metadata.report, "Recorded live-call usage from the policy callback.");
   assert.equal(factoryCalls.length, 1);
   assert.equal(factoryCalls[0].cwd, root);
   assert.ok(factoryCalls[0].args.includes("--mode"));
@@ -115,7 +123,7 @@ function registryContext(root, branch = []) {
   };
 }
 
-function controlledPiBackendFactory({ rejectPrompt } = {}) {
+function controlledPiBackendFactory({ rejectPrompt, sessionFile } = {}) {
   const pendingRuns = [];
   let nextRun = 0;
   const backendFactory = (options) => ({
@@ -129,7 +137,7 @@ function controlledPiBackendFactory({ rejectPrompt } = {}) {
       modelControls: false,
       thinkingControls: false,
       sessionHistory: false,
-      sessionFile: false,
+      sessionFile: Boolean(sessionFile),
       usage: false,
       toolOutput: false,
     },
@@ -161,6 +169,7 @@ function controlledPiBackendFactory({ rejectPrompt } = {}) {
         thinkingLevel: "off",
         isStreaming: false,
         isCompacting: false,
+        ...(sessionFile ? { sessionFile } : {}),
       };
     },
     async getHistory() { return []; },
@@ -181,6 +190,123 @@ async function waitForPendingRuns(pendingRuns, expected) {
   }
   assert.equal(pendingRuns.length, expected);
 }
+
+test("one-shot Pi startup cancellation retains its session when promoted to a task", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-startup-cancel-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionDir = join(root, "persistent-subagents", "registry-persistence-parent");
+  const sessionFile = join(sessionDir, "startup.jsonl");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(sessionFile, "synthetic startup session");
+  let releaseStart;
+  let enteredStart;
+  const startGate = new Promise((resolve) => { releaseStart = resolve; });
+  const startEntered = new Promise((resolve) => { enteredStart = resolve; });
+  let stopCalls = 0;
+  let promptCalls = 0;
+  const backendFactory = (options) => ({
+    runtime: "pi",
+    displayName: "Starting Pi",
+    capabilities: {
+      extensionUi: false, steering: false, queuedFollowUp: false, settledFollowUp: false,
+      modelControls: false, thinkingControls: false, sessionHistory: false, sessionFile: true,
+      usage: false, toolOutput: false,
+    },
+    async start() { enteredStart(); await startGate; },
+    async stop() { stopCalls++; },
+    getDiagnostics() { return ""; },
+    async prompt() { promptCalls++; throw new Error("startup cancellation must not dispatch"); },
+    async steer() {}, async followUp() { throw new Error("Unsupported"); }, async abort() {},
+    async getState() {
+      return {
+        connection: { id: "startup-connection", runtime: "pi" },
+        thinkingLevel: "off", isStreaming: false, isCompacting: false, sessionFile,
+      };
+    },
+    async getHistory() { return []; }, async getSessionStats() { return {}; },
+    async getAvailableModels() { return []; }, async setModel() { throw new Error("Unsupported"); },
+    async cycleModel() { return null; }, async setThinkingLevel() {}, async cycleThinkingLevel() { return null; },
+    respondToExtensionUI() {},
+  });
+  const registry = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} }, backendFactory);
+  const context = registryContext(root);
+  registry.restore(context);
+  const created = registry.create(context, {
+    mode: "fresh", name: "startup-one-shot", purpose: "Retain startup context after cancellation", lifetime: "one-shot",
+  });
+  const cancellation = new AbortController();
+  const recovery = { dispatched: false };
+  const pending = registry.prompt(context, created.id, "Start the requested work", { signal: cancellation.signal, recovery });
+  await startEntered;
+  cancellation.abort(new Error("Cancelled during startup"));
+  releaseStart();
+  await assert.rejects(pending, /Cancelled during startup/);
+  assert.equal(recovery.dispatched, false);
+  assert.equal(recovery.run, undefined);
+  assert.equal(recovery.runId, undefined);
+  assert.equal(recovery.sessionFile, undefined);
+  assert.equal(promptCalls, 0);
+
+  const retained = await registry.setLifetime(created.id, "task");
+  assert.equal(retained.lifetime, "task");
+  assert.equal(retained.sessionFile, sessionFile, "promotion preserves startup session context");
+  assert.equal(stopCalls, 1, "promotion closes the one-shot controller after it saves session state");
+  await registry.shutdown();
+});
+
+test("one-shot Pi cancellation retains its dispatched run and session when promoted to a task", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-cancel-persist-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionDir = join(root, "persistent-subagents", "registry-persistence-parent");
+  const sessionFile = join(sessionDir, "retained.jsonl");
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(sessionFile, "synthetic retained session");
+  const entries = [];
+  const context = registryContext(root);
+  const { backendFactory, pendingRuns } = controlledPiBackendFactory({ sessionFile });
+  const registry = new PersistentSubagentRegistry({
+    getThinkingLevel: () => "low",
+    appendEntry(customType, data) { entries.push({ customType, data }); },
+  }, backendFactory);
+  registry.restore(context);
+  const created = registry.create(context, {
+    mode: "fresh", name: "cancelled-one-shot", purpose: "Retain one-shot state after parent cancellation", lifetime: "one-shot",
+  });
+  const cancellation = new AbortController();
+  const recovery = { dispatched: false };
+  const pending = registry.prompt(context, created.id, "Wait for retained evidence", { signal: cancellation.signal, recovery });
+  await waitForPendingRuns(pendingRuns, 1);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  cancellation.abort(new Error("Parent cancelled task wait"));
+  await assert.rejects(pending, /Parent cancelled task wait/);
+
+  const beforePromotion = entries.at(-1).data.upserts.find((item) => item.id === created.id);
+  assert.ok(beforePromotion.lastActiveAt > created.lastActiveAt);
+  assert.equal(beforePromotion.lifetime, "one-shot");
+  assert.equal(beforePromotion.lastRunId, "controlled-1");
+  assert.equal(beforePromotion.sessionFile, sessionFile);
+  assert.equal(recovery.dispatched, true);
+  assert.equal(recovery.runId, "controlled-1");
+  assert.equal(recovery.sessionFile, sessionFile);
+
+  const promoted = await registry.setLifetime(created.id, "task");
+  assert.equal(promoted.lifetime, "task");
+  assert.equal(promoted.runId, "controlled-1");
+  assert.equal(promoted.sessionFile, sessionFile);
+  const persisted = entries.at(-1).data.upserts.find((item) => item.id === created.id);
+  assert.equal(persisted.lifetime, "task");
+  assert.equal(persisted.lastRunId, "controlled-1");
+  assert.equal(persisted.sessionFile, sessionFile);
+
+  const restored = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
+  restored.restore(registryContext(root, entries.map(({ customType, data }) => ({ type: "custom", customType, data }))));
+  const retained = restored.summaryFor(created.id);
+  assert.equal(retained.lifetime, "task");
+  assert.equal(retained.runId, "controlled-1");
+  assert.equal(retained.sessionFile, sessionFile);
+  await registry.shutdown();
+  await restored.shutdown();
+});
 
 function storedPi(root, id, name) {
   return {
@@ -251,6 +377,61 @@ function registryBranch(subagents, version = 3) {
     },
   }];
 }
+
+test("Pi target contracts are bounded, immutable, and persist through fork restore", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-target-contract-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const parentSessionFile = join(root, "parent.jsonl");
+  await writeFile(parentSessionFile, `${JSON.stringify({
+    type: "session", version: 3, id: "parent-session", timestamp: "2025-01-01T00:00:00.000Z", cwd: root,
+  })}\n`);
+  const entries = [];
+  const context = registryContext(root);
+  const registry = new PersistentSubagentRegistry({
+    getThinkingLevel: () => "low",
+    appendEntry(customType, data) { entries.push({ customType, data }); },
+  });
+  registry.restore(context);
+
+  const targets = ["src/worker.ts", "tests/worker.test.mjs"];
+  const created = registry.create(context, {
+    name: "contract-worker", purpose: "Implement only the declared targets", mode: "fork", parentSessionFile,
+    targetContract: { targets },
+  });
+  targets.push("outside/after-create.ts");
+  const stored = registry.resolve(created.id).stored;
+  assert.equal(stored.mode, "fork");
+  assert.ok(Object.isFrozen(stored.targetContract));
+  assert.ok(Object.isFrozen(stored.targetContract.targets));
+  assert.deepEqual(stored.targetContract, { targets: ["src/worker.ts", "tests/worker.test.mjs"] });
+  assert.throws(() => stored.targetContract.targets.push("mutate-stored.ts"), TypeError);
+
+  const persisted = entries.at(-1).data.upserts.find((entry) => entry.id === created.id);
+  assert.deepEqual(persisted.targetContract, stored.targetContract);
+  const restored = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
+  restored.restore(registryContext(root, registryBranch([persisted])));
+  const restoredContract = restored.resolve(created.id).stored.targetContract;
+  assert.ok(Object.isFrozen(restoredContract));
+  assert.ok(Object.isFrozen(restoredContract.targets));
+  assert.deepEqual(restoredContract, { targets: ["src/worker.ts", "tests/worker.test.mjs"] });
+
+  const beforeInvalid = entries.length;
+  for (const [index, targetContract] of [
+    { targets: Array.from({ length: 21 }, (_, item) => `target-${item}`) },
+    { targets: ["x".repeat(129)] },
+    { targets: ["valid"], extra: true },
+  ].entries()) {
+    assert.throws(() => registry.create(context, {
+      name: `invalid-contract-${index}`, purpose: "Reject an invalid target contract", mode: "fresh", targetContract,
+    }), /target_contract/);
+  }
+  assert.equal(entries.length, beforeInvalid, "invalid contracts persist no record");
+
+  const invalidPersisted = { ...persisted, id: "invalid-contract-record", name: "invalid-contract-record", targetContract: { targets: ["x".repeat(129)] } };
+  const rejectsInvalidRestore = new PersistentSubagentRegistry({ getThinkingLevel: () => "low", appendEntry() {} });
+  rejectsInvalidRestore.restore(registryContext(root, registryBranch([persisted, invalidPersisted])));
+  assert.deepEqual(rejectsInvalidRestore.list().map(({ name }) => name), ["contract-worker"]);
+});
 
 test("registry limits concurrent work without limiting dormant continuity", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-concurrency-"));
@@ -464,6 +645,48 @@ test("registry persists tombstones for pruned normalized version 3 records", asy
   assert.equal(replay.list().length, 20);
   assert.equal(replay.list().some(({ id }) => id === "v3-1"), false);
   assert.equal(replay.summaryFor("v3-21").blocker, undefined);
+});
+
+test("restored Pi persona extensions preserve built-in refs and skip filesystem resolution", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-registry-builtin-extensions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stored = storedPi(root, "builtin-persona", "builtin-persona");
+  stored.persona = {
+    name: "codemode-scout",
+    description: "Inspect a bounded task",
+    systemPrompt: "Inspect the requested scope.",
+    runtime: "pi",
+    extensions: ["builtin:codemode", "builtin:mcp", "/removed/persona-extension.ts"],
+    skills: [],
+    filePath: "/personas/codemode-scout.md",
+  };
+  const { backendFactory: controlledFactory, pendingRuns } = controlledPiBackendFactory();
+  const launchedArgs = [];
+  const registry = new PersistentSubagentRegistry({
+    getThinkingLevel: () => "low",
+    appendEntry() {},
+  }, (options) => {
+    launchedArgs.push(options.args);
+    return controlledFactory(options);
+  });
+  const context = registryContext(root, registryBranch([stored]));
+  registry.restore(context);
+
+  const pendingPrompt = registry.prompt(context, stored.id, "Inspect the requested scope");
+  await waitForPendingRuns(pendingRuns, 1);
+  const args = launchedArgs[0];
+  const extensions = args.flatMap((value, index) => value === "--extension" ? [args[index + 1]] : []);
+  assert.equal(args.includes("--no-extensions"), true);
+  assert.equal(args.includes("--tools"), false);
+  assert.deepEqual(extensions, [
+    ...SUBAGENT_EXTENSION_PATHS,
+    "builtin:codemode",
+    "builtin:mcp",
+    "/removed/persona-extension.ts",
+  ]);
+  pendingRuns[0].settle("Restored persona started");
+  assert.equal((await pendingPrompt).text, "Restored persona started");
+  await registry.shutdown();
 });
 
 test("malformed stored persona context does not abort versioned restore", async (t) => {

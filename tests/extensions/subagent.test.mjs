@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,7 +14,7 @@ const {
   runSubagentDialog,
 } = await import("../../extensions/subagents/ui.ts");
 const { visibleWidth } = await import("@earendil-works/pi-tui");
-const { initTheme } = await import("@earendil-works/pi-coding-agent");
+const { initTheme, SessionManager } = await import("@earendil-works/pi-coding-agent");
 const {
   SubagentSessionController,
   MAX_SUBAGENT_PANEL_DETAILS_CHARS,
@@ -25,6 +26,7 @@ const { CursorCloudBackend, createCursorSubagentLifecyclePort } = await import("
 const { PiRpcBackend } = await import("../../extensions/subagents/pi-backend.ts");
 const { CursorModelCatalog } = await import("../../extensions/subagents/cursor-models.ts");
 const { normalizePersonaDescription } = await import("../../extensions/subagents/personas.ts");
+const { ForkSourceValidationError, getForkSourceFailureDetails, validateForkSourceFile } = await import("../../extensions/subagents/fork.ts");
 const { SUBAGENT_COMPLETION_GUIDANCE } = await import("../../extensions/subagents/completion.ts");
 const {
   BUNDLED_PERSONA_DIRECTORY,
@@ -37,6 +39,7 @@ const {
   getSubagentPanelWidths,
   resolveSelectedSubagentSkills,
   createActiveTurnForkSnapshot,
+  selectForkSnapshotEntries,
   loadSubagentPersonas,
   loadSubagentPersonasFromDirectories,
   MAX_CONCURRENT_SUBAGENTS,
@@ -242,15 +245,19 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.deepEqual(tools.map(({ name }) => name), ["subagent"]);
   assert.deepEqual(tools[0].parameters.properties.action.enum, ["create", "list", "prompt", "status", "stop"]);
   assert.deepEqual(Object.keys(tools[0].parameters.properties), [
-    "action", "id", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "prompt", "context", "kind", "offset", "limit",
+    "action", "id", "name", "purpose", "persona", "runtime", "lifetime", "mode", "skills", "target_contract", "prompt", "context", "kind", "offset", "limit",
   ]);
+  assert.equal(tools[0].parameters.properties.target_contract.properties.targets.maxItems, 20);
+  assert.equal(tools[0].parameters.properties.target_contract.properties.targets.items.minLength, 1);
+  assert.equal(tools[0].parameters.properties.target_contract.properties.targets.items.maxLength, 128);
+  assert.equal(tools[0].parameters.properties.target_contract.additionalProperties, false);
   assert.equal(tools[0].parameters.properties.purpose.description, "Stable objective for creation and reuse");
   assert.equal(tools[0].parameters.properties.purpose.maxLength, 240);
   assert.match(tools[0].parameters.properties.persona.description, /exact listed persona.*required for Pi/i);
   for (const field of ["profile", "model", "thinking"]) {
     assert.equal(Object.hasOwn(tools[0].parameters.properties, field), false);
   }
-  assert.match(tools[0].parameters.properties.runtime.description, /persona runtime.*persona-less create requires cursor-cloud/i);
+  assert.match(tools[0].parameters.properties.runtime.description, /runtime.*persona-less create requires cursor-cloud/i);
   assert.deepEqual(tools[0].parameters.properties.lifetime.enum, ["one-shot", "task", "persistent"]);
   assert.match(tools[0].parameters.properties.lifetime.description, /task default.*one-shot needs prompt/i);
   assert.deepEqual(tools[0].parameters.properties.mode.enum, ["fresh", "fork"]);
@@ -260,6 +267,15 @@ test("extension exposes one concise subagent tool and persistent-session command
   assert.equal(tools[0].parameters.properties.prompt.description, "Current request; starts create or prompt");
   assert.equal(tools[0].parameters.properties.context.maxLength, 8_000);
   assert.equal(tools[0].parameters.properties.context.description, "Concise background sent only with prompt; required by some personas first");
+  assert.equal(tools[0].parameters.properties.offset.description, "List offset");
+  assert.equal(tools[0].parameters.properties.limit.description, "List count; 20 default");
+  assert.equal(tools[0].parameters.properties.limit.minimum, 1);
+  assert.equal(tools[0].parameters.properties.limit.maximum, 50);
+  for (const limit of [0, -1, 51, 1.5, "1", null]) {
+    assert.deepEqual(tools[0].prepareArguments({ action: "list", limit }), {
+      action: "list", context: "invalid input",
+    });
+  }
   assert.deepEqual(tools[0].promptGuidelines, [
     "Before subagent create, check retained agents and list unknown personas. Select by output. Prefer a fitting specialist; otherwise use explorer for investigation or advice. Use worker only for explicitly assigned owned changes or workflows.",
     "For subagent create, send concise context with a prompt; omit both for dormant creation. Meet persona first-prompt context requirements. Persona-less create requires cursor-cloud.",
@@ -311,6 +327,96 @@ test("extension exposes one concise subagent tool and persistent-session command
     [controlHeavyField]: true,
   });
   assert.ok(Buffer.byteLength(boundedError.content[0].text, "utf8") <= 2_000);
+});
+
+test("subagent lists apply limit and offset to reusable entries in both text and details", async (t) => {
+  const tools = [];
+  subagentsModule.default({
+    registerTool(tool) { tools.push(tool); },
+    registerCommand() {}, registerShortcut() {}, on() {},
+  });
+  const tool = tools[0];
+  const reusable = Array.from({ length: MAX_RETAINED_SUBAGENTS }, (_, index) => ({
+    id: `sa_${index}`, name: `agent-${index}`, runtime: index % 2 ? "cursor-cloud" : "pi",
+    status: index === 0 ? "blocked" : "idle", lifetime: "task", purpose: `Inspect area ${index}`,
+    ...(index === 0 ? { blocker: { reason: "Missing evidence", need: "Provide evidence" } } : {}),
+    createdAt: index, lastActiveAt: MAX_RETAINED_SUBAGENTS - index,
+  }));
+  const stopped = { ...reusable[0], id: "sa_stopped", name: "stopped-agent", status: "stopped" };
+  let entries = [stopped, ...reusable];
+  t.mock.method(PersistentSubagentRegistry.prototype, "list", () => entries);
+
+  const full = await tool.execute("list-default", { action: "list" });
+  assert.equal(full.details.ok, true);
+  assert.deepEqual(full.details.subagents, reusable);
+  assert.equal(full.details.omitted, 0);
+  assert.doesNotMatch(full.content[0].text, /stopped-agent|More subagents/);
+  for (const kind of [undefined, "subagents"]) {
+    const first = await tool.execute("list-first", { action: "list", kind, limit: 1 });
+    assert.equal(first.details.ok, true);
+    assert.deepEqual(first.details.subagents, reusable.slice(0, 1));
+    assert.equal(first.details.omitted, reusable.length - 1);
+    assert.equal(first.content[0].text, "agent-0 [pi, blocked, task]: Inspect area 0; blocked: Missing evidence; needs: Provide evidence\nMore subagents available: repeat list with offset 1.");
+  }
+  const middle = await tool.execute("list-middle", { action: "list", offset: 1, limit: 2 });
+  assert.deepEqual(middle.details.subagents, reusable.slice(1, 3));
+  assert.equal(middle.details.omitted, reusable.length - 3);
+  assert.equal(middle.content[0].text, "agent-1 [cursor-cloud, idle, task]: Inspect area 1\nagent-2 [pi, idle, task]: Inspect area 2\nMore subagents available: repeat list with offset 3.");
+
+  const last = await tool.execute("list-last", { action: "list", offset: reusable.length - 1, limit: 50 });
+  assert.deepEqual(last.details.subagents, reusable.slice(-1));
+  assert.equal(last.details.omitted, 0);
+  assert.doesNotMatch(last.content[0].text, /More subagents/);
+  const beyond = await tool.execute("list-beyond", { action: "list", offset: 10_000, limit: 1 });
+  assert.deepEqual(beyond.details.subagents, []);
+  assert.equal(beyond.details.omitted, 0);
+  assert.equal(beyond.content[0].text, "No reusable subagents at this offset.");
+
+  for (const empty of [[stopped], []]) {
+    entries = empty;
+    const result = await tool.execute("list-empty", { action: "list", limit: 1 });
+    assert.deepEqual(result.details.subagents, []);
+    assert.equal(result.details.omitted, 0);
+    assert.equal(result.content[0].text, "No reusable subagents.");
+  }
+});
+
+test("subagent list pages preserve complete entries within the response budget", async (t) => {
+  const tools = [];
+  subagentsModule.default({
+    registerTool(tool) { tools.push(tool); },
+    registerCommand() {}, registerShortcut() {}, on() {},
+  });
+  const tool = tools[0];
+  const entries = Array.from({ length: MAX_RETAINED_SUBAGENTS }, (_, index) => ({
+    id: `sa_${index}`, name: `agent-${index}`, runtime: "pi", status: "blocked", lifetime: "task",
+    purpose: "界".repeat(240), blocker: { reason: "界".repeat(240), need: "界".repeat(240) },
+    createdAt: index, lastActiveAt: MAX_RETAINED_SUBAGENTS - index,
+  }));
+  t.mock.method(PersistentSubagentRegistry.prototype, "list", () => entries);
+  const seen = [];
+  while (seen.length < entries.length) {
+    const result = await tool.execute("list-budget", { action: "list", offset: seen.length, limit: 50 });
+    assert.equal(result.details.ok, true);
+    const page = result.details.subagents;
+    const text = result.content[0].text;
+    assert.ok(page.length > 0);
+    assert.ok(page.length < entries.length);
+    assert.ok(Buffer.byteLength(text, "utf8") <= MAX_SUBAGENT_RESPONSE_BYTES);
+    assert.ok(text.split("\n").length <= MAX_SUBAGENT_RESPONSE_LINES);
+    assert.deepEqual(page, entries.slice(seen.length, seen.length + page.length));
+    for (const entry of page) {
+      assert.ok(text.includes(`${entry.name} [pi, blocked, task]: ${entry.purpose}; blocked: ${entry.blocker.reason}; needs: ${entry.blocker.need}`));
+    }
+    seen.push(...page);
+    assert.equal(result.details.omitted, entries.length - seen.length);
+    if (result.details.omitted > 0) {
+      assert.ok(text.endsWith(`More subagents available: repeat list with offset ${seen.length}.`));
+    } else {
+      assert.doesNotMatch(text, /More subagents/);
+    }
+  }
+  assert.deepEqual(seen, entries);
 });
 
 test("subagent command accepts only a leading complete --fork option", () => {
@@ -1962,8 +2068,107 @@ test("active-turn fork snapshots end at the latest parent user request", async (
   assert.throws(() => createActiveTurnForkSnapshot({
     ...sessionManager,
     getBranch: () => editedBranch,
-  }, join(root, "edited")), /use fresh context/);
+  }, join(root, "edited")), (error) => {
+    assert.equal(error.category, "stale");
+    assert.match(error.recoveryAction, /mode "fresh"/);
+    assert.match(error.message, /No child was launched/);
+    return true;
+  });
   assert.equal(existsSync(join(root, "edited")), false);
+});
+
+test("Pi fork validation bounds header inspection and follows native session-loader tolerance", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-subagent-fork-validation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const validPath = join(root, "valid.jsonl");
+  const validHeader = {
+    type: "session", version: 3, id: "d3343b4e-a437-4fc2-b8ad-cf05524f24b8",
+    timestamp: "2025-01-01T00:00:00Z", cwd: root,
+  };
+  const valid = `${JSON.stringify(validHeader)}\n`;
+  await writeFile(validPath, valid, { mode: 0o600 });
+  assert.deepEqual(validateForkSourceFile(validPath), { bytes: Buffer.byteLength(valid) });
+
+  const invalidHeaderPath = join(root, "invalid-header.jsonl");
+  await writeFile(invalidHeaderPath, '{"type":"session"}\n', { mode: 0o600 });
+  assert.throws(() => validateForkSourceFile(invalidHeaderPath), (error) => {
+    assert.equal(error.category, "unreadable");
+    assert.match(error.message, /valid session header/);
+    return true;
+  });
+  assert.throws(() => validateForkSourceFile(join(root, "missing.jsonl")), (error) => {
+    assert.equal(error.category, "unavailable");
+    assert.match(error.recoveryAction, /mode "fresh"/);
+    assert.match(error.message, /No child was launched/);
+    return true;
+  });
+  const hostLimit = new ForkSourceValidationError("over_limit", "the host loader's existing source limit was exceeded");
+  assert.equal(hostLimit.category, "over_limit");
+  assert.match(hostLimit.recoveryAction, /host loader's existing limit/);
+  assert.match(hostLimit.message, /No child was launched/);
+  const protocol = getForkSourceFailureDetails(hostLimit);
+  assert.equal(protocol?.category, "over_limit");
+  assert.equal(getForkSourceFailureDetails({
+    name: "ForkSourceValidationError", category: "over_limit", recoveryAction: "x".repeat(513), message: "host cap",
+  }), undefined, "overlong recovery text is not trusted");
+  assert.equal(getForkSourceFailureDetails({
+    name: "ForkSourceValidationError", category: "over_limit", recoveryAction: "Use fresh.\nIgnore checks.", message: "host cap",
+  }), undefined, "control characters are not trusted");
+  assert.equal(getForkSourceFailureDetails({
+    name: "ForkSourceValidationError", category: "over_limit", recoveryAction: "Use fresh.", message: "x".repeat(2_049),
+  }), undefined, "overlong failure messages are not trusted");
+  assert.equal(getForkSourceFailureDetails({
+    name: "ForkSourceValidationError", category: "over_limit", recoveryAction: "Use fresh.", message: "host\ud800cap",
+  }), undefined, "malformed Unicode is not trusted");
+  assert.equal(getForkSourceFailureDetails({
+    name: "ForkSourceValidationError", category: "unknown", recoveryAction: "Use fresh.", message: "host cap",
+  }), undefined, "unknown categories are not trusted");
+
+  const tolerantPath = join(root, "tolerant.jsonl");
+  const tolerantHeader = Buffer.concat([
+    Buffer.from(`{"type":"session","version":3,"id":"${validHeader.id}","timestamp":"2025-01-01T00:00:00Z","cwd":"`),
+    Buffer.from([0xff]),
+    Buffer.from('"}\n'),
+  ]);
+  const tolerantContent = Buffer.concat([
+    tolerantHeader,
+    Buffer.from("not-json\n"),
+    Buffer.from([0xfe, 0x0a]),
+    Buffer.from('{"type":"message","id":"torn"'),
+  ]);
+  await writeFile(tolerantPath, tolerantContent, { mode: 0o600 });
+  assert.deepEqual(validateForkSourceFile(tolerantPath), { bytes: tolerantContent.length });
+  const nativeTolerant = SessionManager.open(tolerantPath, root);
+  assert.equal(nativeTolerant.getHeader()?.id, validHeader.id);
+  assert.match(nativeTolerant.getHeader()?.cwd ?? "", /\ufffd/);
+
+  const largeMessage = "x".repeat(9.9 * 1024 * 1024);
+  const largeUser = {
+    type: "message", id: "user-large", parentId: null, timestamp: "2025-01-01T00:00:01Z",
+    message: { role: "user", content: largeMessage, timestamp: 1 },
+  };
+  const largeParentPath = join(root, "large-parent.jsonl");
+  const largeParent = `${valid}${JSON.stringify(largeUser)}\n`;
+  await writeFile(largeParentPath, largeParent, { mode: 0o600 });
+  const largeBytes = Buffer.byteLength(largeParent);
+  assert.ok(largeBytes > 8 * 1024 * 1024);
+  assert.deepEqual(validateForkSourceFile(largeParentPath), { bytes: largeBytes });
+  const loadedLargeParent = SessionManager.open(largeParentPath, root);
+  assert.equal(loadedLargeParent.getHeader()?.id, validHeader.id);
+  const largeSnapshot = createActiveTurnForkSnapshot(loadedLargeParent, join(root, "large-snapshot"));
+  assert.equal(largeSnapshot.mode, "fork");
+  assert.deepEqual(largeSnapshot.inheritedEntryIds, ["user-large"]);
+  assert.ok((await stat(largeSnapshot.parentSessionFile)).size > 8 * 1024 * 1024);
+
+  assert.throws(() => selectForkSnapshotEntries([
+    { type: "message", id: "request", parentId: null, timestamp: "2025-01-01T00:00:00Z", message: { role: "user", content: "request" } },
+    { type: "context_edit", id: "edit", parentId: "request", targetId: "request", replacement: null },
+  ]), (error) => {
+    assert.equal(error.category, "stale");
+    assert.match(error.recoveryAction, /current parent state/);
+    assert.match(error.message, /No child was launched/);
+    return true;
+  });
 });
 
 test("persistent subagent registry stores branch-local mutations and restores dormant instances", async (t) => {
@@ -2613,7 +2818,21 @@ Execute the assigned work.
       getLeafId: () => parentLeaf,
     },
   };
-  subagentsModule.default(pi, { personaDirectory });
+  const personaMetadataCalls = [];
+  let piLaunchFailure;
+  const piLaunchPolicy = Object.assign((launch) => {
+    if (piLaunchFailure) throw piLaunchFailure;
+    return { ...launch, env: { ...launch.env } };
+  }, {
+    getPersonaMetadata(persona) {
+      assert.ok(Object.isFrozen(persona));
+      assert.ok(Object.isFrozen(persona.skills));
+      personaMetadataCalls.push(persona.name);
+      if (persona.name === "implementer") throw new Error("PRIVATE_METADATA_FAILURE".repeat(100));
+      return { skills: ["display-only-skill"], tools: ["display-only-tool"] };
+    },
+  });
+  subagentsModule.default(pi, { personaDirectory, piLaunchPolicy });
   events.get("session_start")({}, context);
   events.get("before_agent_start")({
     systemPromptOptions: {
@@ -2631,12 +2850,37 @@ Execute the assigned work.
     ["persona-less-default-pi", { action: "create", purpose: "Investigate a regression" }, /Persona-less Pi create is not valid.*explorer for investigation or advice.*worker only for explicitly assigned changes or state-changing workflows/i],
     ["persona-less-explicit-pi", { action: "create", runtime: "pi", purpose: "Create a pull request" }, /Persona-less Pi create is not valid.*explorer for investigation or advice.*worker only for explicitly assigned changes or state-changing workflows/i],
     ["command-only-skill", { action: "create", persona: "worker", purpose: "Create a pull request", skills: ["command-only"] }, /Unknown subagent skill.*exact parent skill name/],
+    ["invalid-target-contract", { action: "create", persona: "worker", purpose: "Reject invalid targets", target_contract: { targets: ["x".repeat(129)] } }, /^target_contract/],
   ]) {
     const result = await tool.execute(id, input, signal, undefined, context);
     assert.equal(result.details.ok, false, id);
     assert.equal(result.details.error.code, "INVALID_INPUT", id);
     assert.match(result.details.error.message, expected, id);
   }
+
+  const personaPage = await tool.execute("persona-metadata-display", { action: "list", kind: "personas" }, signal, undefined, context);
+  assert.deepEqual(personaMetadataCalls, ["implementer", "worker"]);
+  assert.match(personaPage.content[0].text, /display-only-skill.*display-only-tool/);
+  assert.doesNotMatch(personaPage.content[0].text, /PRIVATE_METADATA_FAILURE/);
+  assert.ok(Buffer.byteLength(personaPage.content[0].text) < 16 * 1024);
+  const workerPersonaDetails = personaPage.details.personas.find(({ name }) => name === "worker");
+  assert.deepEqual(workerPersonaDetails.metadata, { skills: ["display-only-skill"], tools: ["display-only-tool"] });
+  const implementerPersonaDetails = personaPage.details.personas.find(({ name }) => name === "implementer");
+  assert.equal(Object.hasOwn(implementerPersonaDetails, "metadata"), false, "a failed display hook is omitted without leaking its exception");
+
+  const unknownPersona = await tool.execute("unknown-persona-hint", {
+    action: "create", persona: "missing-persona", purpose: "Report allowed persona choices",
+  }, signal, undefined, context);
+  assert.equal(unknownPersona.details.error.code, "INVALID_INPUT");
+  assert.match(unknownPersona.details.error.message, /allowed personas: implementer, worker/i);
+  assert.ok(Buffer.byteLength(unknownPersona.details.error.message) < 2_000);
+
+  const displayOnlySkill = await tool.execute("display-metadata-does-not-authorize", {
+    action: "create", persona: "worker", purpose: "Reject display-only skill metadata", skills: ["display-only-skill"],
+  }, signal, undefined, context);
+  assert.equal(displayOnlySkill.details.error.code, "INVALID_INPUT");
+  assert.match(displayOnlySkill.details.error.message, /Allowed skills: create-pr, writing-style/);
+  assert.doesNotMatch(displayOnlySkill.details.error.message.split("Allowed skills:")[1] ?? "", /display-only-skill/);
 
   const withoutSkills = await tool.execute("worker-without-skills", {
     action: "create",
@@ -2650,6 +2894,29 @@ Execute the assigned work.
   assert.equal(withoutSkills.details.subagent.lifetime, "task");
   assert.equal(withoutSkills.details.subagent.model, "openai-codex/gpt-6.1-sol");
   assert.deepEqual(latestStoredSubagent(entries, "controlled-create-parent", withoutSkills.details.subagent.id).selectedSkillPaths, []);
+  const crossRealmFailure = runInNewContext(`Object.assign(new Error("Host loader limit reached. No child was launched."), {
+    name: "ForkSourceValidationError",
+    category: "over_limit",
+    recoveryAction: "Reduce the source to fit the host loader's existing limit, or retry with mode fresh."
+  })`);
+  assert.equal(crossRealmFailure instanceof Error, false, "the host error comes from a separate module realm");
+  piLaunchFailure = crossRealmFailure;
+  let crossRealmResult;
+  try {
+    crossRealmResult = await tool.execute("cross-realm-host-loader-limit", {
+      action: "prompt",
+      id: withoutSkills.details.subagent.id,
+      prompt: "Start the host-limited child",
+      context: "Goal: verify cross-realm fork error details.",
+    }, signal, undefined, context);
+  } finally {
+    piLaunchFailure = undefined;
+  }
+  assert.equal(crossRealmResult.details.ok, false);
+  assert.equal(crossRealmResult.details.error.category, "over_limit");
+  assert.equal(crossRealmResult.details.error.recovery_action, crossRealmFailure.recoveryAction);
+  assert.match(crossRealmResult.details.error.message, /Host loader limit reached/);
+  assert.match(crossRealmResult.content[0].text, /No child was launched/);
   await tool.execute("stop-worker-without-skills", {
     action: "stop",
     id: "workflow-without-skills",
@@ -2697,6 +2964,24 @@ Execute the assigned work.
   assert.equal(conflict.details.error.code, "INVALID_INPUT");
   assert.match(conflict.details.error.message, /selected skill.*conflicts with persona.*different path/i);
 
+  const persistedEntriesBeforeInvalidFork = entries.length;
+  branch.push({ type: "context_edit", id: "invalid-fork-edit", parentId: "assistant-tool-call", targetId: "user-request", replacement: null });
+  const invalidFork = await tool.execute("worker-invalid-fork-source", {
+    action: "create",
+    mode: "fork",
+    name: "workflow-invalid-fork",
+    persona: "worker",
+    purpose: "Recover from an edited parent branch",
+    lifetime: "task",
+  }, signal, undefined, context);
+  assert.equal(invalidFork.details.ok, false);
+  assert.equal(invalidFork.details.error.category, "stale");
+  assert.match(invalidFork.details.error.recovery_action, /current parent state/);
+  assert.match(invalidFork.details.error.message, /No child was launched/);
+  assert.match(invalidFork.content[0].text, /No child was launched/);
+  assert.equal(entries.length, persistedEntriesBeforeInvalidFork, "fork validation fails before child persistence");
+  branch.pop();
+
   parentLeaf = "assistant-tool-call";
   const persistedEntriesBeforeFork = entries.length;
   const fork = await tool.execute("worker-fork", {
@@ -2707,11 +2992,14 @@ Execute the assigned work.
     purpose: "Create the requested pull request from parent context",
     lifetime: "task",
     skills: ["create-pr"],
+    target_contract: { targets: ["src/task.ts", "tests/task.test.mjs"] },
   }, signal, undefined, context);
   const storedFork = fork.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY].upserts[0];
   assert.equal(fork.content[0].text, "Created workflow-fork.");
   assert.ok(storedFork.parentSessionFile.startsWith(join(root, "persistent-subagents", "controlled-create-parent", "fork-snapshots")));
   assert.deepEqual(storedFork.selectedSkillPaths, ["/parent/skills/create-pr/SKILL.md"]);
+  assert.deepEqual(storedFork.targetContract, { targets: ["src/task.ts", "tests/task.test.mjs"] });
+  assert.ok(Object.isFrozen(storedFork.targetContract.targets));
   assert.equal(entries.length, persistedEntriesBeforeFork);
   assert.equal(context.sessionManager.getLeafId(), "assistant-tool-call");
   assert.doesNotMatch(await readFile(storedFork.parentSessionFile, "utf8"), /assistant-tool-call|subagent-call/);
@@ -2740,6 +3028,10 @@ Execute the assigned work.
   assert.deepEqual(restoredFork.resolve("workflow-fork").stored.selectedSkillPaths, [
     "/parent/skills/create-pr/SKILL.md",
   ]);
+  assert.deepEqual(restoredFork.resolve("workflow-fork").stored.targetContract, {
+    targets: ["src/task.ts", "tests/task.test.mjs"],
+  });
+  assert.ok(Object.isFrozen(restoredFork.resolve("workflow-fork").stored.targetContract.targets));
 
   parentPersisted = false;
   const fallback = await tool.execute("ephemeral-parent-fallback", {
@@ -2948,7 +3240,73 @@ Return a complete analysis.
 `);
 
   const originalPrompt = PersistentSubagentRegistry.prototype.prompt;
-  t.after(() => { PersistentSubagentRegistry.prototype.prompt = originalPrompt; });
+  const originalRuntimeMetadataFor = PersistentSubagentRegistry.prototype.runtimeMetadataFor;
+  const originalSummaryFor = PersistentSubagentRegistry.prototype.summaryFor;
+  const originalSetLifetime = PersistentSubagentRegistry.prototype.setLifetime;
+  const originalDeferPersistence = PersistentSubagentRegistry.prototype.deferPersistence;
+  const originalForkSnapshot = PersistentSubagentRegistry.prototype.createActiveTurnForkSnapshot;
+  const parentSessionFile = join(root, "parent.jsonl");
+  const delegatedSessionFile = join(root, "delegate-session.jsonl");
+  await writeFile(parentSessionFile, '{"type":"session","version":3,"id":"parent","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
+  await writeFile(delegatedSessionFile, '{"type":"session","version":3,"id":"delegate","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
+  let failCancellationPromotion = false;
+  let forkPersistenceFinishes = 0;
+  PersistentSubagentRegistry.prototype.setLifetime = async function (target, lifetime) {
+    if (failCancellationPromotion && lifetime === "task" && this.summaryFor(target).name === "canceled-one-shot") {
+      failCancellationPromotion = false;
+      throw new Error("Synthetic lifetime promotion failure");
+    }
+    return originalSetLifetime.call(this, target, lifetime);
+  };
+  PersistentSubagentRegistry.prototype.deferPersistence = function () {
+    const finish = originalDeferPersistence.call(this);
+    return () => {
+      forkPersistenceFinishes++;
+      return finish();
+    };
+  };
+  PersistentSubagentRegistry.prototype.createActiveTurnForkSnapshot = function () {
+    return { mode: "fork", parentSessionFile, inheritedEntryIds: [] };
+  };
+  PersistentSubagentRegistry.prototype.summaryFor = function (target) {
+    const summary = originalSummaryFor.call(this, target);
+    if (["pre-aborted-one-shot", "startup-cancelled-one-shot", "queued-cancel-agent", "dispatched-follow-up-agent"].includes(summary.name)) {
+      return { ...summary, runId: "unrelated-run-id", sessionFile: delegatedSessionFile };
+    }
+    return summary;
+  };
+  t.after(() => {
+    PersistentSubagentRegistry.prototype.prompt = originalPrompt;
+    PersistentSubagentRegistry.prototype.runtimeMetadataFor = originalRuntimeMetadataFor;
+    PersistentSubagentRegistry.prototype.summaryFor = originalSummaryFor;
+    PersistentSubagentRegistry.prototype.setLifetime = originalSetLifetime;
+    PersistentSubagentRegistry.prototype.deferPersistence = originalDeferPersistence;
+    PersistentSubagentRegistry.prototype.createActiveTurnForkSnapshot = originalForkSnapshot;
+  });
+  let cancelledMetadataReads = 0;
+  let staleMetadataReads = 0;
+  let startupPromptStarted = false;
+  let queuedPromptStarted = false;
+  let dispatchedFollowUpStarted = false;
+  let dispatchedPromptStarted = false;
+  PersistentSubagentRegistry.prototype.runtimeMetadataFor = function (target) {
+    const summary = this.summaryFor(target);
+    if (summary.name === "canceled-one-shot") {
+      cancelledMetadataReads++;
+      return {
+        kind: "pi", runId: "unrelated-run-id", resultRef: { kind: "pi-session", path: delegatedSessionFile },
+        report: "Earlier run report: Recorded live calls: 3; cumulative: 5.",
+      };
+    }
+    if (["pre-aborted-one-shot", "startup-cancelled-one-shot", "queued-cancel-agent", "dispatched-follow-up-agent"].includes(summary.name)) {
+      staleMetadataReads++;
+      return {
+        kind: "pi", runId: "unrelated-run-id", resultRef: { kind: "pi-session", path: delegatedSessionFile },
+        report: "Earlier run capture; do not repeat live reads.",
+      };
+    }
+    return originalRuntimeMetadataFor.call(this, target);
+  };
   const usage = {
     input: 0,
     output: 0,
@@ -2960,12 +3318,43 @@ Return a complete analysis.
   PersistentSubagentRegistry.prototype.prompt = async function (_ctx, target, prompt, options = {}) {
     const summary = this.summaryFor(target);
     if (prompt.includes("FAIL")) throw new Error("Synthetic one-shot failure");
-    if (prompt.includes("CANCEL")) {
-      await new Promise((_, reject) => {
-        const abort = () => reject(options.signal?.reason ?? new Error("Synthetic cancellation"));
-        if (options.signal?.aborted) abort();
-        else options.signal?.addEventListener("abort", abort, { once: true });
-      });
+    const waitForCancellation = async () => await new Promise((_, reject) => {
+      const abort = () => reject(options.signal?.reason ?? new Error("Synthetic cancellation"));
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener("abort", abort, { once: true });
+    });
+    if (prompt.includes("PRE-ABORT")) {
+      if (options.recovery) assert.equal(options.recovery.dispatched, false);
+      throw options.signal?.reason ?? new Error("Synthetic cancellation");
+    }
+    if (prompt.includes("STARTUP-CANCEL")) {
+      startupPromptStarted = true;
+      await waitForCancellation();
+    }
+    if (prompt.includes("QUEUED-CANCEL")) {
+      queuedPromptStarted = true;
+      await waitForCancellation();
+    }
+    if (prompt.includes("DISPATCHED-NO-RUN")) {
+      options.recovery.dispatched = true;
+      dispatchedFollowUpStarted = true;
+      await waitForCancellation();
+    }
+    if (prompt.includes("CANCEL") && !prompt.includes("STARTUP-CANCEL") && !prompt.includes("QUEUED-CANCEL")) {
+      options.recovery.dispatched = true;
+      options.recovery.run = { id: "pi-run-cancelled", runtime: "pi" };
+      dispatchedPromptStarted = true;
+      try {
+        await waitForCancellation();
+      } catch (error) {
+        options.recovery.runId = options.recovery.run.id;
+        const metadata = this.runtimeMetadataFor(target);
+        if (metadata.kind === "pi") {
+          if (metadata.resultRef?.path && existsSync(metadata.resultRef.path)) options.recovery.sessionFile = metadata.resultRef.path;
+          if (metadata.report) options.recovery.sessionReport = metadata.report;
+        }
+        throw error;
+      }
     }
     if (prompt.includes("BLOCKED-RESULT")) {
       const text = `BLOCKED: A required expected result is missing
@@ -3159,26 +3548,141 @@ NEEDS: The expected behavior from the parent`;
   assert.equal(failed.details.subagent.status, "stopped");
   assert.equal(failed.details.subagent.lifetime, "one-shot");
 
+  staleMetadataReads = 0;
+  const preAborted = new AbortController();
+  preAborted.abort(new Error("Cancelled before dispatch"));
+  const preAbortedResult = await tool.execute("pre-aborted-one-shot", {
+    action: "create",
+    name: "pre-aborted-one-shot",
+    persona: "bounded-analyst",
+    purpose: "Retain a request cancelled before dispatch",
+    lifetime: "one-shot",
+    prompt: "PRE-ABORT",
+  }, preAborted.signal, undefined, context);
+  assert.equal(preAbortedResult.details.error.code, "CANCELLED");
+  assert.equal(preAbortedResult.details.subagent.lifetime, "task");
+  assert.equal(preAbortedResult.details.subagent.runId, undefined);
+  assert.equal(preAbortedResult.details.subagent.sessionFile, undefined);
+  assert.deepEqual(preAbortedResult.details.runtime, { kind: "pi" });
+  assert.match(preAbortedResult.content[0].text, /Cancelled before dispatch/);
+  assert.match(preAbortedResult.content[0].text, /No work was started for this request/);
+  assert.match(preAbortedResult.content[0].text, /Retry it when ready/);
+  assert.doesNotMatch(preAbortedResult.content[0].text, /Run ID:|Session result reference|Earlier run capture|Do not repeat live reads/);
+  assert.equal(staleMetadataReads, 0, "pre-aborted requests do not read old runtime captures");
+
+  const startupCancellation = new AbortController();
+  const startupPrompt = tool.execute("startup-cancelled-one-shot", {
+    action: "create",
+    name: "startup-cancelled-one-shot",
+    persona: "bounded-analyst",
+    purpose: "Retain startup context when cancellation precedes dispatch",
+    lifetime: "one-shot",
+    prompt: "STARTUP-CANCEL",
+  }, startupCancellation.signal, undefined, context);
+  await waitFor(() => startupPromptStarted);
+  startupCancellation.abort(new Error("Cancelled during startup"));
+  const startupResult = await startupPrompt;
+  assert.equal(startupResult.details.error.code, "CANCELLED");
+  assert.equal(startupResult.details.subagent.lifetime, "task");
+  assert.equal(startupResult.details.subagent.runId, undefined);
+  assert.match(startupResult.content[0].text, /No work was started for this request/);
+  assert.match(startupResult.content[0].text, /Retry it when ready/);
+  assert.doesNotMatch(startupResult.content[0].text, /Run ID:|Session result reference|Earlier run capture|Do not repeat live reads/);
+  assert.equal(staleMetadataReads, 0, "startup cancellation does not claim old captures");
+
+  await tool.execute("create-queued-cancel-agent", {
+    action: "create",
+    name: "queued-cancel-agent",
+    persona: "bounded-analyst",
+    purpose: "Retain context before a queued cancellation",
+  }, signal, undefined, context);
+  const queuedCancellation = new AbortController();
+  const queuedPrompt = tool.execute("queued-cancel-prompt", {
+    action: "prompt",
+    id: "queued-cancel-agent",
+    prompt: "QUEUED-CANCEL",
+  }, queuedCancellation.signal, undefined, context);
+  await waitFor(() => queuedPromptStarted);
+  queuedCancellation.abort(new Error("Cancelled while queued"));
+  const queuedResult = await queuedPrompt;
+  assert.equal(queuedResult.details.error.code, "CANCELLED");
+  assert.equal(queuedResult.details.subagent.lifetime, "task");
+  assert.equal(queuedResult.details.subagent.runId, undefined);
+  assert.equal(queuedResult.details.subagent.sessionFile, undefined);
+  assert.deepEqual(queuedResult.details.runtime, { kind: "pi" });
+  assert.match(queuedResult.content[0].text, /No work was started for this request/);
+  assert.match(queuedResult.content[0].text, /Retry it when ready/);
+  assert.doesNotMatch(queuedResult.content[0].text, /Run ID:|Session result reference|unrelated-run-id|Earlier run capture|Do not repeat live reads/);
+  assert.equal(staleMetadataReads, 0, "queued cancellation does not read an unrelated run's captures");
+
+  await tool.execute("create-dispatched-follow-up-agent", {
+    action: "create",
+    name: "dispatched-follow-up-agent",
+    persona: "bounded-analyst",
+    purpose: "Retain a delegate for a follow-up queued on an active run",
+  }, signal, undefined, context);
+  const dispatchedFollowUpCancellation = new AbortController();
+  const dispatchedFollowUpPrompt = tool.execute("dispatched-follow-up-prompt", {
+    action: "prompt",
+    id: "dispatched-follow-up-agent",
+    prompt: "DISPATCHED-NO-RUN",
+  }, dispatchedFollowUpCancellation.signal, undefined, context);
+  await waitFor(() => dispatchedFollowUpStarted);
+  dispatchedFollowUpCancellation.abort(new Error("Cancelled dispatched follow-up"));
+  const dispatchedFollowUpResult = await dispatchedFollowUpPrompt;
+  assert.equal(dispatchedFollowUpResult.details.error.code, "CANCELLED");
+  assert.equal(dispatchedFollowUpResult.details.subagent.runId, undefined);
+  assert.equal(dispatchedFollowUpResult.details.subagent.sessionFile, undefined);
+  assert.deepEqual(dispatchedFollowUpResult.details.runtime, { kind: "pi" });
+  assert.match(dispatchedFollowUpResult.content[0].text, /Request was dispatched/);
+  assert.match(dispatchedFollowUpResult.content[0].text, /Check which retained captures cover this request/);
+  assert.match(dispatchedFollowUpResult.content[0].text, /repeat only reads it confirms are missing/i);
+  assert.doesNotMatch(dispatchedFollowUpResult.content[0].text, /Run ID:|Session result reference|unrelated-run-id|Earlier run capture|Do not repeat live reads/);
+  assert.equal(staleMetadataReads, 0, "a dispatched follow-up without its own run does not claim active-run captures");
+
+  cancelledMetadataReads = 0;
+  forkPersistenceFinishes = 0;
+  failCancellationPromotion = true;
   const cancellation = new AbortController();
   const canceledPrompt = tool.execute("canceled-one-shot", {
     action: "create",
+    mode: "fork",
     name: "canceled-one-shot",
     persona: "bounded-analyst",
     purpose: "Cancel one bounded request",
     lifetime: "one-shot",
     prompt: "CANCEL",
   }, cancellation.signal, undefined, context);
+  await waitFor(() => dispatchedPromptStarted);
   cancellation.abort(new Error("Parent canceled one-shot"));
   const canceledResult = await canceledPrompt;
   assert.equal(canceledResult.details.ok, false);
   assert.equal(canceledResult.details.error.code, "CANCELLED");
   assert.match(canceledResult.details.error.message, /Parent canceled one-shot/);
+  assert.equal(failCancellationPromotion, false);
+  assert.equal(forkPersistenceFinishes, 1);
+  const deferredForkMutation = canceledResult.details[SUBAGENT_REGISTRY_TOOL_DETAILS_KEY];
+  assert.ok(deferredForkMutation.upserts.some((item) => item.id === canceledResult.details.subagent.id));
+  assert.equal(canceledResult.details.subagent.lifetime, "task");
+  assert.ok(canceledResult.details.subagent.id);
+  assert.ok(canceledResult.content[0].text.includes(`Delegate ID: ${canceledResult.details.subagent.id}`));
+  assert.match(canceledResult.content[0].text, /Run ID: pi-run-cancelled/);
+  assert.ok(canceledResult.content[0].text.includes(`Shared Pi session reference (may include earlier requests): "${delegatedSessionFile}".`));
+  assert.match(canceledResult.content[0].text, /Session-level report \(may include earlier requests\): Earlier run report: Recorded live calls: 3; cumulative: 5/);
+  assert.equal(canceledResult.details.runtime.runId, "pi-run-cancelled");
+  assert.equal(canceledResult.details.runtime.resultRef.path, delegatedSessionFile);
+  assert.equal(cancelledMetadataReads, 1, "progress updates must not rescan the saved transcript");
+  assert.match(canceledResult.content[0].text, /Check which retained captures cover this request/);
+  assert.match(canceledResult.content[0].text, /repeat only reads it confirms are missing/i);
+  assert.doesNotMatch(canceledResult.content[0].text, /Do not repeat live reads/);
   const canceled = await tool.execute("canceled-status", {
     action: "status",
     id: "canceled-one-shot",
   }, signal, undefined, context);
-  assert.equal(canceled.details.subagent.status, "stopped");
-  assert.equal(canceled.details.subagent.lifetime, "one-shot");
+  assert.notEqual(canceled.details.subagent.status, "stopped");
+  assert.equal(canceled.details.subagent.lifetime, "task");
+  assert.match(canceled.content[0].text, /Recorded live calls: 3; cumulative: 5/);
+  assert.equal(cancelledMetadataReads, 2, "status may read the saved transcript once");
 
   await events.get("session_shutdown")({}, context);
 });
@@ -3256,7 +3760,8 @@ Inspect the project without changing it.
     ["thinking-on-create", { action: "create", persona: "test-scout", thinking: "low" }, /thinking is not valid for subagent action "create"/i],
     ["lifetime-on-list", { action: "list", lifetime: "task" }, /lifetime is only valid with create/i],
     ["persona-on-list", { action: "list", persona: "test-scout" }, /persona is not valid for subagent action "list"/i],
-    ["offset-on-subagent-list", { action: "list", offset: 1 }, /offset and limit are only valid for persona lists/i],
+    ["limit-on-create", { action: "create", persona: "test-scout", limit: 1 }, /limit is not valid for subagent action "create"/i],
+    ["offset-on-status", { action: "status", id: "missing", offset: 1 }, /offset is not valid for subagent action "status"/i],
     ["kind-on-create", { action: "create", kind: "personas", persona: "test-scout", purpose: "Invalid create field" }, /kind is not valid for subagent action "create"/i],
     ["purpose-on-status", { action: "status", id: "missing", purpose: "Invalid status field" }, /purpose is not valid for subagent action "status"/i],
     ["unknown-field", { action: "list", unexpected: true }, /unexpected is not valid for subagent action "list"/i],
@@ -3512,11 +4017,11 @@ test("bundled personas provide focused defaults and user personas override by na
   assert.deepEqual(
     bundled.personas.map(({ name, model, thinking }) => ({ name, model, thinking })),
     [
-      { name: "doc-auditor", model: "fireworks/accounts/fireworks/models/glm-5p3-flash", thinking: "high" },
+      { name: "doc-auditor", model: "anthropic/claude-haiku-5-5", thinking: "xhigh" },
       { name: "explorer", model: "openai-codex/gpt-6-luna", thinking: "high" },
-      { name: "reviewer", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
-      { name: "test-analyst", model: "fireworks/accounts/fireworks/models/glm-5p3", thinking: "high" },
-      { name: "worker", model: "openai-codex/gpt-6.1-sol", thinking: "xhigh" },
+      { name: "reviewer", model: "anthropic/claude-opus-5-5", thinking: "high" },
+      { name: "test-analyst", model: "anthropic/claude-opus-5-5", thinking: "high" },
+      { name: "worker", model: "openai-codex/gpt-6-luna", thinking: "max" },
     ],
   );
   assert.match(

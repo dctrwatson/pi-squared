@@ -58,6 +58,7 @@ function makeControllerHarness({
   clearQueueResult,
   clearQueueError,
   abortFailure,
+  startPromise,
   parentUi = {},
   select = async () => undefined,
 } = {}) {
@@ -75,6 +76,7 @@ function makeControllerHarness({
     extensionResponses: 0,
   };
   let stateReads = 0;
+  let startCalls = 0;
   const connection = { id: "fake-connection", runtime };
   const selectedCapabilities = { ...FULL_CAPABILITIES, ...capabilities };
   let callbacks;
@@ -95,7 +97,10 @@ function makeControllerHarness({
       runtime,
       displayName,
       capabilities: selectedCapabilities,
-      async start() {},
+      async start() {
+        startCalls++;
+        if (startPromise) await startPromise;
+      },
       async stop() { streaming = false; },
       ...(supportsObservationDisposal ? { async disposeObservation() {} } : {}),
       getDiagnostics() { return ""; },
@@ -173,12 +178,13 @@ function makeControllerHarness({
     controller,
     calls,
     stateReads: () => stateReads,
+    startCalls: () => startCalls,
     emit,
     startRun,
     currentRun: () => currentRun,
-    settle(run) {
+    settle(run, aborted = false) {
       streaming = false;
-      emit({ type: "run_settled", run });
+      emit({ type: "run_settled", run, ...(aborted ? { aborted: true } : {}) });
     },
     complete(run, text, stopReason = "stop") {
       emit({
@@ -216,6 +222,89 @@ test("controller uses normalized fake-backend events for a parent prompt and fol
   assert.equal(harness.controller.state.usage.turns, 0, "Pi does not invent a missing-usage turn");
   assert.equal(harness.controller.latestSettledAssistantText, "The backend seam is preserved.");
   await harness.controller.stop();
+});
+
+test("parent prompt dispatch tracking excludes pre-aborted, queued, and startup requests", async () => {
+  const preAborted = makeControllerHarness();
+  const preAbortedSignal = new AbortController();
+  preAbortedSignal.abort(new Error("cancel before dispatch"));
+  const preAbortedAttempt = { dispatched: false };
+  await assert.rejects(preAborted.controller.promptAndWait("Pre-aborted", preAbortedSignal.signal, preAbortedAttempt), /cancel before dispatch/);
+  assert.equal(preAbortedAttempt.dispatched, false);
+  assert.equal(preAbortedAttempt.run, undefined);
+  assert.equal(preAborted.calls.prompt.length, 0);
+  await preAborted.controller.stop();
+
+  const queued = makeControllerHarness();
+  const earlier = queued.controller.promptAndWait("Earlier request");
+  await waitFor(() => queued.calls.prompt.length === 1);
+  const earlierRun = queued.currentRun();
+  const queuedSignal = new AbortController();
+  const queuedAttempt = { dispatched: false };
+  const later = queued.controller.promptAndWait("Queued request", queuedSignal.signal, queuedAttempt);
+  queuedSignal.abort(new Error("cancel while queued"));
+  await assert.rejects(later, /cancel while queued/);
+  assert.equal(queuedAttempt.dispatched, false);
+  assert.equal(queuedAttempt.run, undefined);
+  assert.equal(queued.controller.state.lastRun?.id, earlierRun.id, "the controller still has the unrelated earlier run");
+  assert.deepEqual(queued.calls.prompt, ["Earlier request"]);
+  queued.complete(earlierRun, "Earlier result");
+  await earlier;
+  await queued.controller.stop();
+
+  let releaseStart;
+  const start = new Promise((resolve) => { releaseStart = resolve; });
+  const startup = makeControllerHarness({ startPromise: start });
+  const startupSignal = new AbortController();
+  const startupAttempt = { dispatched: false };
+  const startingPrompt = startup.controller.promptAndWait("Cancel during startup", startupSignal.signal, startupAttempt);
+  await waitFor(() => startup.startCalls() === 1);
+  startupSignal.abort(new Error("cancel during startup"));
+  releaseStart();
+  await assert.rejects(startingPrompt, /cancel during startup/);
+  assert.equal(startupAttempt.dispatched, false);
+  assert.equal(startupAttempt.run, undefined);
+  assert.deepEqual(startup.calls.prompt, []);
+  await startup.controller.stop();
+});
+
+test("parent prompt dispatch tracking records only a dispatched request run", async () => {
+  const harness = makeControllerHarness({
+    promptAcceptance: async (_text, signal, run, startRun) => {
+      startRun(run);
+      await new Promise((_, reject) => {
+        const abort = () => reject(signal.reason ?? new Error("cancel dispatched request"));
+        if (signal.aborted) abort();
+        else signal.addEventListener("abort", abort, { once: true });
+      });
+      return { run };
+    },
+  });
+  const signal = new AbortController();
+  const attempt = { dispatched: false };
+  const waiting = harness.controller.promptAndWait("Dispatch this request", signal.signal, attempt);
+  await waitFor(() => attempt.dispatched && attempt.run);
+  assert.equal(attempt.run.id, "fake-run-1");
+  signal.abort(new Error("cancel dispatched request"));
+  await assert.rejects(waiting, /cancel dispatched request/);
+  assert.equal(attempt.dispatched, true);
+  assert.equal(attempt.run.id, "fake-run-1");
+  await harness.controller.stop();
+
+  const active = makeControllerHarness();
+  await active.controller.start();
+  const unrelatedRun = active.startRun();
+  const followUpSignal = new AbortController();
+  const followUpAttempt = { dispatched: false };
+  const followUp = active.controller.promptAndWait("Queue a follow-up", followUpSignal.signal, followUpAttempt);
+  await waitFor(() => active.calls.followUp.length === 1);
+  assert.equal(followUpAttempt.dispatched, true);
+  assert.equal(followUpAttempt.run, undefined, "a follow-up queued on another run does not claim that run");
+  followUpSignal.abort(new Error("cancel queued follow-up"));
+  await assert.rejects(followUp, /cancel queued follow-up/);
+  assert.equal(followUpAttempt.run, undefined);
+  assert.equal(active.controller.state.lastRun?.id, unrelatedRun.id);
+  await active.controller.stop();
 });
 
 test("controller restores cleared Pi queue text to the panel before it aborts", async () => {
@@ -408,6 +497,92 @@ test("controller keeps a canceled active run busy until it settles", async () =>
   harness.complete(runB, "Completed after settlement");
   assert.equal((await next).text, "Completed after settlement");
   await harness.controller.stop();
+});
+
+test("controller rejects an aborted Pi run without an assistant completion and accepts the next run", async () => {
+  const runA = { id: "run-aborted-without-message", runtime: "pi" };
+  const runB = { id: "run-after-abort", runtime: "pi" };
+  const harness = makeControllerHarness({ promptRuns: [runA, runB] });
+  const cancelled = harness.controller.promptAndWait("Cancel before a response");
+  await waitFor(() => harness.calls.prompt.length === 1);
+
+  harness.settle(runA, true);
+
+  await assert.rejects(cancelled, /Subagent response aborted/);
+  await waitFor(() => !harness.controller.state.busy);
+  const next = harness.controller.promptAndWait("Continue after cancellation");
+  await waitFor(() => harness.calls.prompt.length === 2);
+  harness.complete(runB, "The next run succeeded.");
+  assert.equal((await next).text, "The next run succeeded.");
+  await harness.controller.stop();
+});
+
+test("controller cancellation overrides an earlier successful assistant completion", async () => {
+  const run = { id: "run-aborted-after-message", runtime: "pi" };
+  const harness = makeControllerHarness({
+    promptRuns: [run],
+    getRunCompletion() {
+      return Promise.resolve({ text: "Authoritative success", responseProduced: true, stopReason: "stop" });
+    },
+  });
+  const cancelled = harness.controller.promptAndWait("Cancel after a response");
+  await waitFor(() => harness.calls.prompt.length === 1);
+  harness.emit({
+    type: "message_completed",
+    run,
+    message: { role: "assistant", text: "Earlier response", thinking: "", stopReason: "stop" },
+  });
+  harness.settle(run, true);
+
+  await assert.rejects(cancelled, /Subagent response aborted/);
+  assert.equal(harness.controller.latestSettledAssistantText, undefined);
+  await harness.controller.stop();
+});
+
+test("controller preserves an earlier run error when Pi settles as aborted", async () => {
+  const run = { id: "run-error-then-abort", runtime: "pi" };
+  const harness = makeControllerHarness({
+    promptRuns: [run],
+    getRunCompletion() {
+      return Promise.resolve({ text: "Would otherwise succeed", responseProduced: true, stopReason: "stop" });
+    },
+  });
+  const failed = harness.controller.promptAndWait("Fail before cancellation");
+  await waitFor(() => harness.calls.prompt.length === 1);
+  harness.emit({
+    type: "message_completed",
+    run,
+    message: { role: "assistant", text: "", thinking: "", stopReason: "error", errorMessage: "Earlier failure" },
+  });
+  harness.settle(run, true);
+
+  await assert.rejects(failed, /Earlier failure/);
+  await harness.controller.stop();
+});
+
+test("settled aborts do not affect observation-only Pi runs or Cursor results", async () => {
+  const observation = { id: "human-run", runtime: "pi", parentOwned: false };
+  const pi = makeControllerHarness({ startOnPrompt: false });
+  await pi.controller.start();
+  pi.startRun(observation);
+  pi.settle(observation, true);
+  await waitFor(() => !pi.controller.state.busy);
+  assert.equal(pi.controller.latestSettledAssistantText, undefined);
+  await pi.controller.stop();
+
+  const cursorRun = { id: "cursor-run", runtime: "cursor-cloud" };
+  const cursor = makeControllerHarness({
+    runtime: "cursor-cloud",
+    promptRuns: [cursorRun],
+    getRunCompletion() {
+      return Promise.resolve({ text: "Cursor result", responseProduced: true, stopReason: "stop" });
+    },
+  });
+  const result = cursor.controller.promptAndWait("Keep Cursor settlement behavior");
+  await waitFor(() => cursor.calls.prompt.length === 1);
+  cursor.settle(cursorRun, true);
+  assert.equal((await result).text, "Cursor result");
+  await cursor.controller.stop();
 });
 
 test("Cursor parent cancellation keeps a non-aborted authoritative result pending without a receipt", async () => {

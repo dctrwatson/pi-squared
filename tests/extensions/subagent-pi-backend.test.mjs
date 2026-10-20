@@ -234,6 +234,21 @@ test("PiRpcBackend assigns one synthetic identity to each settled Pi run", () =>
   assert.equal(starts[2].run.id, settlements[1].run.id);
 });
 
+test("PiRpcBackend forwards only an explicit settled abort flag", () => {
+  const { events, emit } = makePiBackend({ state: { thinkingLevel: "off", isStreaming: false, isCompacting: false } });
+  emit({ type: "agent_start" });
+  emit({ type: "agent_settled", aborted: true });
+  emit({ type: "agent_start" });
+  emit({ type: "agent_settled", aborted: false });
+  emit({ type: "agent_start" });
+  emit({ type: "agent_settled" });
+
+  const settlements = events.filter((event) => event.type === "run_settled");
+  assert.deepEqual(settlements.map((event) => event.aborted), [true, undefined, undefined]);
+  assert.equal("aborted" in settlements[1], false);
+  assert.equal("aborted" in settlements[2], false);
+});
+
 test("PiRpcBackend bounds normalized events and fingerprints full delivered user text", async () => {
   const longPrompt = "prompt-".repeat(20_000);
   const longResponse = "response-".repeat(20_000);

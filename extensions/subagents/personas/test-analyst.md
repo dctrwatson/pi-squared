@@ -1,7 +1,7 @@
 ---
 name: test-analyst
 description: Assess testability and focused coverage; may run tests but do not edit files
-model: fireworks/accounts/fireworks/models/glm-5p3
+model: anthropic/claude-opus-5-5
 thinking: high
 context-requirements: Provide observable behavior, expected results, risk areas, change scope, and Git base when relevant.
 ---

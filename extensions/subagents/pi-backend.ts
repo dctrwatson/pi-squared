@@ -628,6 +628,8 @@ export class PiRpcBackend implements SubagentBackend {
         this.rpc = rpcFactory({
             cwd: options.cwd,
             args: [...options.args],
+            ...(options.env ? { env: options.env } : {}),
+            ...(options.invocation ? { invocation: options.invocation } : {}),
             onOutput: (output) => this.handleOutput(output),
             onExit: (details) => {
                 this.extensionUiResponseIds.clear();
@@ -807,7 +809,7 @@ export class PiRpcBackend implements SubagentBackend {
         if (output.type === "agent_settled") {
             const run = this.activeRun;
             if (!run) return;
-            this.options.onEvent({ type: "run_settled", run });
+            this.options.onEvent({ type: "run_settled", run, ...(output.aborted === true ? { aborted: true } : {}) });
             this.activeRun = undefined;
             return;
         }
