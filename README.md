@@ -1,35 +1,16 @@
 # π²
 
-Repository for maintaining skills, extensions, and harnesses for [Pi](https://buildwithpi.ai/).
+Repository for [Pi](https://buildwithpi.ai/) skills and extensions.
 
 Requires Node.js 22.19.0 or newer.
 
 ## Validation
 
-Run `npm run check` to check root and Hari TypeScript. Run `npm run test:quick`
-for the generic extension quick suite. Run `npm run test:hari` for all Hari tests,
-including the bundled offline native integration. `npm test` includes Hari tests.
+Run `npm run check` to check TypeScript. Run `npm run test:quick` for the
+extension quick suite. Run `npm test` for all extension and skill tests.
 
 See the [production audit gate](docs/production-audit.md) and
 [model context map](docs/model-context.md).
-
-## Hari harness
-
-Hari is an opt-in coordination agent. His harness source and detailed documents
-are in [harnesses/hari](harnesses/hari/README.md). This is the canonical Hari
-source location.
-
-Install shared dependencies from the repository root:
-
-```bash
-npm ci
-export PATH="$PWD/bin:$PATH"
-hari init
-hari
-```
-
-`bin/hari` is next to `bin/piw`. It starts Hari. An ordinary Pi launch does not
-load or activate Hari.
 
 ## Skills
 

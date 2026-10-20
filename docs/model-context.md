@@ -13,7 +13,6 @@ provider request or proves model behavior.
 | `extensions/agent-tools` | While each tool is active | Call contracts, bounded output, error and artifact recovery |
 | `extensions/subagents` | Active tool metadata; selected child profile; dispatch and completion | Scope, ownership, continuity, and concise evidence reports |
 | `extensions/workspace` | A session owns its workspace | Stable coding guidance and the conditional PM skill hint |
-| `harnesses/hari/src/context.ts` | A Hari role is active | Stable coordinator or manager responsibilities; live facts through tools |
 | `skills`, `manual-skills`, workspace PM skill | Metadata at discovery; full text on request or explicit selection | Task-specific procedures within existing authority |
 | `handoff.ts`, `qa.ts`, `agent-tools/web-search.ts` | A requested auxiliary model call | A narrow transformation or search, not continuation of the parent task |
 
@@ -52,9 +51,6 @@ with actual registered tool metadata. It checks active-tool selection, shared-ru
 deduplication, body exclusion, and a generous fixture size budget. This budget is
 in characters, not provider tokens.
 
-Hari's context and native integration tests check stable role composition and
-complete visible `manager_context` delivery. Its record-page test recovers source
-text using only model-visible continuation data. Cursor tests check UTF-8 limits
-and reject oversized caller input before SDK dispatch. These tests check
-contracts; live model quality and provider cache savings require separate
-evaluation.
+Cursor tests check UTF-8 limits and reject oversized caller input before SDK
+dispatch. These tests check contracts; live model quality and provider cache
+savings require separate evaluation.
