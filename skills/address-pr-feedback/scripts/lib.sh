@@ -38,6 +38,32 @@ feedback_remote_head() {
   git ls-remote --heads "$1" "refs/heads/$2" | awk 'NR == 1 { print $1 }'
 }
 
+feedback_wait_for_pr_head() {
+  local repo="$1" number="$2" branch="$3" base="$4" expected="$5"
+  local current observed remote attempt
+  local delays=(1 2 4 8 8)
+  for ((attempt = 0; attempt <= ${#delays[@]}; attempt++)); do
+    remote=$(feedback_remote_head origin "$branch") || feedback_die "Could not read origin/$branch during PR head confirmation"
+    [ "$remote" = "$expected" ] || feedback_die "origin/$branch does not match the publication head. Expected $expected; found ${remote:-<missing>}"
+    current=$(gh pr view "$number" --repo "$repo" --json number,state,baseRefName,headRefName,headRefOid,headRepository,isCrossRepository,url) || feedback_die "Could not read PR #$number during head confirmation"
+    jq -e --arg repo "$repo" --arg branch "$branch" --arg base "$base" --argjson number "$number" '
+      .number == $number and .state == "OPEN" and .headRefName == $branch and
+      .baseRefName == $base and .isCrossRepository == false and .headRepository.nameWithOwner == $repo
+    ' <<<"$current" >/dev/null || feedback_die "PR #$number is not open or its repository, head branch, or base changed"
+    observed=$(jq -er '.headRefOid | select(type == "string" and length > 0)' <<<"$current") || feedback_die "PR #$number returned no valid head SHA"
+    remote=$(feedback_remote_head origin "$branch") || feedback_die "Could not read origin/$branch after PR head confirmation"
+    [ "$remote" = "$expected" ] || feedback_die "origin/$branch does not match the publication head. Expected $expected; found ${remote:-<missing>}"
+    if [ "$observed" = "$expected" ]; then return 0; fi
+    if [ "$attempt" -lt "${#delays[@]}" ]; then
+      if [ "$attempt" -eq 0 ]; then
+        printf 'NOTE: origin/%s matches %s. Wait for the GitHub PR head to update.\n' "$branch" "$expected" >&2
+      fi
+      sleep "${delays[$attempt]}" || feedback_die "PR head confirmation wait failed"
+    fi
+  done
+  feedback_die "GitHub PR head did not match after $((attempt)) checks. Expected $expected; found $observed. origin/$branch still matches"
+}
+
 feedback_origin_repo() {
   local url="$1"
   local repo=""

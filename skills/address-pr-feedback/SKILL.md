@@ -60,6 +60,8 @@ The helper removes `pi:` from the publication range. It preserves commit count, 
 
 If the remote advanced safely, the helper rebases only the new local commits and exits without pushing. Resolve clear conflicts and continue, or abort the rebase when the result is ambiguous. Run validation again, then retry with the returned state and `--validated-head <HEAD>`.
 
+The helper waits for the GitHub PR head to match the pushed commit. For a delayed head or an API failure after a successful push, retry with the printed `PENDING_STATE` path. This checks the same head without another push or commit rewrite. Inspect remote or PR identity changes before you retry. Do not post replies until the helper returns published state.
+
 ## 6. Draft and post replies
 
 Before writing GitHub replies or summaries, load and follow the `writing-style` skill when it is available. For each GitHub PR, issue, comment, review, or commit reference, use a Markdown link with a full `https://github.com/owner/repo/...` URL. Do not use bare shorthand such as `#123`, `owner/repo#123`, a relative link, or an unlinked commit SHA. Use the prepared and published links when available.

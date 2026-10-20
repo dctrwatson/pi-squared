@@ -42,9 +42,9 @@ The publication helper:
 1. verifies the prepared repository, branch, PR, base, and remote head
 2. rejects merge commits in the publication range
 3. strips `pi:` from commit subjects without changing commit count or the final tree
-4. uses a normal fast-forward push for new commits
-5. uses an exact force-with-lease against the prepared PR head for a validated branch rewrite
-6. verifies `origin` and the GitHub PR head
+4. saves `pushed-state.json` before the push and prints its `PENDING_STATE` path
+5. uses a normal fast-forward push for new commits, or an exact force-with-lease against the prepared PR head for a validated branch rewrite
+6. checks `origin` and waits for the GitHub PR head to match
 7. writes `published-state.json` with Markdown commit links and recovery refs
 
 The helper never uses plain `--force`. A rewritten branch requires `--validated-head <HEAD>`. The helper rejects the rewrite if the remote PR head changed after preparation.
@@ -58,6 +58,22 @@ bash <skill_dir>/scripts/publish-feedback-commits.sh \
 ```
 
 If some local commits are already published, or the remote history changed in an unsafe way, the helper refuses the update. Reprepare when the local branch still matches the PR head. Otherwise, inspect and incorporate the remote change before you retry.
+
+### Delayed PR head confirmation
+
+GitHub can still report the old PR head after a successful push. The helper makes up to six head checks, with waits of 1, 2, 4, 8, and 8 seconds. Each check requires the exact expected `origin` head before and after the GitHub query. The PR must remain open, with the same repository, head branch, and base. API failures and identity changes stop the check; only a head mismatch causes a wait.
+
+Before the push, the helper saves the cleaned head, commit links, backup refs, source state, and requested output path in `pushed-state.json`. This state has `publication_pending: true` and no `published_head`. It is a recovery record, not proof that the push succeeded. Replies cannot use it for a real post.
+
+If confirmation times out or the command stops after the push, keep the local head unchanged and run:
+
+```bash
+bash <skill_dir>/scripts/publish-feedback-commits.sh --state <PENDING_STATE-path>
+```
+
+This path checks the recorded head without another push, rebase, or commit rewrite. It also works after a force-with-lease push and preserves the original `--output` path. Successful confirmation returns published state for replies. Do not use an old published-state file or add `published_head` by hand.
+
+If `origin`, local `HEAD`, or the PR identity changed, inspect the change and prepare again when the checkout matches the PR. If the push did not reach `origin`, confirmation stops without changing the remote. Check the push failure and use the original preparation state for a safe publication retry. Validate again if the local history changed.
 
 ## Reply manifest
 

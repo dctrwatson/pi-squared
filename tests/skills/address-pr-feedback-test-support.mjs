@@ -62,6 +62,7 @@ function fixtureAt(root) {
     REAL_GIT: realGit,
     ORIGIN_REPO: origin,
     GIT_LOG: join(root, "git.log"),
+    SLEEP_LOG: join(root, "sleep.log"),
     GIT_AUTHOR_NAME: "Test User",
     GIT_AUTHOR_EMAIL: "test@example.com",
     GIT_COMMITTER_NAME: "Test User",
@@ -142,9 +143,33 @@ if [[ "$1 $2" == "auth status" ]]; then exit 0; fi
 if [[ "$1 $2" == "repo view" ]]; then cat "$FAKE_GH_DIR/repo.json"; exit 0; fi
 if [[ "$1 $2" == "api user" ]]; then printf 'me\\n'; exit 0; fi
 if [[ "$1 $2" == "pr view" ]]; then
+  if [[ -e "$FAKE_GH_DIR/pushed" && -e "$FAKE_GH_DIR/pr-view-fail" ]]; then
+    echo 'PR view failed' >&2
+    exit 1
+  fi
   head=$("$REAL_GIT" --git-dir="$ORIGIN_REPO" rev-parse refs/heads/feature)
-  if [[ -s "$FAKE_GH_DIR/head-override" ]]; then head=$(cat "$FAKE_GH_DIR/head-override"); fi
-  jq --arg head "$head" '.headRefOid=$head' "$FAKE_GH_DIR/pr.json"
+  if [[ -e "$FAKE_GH_DIR/pushed" && -s "$FAKE_GH_DIR/pr-head-sequence" ]]; then
+    count=0
+    if [[ -s "$FAKE_GH_DIR/pr-confirm-count" ]]; then count=$(cat "$FAKE_GH_DIR/pr-confirm-count"); fi
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "$FAKE_GH_DIR/pr-confirm-count"
+    head=$(sed -n "\${count}p" "$FAKE_GH_DIR/pr-head-sequence")
+    if [[ -z "$head" ]]; then head=$(tail -n 1 "$FAKE_GH_DIR/pr-head-sequence"); fi
+  elif [[ -e "$FAKE_GH_DIR/pushed" && -s "$FAKE_GH_DIR/confirmation-head-override" ]]; then
+    head=$(cat "$FAKE_GH_DIR/confirmation-head-override")
+  elif [[ -s "$FAKE_GH_DIR/head-override" ]]; then
+    head=$(cat "$FAKE_GH_DIR/head-override")
+  fi
+  if [[ -e "$FAKE_GH_DIR/pushed" && -s "$FAKE_GH_DIR/pr-overrides.json" ]]; then
+    response=$(jq --arg head "$head" --slurpfile override "$FAKE_GH_DIR/pr-overrides.json" '. + $override[0] | .headRefOid=$head' "$FAKE_GH_DIR/pr.json")
+  else
+    response=$(jq --arg head "$head" '.headRefOid=$head' "$FAKE_GH_DIR/pr.json")
+  fi
+  if [[ -e "$FAKE_GH_DIR/pushed" && -s "$FAKE_GH_DIR/remote-change-on-pr-view" ]]; then
+    "$REAL_GIT" --git-dir="$ORIGIN_REPO" update-ref refs/heads/feature "$(cat "$FAKE_GH_DIR/remote-change-on-pr-view")"
+    rm "$FAKE_GH_DIR/remote-change-on-pr-view"
+  fi
+  printf '%s\\n' "$response"
   exit 0
 fi
 if [[ "$1" == "api" && " $* " == *" graphql "* ]]; then
@@ -183,11 +208,31 @@ if [[ "\${1:-}" == "remote" && "\${2:-}" == "get-url" && "\${3:-}" == "origin" ]
   printf 'https://github.com/octo/example.git\\n'
   exit 0
 fi
-if [[ "\${1:-}" == "push" ]]; then printf '%s\\n' "$*" >> "$GIT_LOG"; fi
+if [[ "\${1:-}" == "push" ]]; then
+  printf '%s\\n' "$*" >> "$GIT_LOG"
+  if [[ -e "$FAKE_GH_DIR/fail-before-push" ]]; then exit 74; fi
+  "$REAL_GIT" "$@"
+  touch "$FAKE_GH_DIR/pushed"
+  rm -f "$FAKE_GH_DIR/pr-confirm-count"
+  if [[ -e "$FAKE_GH_DIR/interrupt-after-push" ]]; then exit 77; fi
+  exit 0
+fi
 exec "$REAL_GIT" "$@"
 `;
   await writeFile(join(fakeBin, "git"), gitScript);
   await chmod(join(fakeBin, "git"), 0o755);
+
+  const sleepScript = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$SLEEP_LOG"
+if [[ -s "$FAKE_GH_DIR/change-remote-on-sleep" ]]; then
+  "$REAL_GIT" --git-dir="$ORIGIN_REPO" update-ref refs/heads/feature "$(cat "$FAKE_GH_DIR/change-remote-on-sleep")"
+  rm "$FAKE_GH_DIR/change-remote-on-sleep"
+fi
+`;
+  await writeFile(join(fakeBin, "sleep"), sleepScript);
+  await chmod(join(fakeBin, "sleep"), 0o755);
+  await writeFile(join(root, "sleep.log"), "");
 
 }
 
@@ -257,6 +302,7 @@ export {
   run,
   git,
   writeJson,
+  rm,
   createFixture,
   createPreparedFixture,
   prepare,

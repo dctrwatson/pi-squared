@@ -11,6 +11,7 @@ Usage: publish-feedback-commits.sh --state state.json [--validated-head sha] [--
 
 The helper publishes new commits or a validated PR branch rewrite. A successful
 automatic rebase does not push and requires validation before a later invocation.
+A pending publication state checks the pushed head without another push or rewrite.
 EOF
 }
 
@@ -42,7 +43,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$state_file" ] || { usage >&2; exit 1; }
-for command in git gh jq mktemp; do feedback_require_command "$command"; done
+for command in git gh jq mktemp sleep; do feedback_require_command "$command"; done
 feedback_require_repo
 feedback_require_clean_tree
 gh auth status >/dev/null 2>&1 || feedback_die "gh is not authenticated. Run 'gh auth login' first"
@@ -57,6 +58,38 @@ branch=$(feedback_json_value "$state_file" '.branch')
 repo=$(feedback_json_value "$state_file" '.repo')
 repo_url=$(feedback_json_value "$state_file" '.repo_url')
 pr_number=$(feedback_json_value "$state_file" '.pr.number')
+base_branch=$(feedback_json_value "$state_file" '.base_branch')
+[ "$(feedback_origin_repo "$(git remote get-url origin)")" = "$repo" ] || feedback_die "origin does not match the prepared GitHub repository"
+
+confirm_publication() {
+  local pending_file="$1" pending_head temporary retry_command remote source_state
+  pending_head=$(feedback_json_value "$pending_file" '.pending_head')
+  [ "$(git rev-parse HEAD)" = "$pending_head" ] || feedback_die "HEAD changed after publication preparation. Do not post replies"
+  if ! (feedback_wait_for_pr_head "$repo" "$pr_number" "$branch" "$base_branch" "$pending_head"); then
+    remote=$(feedback_remote_head origin "$branch" || true)
+    if [ "$remote" != "$pending_head" ]; then
+      source_state=$(feedback_json_value "$pending_file" '.publication_source_state')
+      feedback_die "Publication head is not confirmed at origin/$branch. Do not post replies. Inspect the remote and push result before retrying. If the push did not reach origin, validate HEAD and retry with preparation state: $source_state"
+    fi
+    printf -v retry_command 'bash %q --state %q' "$script_dir/publish-feedback-commits.sh" "$pending_file"
+    feedback_die "PR head confirmation failed. Do not post replies. Retry confirmation without a push: $retry_command"
+  fi
+  [ "$(git rev-parse HEAD)" = "$pending_head" ] || feedback_die "HEAD changed during PR head confirmation. Do not post replies"
+  if [ -z "$output_file" ]; then output_file=$(feedback_json_value "$pending_file" '.publication_output'); fi
+  output_file=$(feedback_absolute_path "$output_file")
+  temporary=$(mktemp "$output_file.XXXXXX")
+  jq --arg head "$pending_head" '.published_head=$head | .publication_pending=false | del(.pending_head)' "$pending_file" > "$temporary"
+  mv "$temporary" "$output_file"
+  printf 'PUBLISHED_HEAD=%s\n' "$pending_head"
+  printf 'STATE=%s\n' "$output_file"
+  printf 'PR=%s\n' "$(jq -r '"[#" + (.pr.number | tostring) + "](" + .pr.url + ")"' "$pending_file")"
+}
+
+if [ "$(jq -r '.publication_pending // false' "$state_file")" = "true" ]; then
+  confirm_publication "$state_file"
+  exit 0
+fi
+
 baseline=$(feedback_json_value "$state_file" '.remote_head_sha')
 local_head=$(git rev-parse HEAD)
 git cat-file -e "$baseline^{commit}" 2>/dev/null || feedback_die "Prepared PR head is not available locally"
@@ -75,7 +108,6 @@ pr_now=$(gh pr view "$pr_number" --repo "$repo" --json number,state,baseRefName,
 [ "$(jq -r '.state' <<<"$pr_now")" = "OPEN" ] || feedback_die "PR #$pr_number is not open"
 [ "$(jq -r '.headRefName' <<<"$pr_now")" = "$branch" ] || feedback_die "PR head branch changed"
 [ "$(jq -r '.headRefOid' <<<"$pr_now")" = "$current_remote" ] || feedback_die "GitHub PR head does not match origin/$branch"
-base_branch=$(feedback_json_value "$state_file" '.base_branch')
 [ "$(jq -r '.baseRefName' <<<"$pr_now")" = "$base_branch" ] || feedback_die "PR base branch changed. Prepare feedback again"
 
 publication_base="$baseline"
@@ -197,32 +229,37 @@ mapfile -t after_commits < <(git rev-list --reverse "$publication_base..$head")
 remaining=$(git log "$publication_base..$head" --format='%s' | grep '^pi:' || true)
 [ -z "$remaining" ] || feedback_die "pi: commits remain after cleanup. Backup: $backup_ref"
 
-if [ "$already_published" = false ] && [ "$before_count" -gt 0 ]; then
-  if [ "$force_push" = true ]; then
-    git push "--force-with-lease=refs/heads/$branch:$baseline" -u origin "HEAD:refs/heads/$branch"
-  else
-    git push -u origin "HEAD:refs/heads/$branch"
-  fi
-fi
-pushed_remote=$(feedback_remote_head origin "$branch")
-[ "$pushed_remote" = "$head" ] || feedback_die "origin/$branch does not match the local feedback head after push"
-pr_after=$(gh pr view "$pr_number" --repo "$repo" --json number,state,headRefName,headRefOid,url)
-[ "$(jq -r '.headRefOid' <<<"$pr_after")" = "$head" ] || feedback_die "GitHub PR head does not match the pushed feedback head. Do not post replies"
-
 if [ -z "$output_file" ]; then output_file="$(feedback_json_value "$state_file" '.workdir')/published-state.json"; fi
 output_file=$(feedback_absolute_path "$output_file")
+pending_file="$(feedback_json_value "$state_file" '.workdir')/pushed-state.json"
+pending_temporary=$(mktemp "$pending_file.XXXXXX")
 commits_file=$(mktemp)
 feedback_write_commit_json "$publication_base..$head" "$repo_url" "$commits_file"
 jq \
   --arg head "$head" \
   --arg publication_base "$publication_base" \
+  --arg source_state "$state_file" \
+  --arg publication_output "$output_file" \
   --arg backup_ref "$backup_ref" \
   --arg published_history_backup "$published_history_backup" \
   --argjson history_rewritten "$history_rewritten" \
   --slurpfile commits "$commits_file" \
-  '.local_head=$head | .published_head=$head | .publication_base_sha=$publication_base | .history_rewritten=$history_rewritten | .validation_required=false | .rebase_in_progress=false | .prefix_cleanup_backup=(if $backup_ref == "" then null else $backup_ref end) | .published_history_backup=(if $published_history_backup == "" then null else $published_history_backup end) | .published_commits=$commits[0]' \
-  "$state_file" > "$output_file"
+  'del(.published_head) | .local_head=$head | .pending_head=$head | .publication_pending=true | .publication_source_state=$source_state | .publication_output=$publication_output | .publication_base_sha=$publication_base | .history_rewritten=$history_rewritten | .validation_required=false | .rebase_in_progress=false | .prefix_cleanup_backup=(if $backup_ref == "" then null else $backup_ref end) | .published_history_backup=(if $published_history_backup == "" then null else $published_history_backup end) | .published_commits=$commits[0]' \
+  "$state_file" > "$pending_temporary"
 rm -f "$commits_file"
-printf 'PUBLISHED_HEAD=%s\n' "$head"
-printf 'STATE=%s\n' "$output_file"
-printf 'PR=%s\n' "$(jq -r '"[#" + (.pr.number | tostring) + "](" + .pr.url + ")"' "$state_file")"
+mv "$pending_temporary" "$pending_file"
+printf 'PENDING_STATE=%s\n' "$pending_file"
+
+if [ "$already_published" = false ] && [ "$before_count" -gt 0 ]; then
+  push_status=0
+  if [ "$force_push" = true ]; then
+    git push "--force-with-lease=refs/heads/$branch:$baseline" -u origin "HEAD:refs/heads/$branch" || push_status=$?
+  else
+    git push -u origin "HEAD:refs/heads/$branch" || push_status=$?
+  fi
+  if [ "$push_status" -ne 0 ]; then
+    printf 'ERROR: Push command failed. Do not post replies. Check origin/%s. If it matches %s, retry confirmation with %s. Otherwise, inspect the failure, validate HEAD, and retry with preparation state: %s\n' "$branch" "$head" "$pending_file" "$state_file" >&2
+    exit "$push_status"
+  fi
+fi
+confirm_publication "$pending_file"
