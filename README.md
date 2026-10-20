@@ -17,6 +17,7 @@ See the [production audit gate](docs/production-audit.md),
 
 - [**address-pr-feedback**](skills/address-pr-feedback/SKILL.md) — Handles GitHub PR feedback end-to-end: reviews comments and inline threads, makes or plans the appropriate changes, and posts replies on GitHub.
 - [**publish-pr**](skills/publish-pr/SKILL.md) — Creates PRs, publishes branch changes, or edits requested PR text. Cleans local `pi:` checkpoints before a push; branch-only updates preserve PR text and metadata.
+- [**pdc-incident-note**](skills/pdc-incident-note/SKILL.md) — Adds a note to a PagerDuty incident with `pdc`.
 
 ## Manual skills
 
