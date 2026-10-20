@@ -28,6 +28,7 @@ import {
   CREATE_WORKSPACE_TOOL,
   WORKSPACE_MERGE_FINALIZE_TOOL,
   handleWorkspace,
+  picker,
   WORKSPACE_HELP_TEXT,
   git,
   gitSucceeds,
@@ -75,14 +76,14 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     piArgs: [],
   });
   assert.deepEqual(parseLauncherArguments([
-    "--profile", "hari", "--expect-session", "/tmp/hari.jsonl", "feature/test", "--",
-    "--no-extensions", "-e", "/tmp/hari-extension", "--no-skills",
+    "--profile", "custom", "--expect-session", "/tmp/custom.jsonl", "feature/test", "--",
+    "--no-extensions", "-e", "/tmp/custom-extension", "--no-skills",
   ]), {
     parallel: false,
-    profile: "hari",
-    expectedSession: "/tmp/hari.jsonl",
+    profile: "custom",
+    expectedSession: "/tmp/custom.jsonl",
     target: "feature/test",
-    piArgs: ["--no-extensions", "-e", "/tmp/hari-extension", "--no-skills"],
+    piArgs: ["--no-extensions", "-e", "/tmp/custom-extension", "--no-skills"],
   });
   assert.deepEqual(parseLauncherArguments(["new", "feature/test", "--from", "current", "--worktree"]), {
     parallel: true,
@@ -105,14 +106,51 @@ test("workspace parsers distinguish branch and pull request identifiers", () => 
     piArgs: [],
   });
   assert.throws(() => parseLauncherArguments(["prune", "feature/test"]), /piw prune accepts no arguments/);
-  assert.throws(() => parseLauncherArguments(["--list", "feature/test"]), /piw --list accepts no arguments/);
-  assert.throws(() => parseLauncherArguments(["--list", "--worktree"]), /piw --list accepts no arguments/);
+  assert.throws(() => parseLauncherArguments(["--list", "feature/test"]), /piw --list accepts only/);
+  assert.throws(() => parseLauncherArguments(["--list", "--worktree"]), /piw --list accepts only/);
   assert.throws(() => parseLauncherArguments(["new"]), /piw new requires a branch name/);
-  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/hari.jsonl"]), /requires an explicit local branch target/);
-  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/hari.jsonl", "new", "feature/test"]), /cannot be used with piw new/);
+  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/custom.jsonl"]), /requires an explicit local branch target/);
+  assert.throws(() => parseLauncherArguments(["--expect-session", "/tmp/custom.jsonl", "new", "feature/test"]), /cannot be used with piw new/);
   assert.throws(() => parseNewWorkspace(["feature/test", "--parallel"]), /Unknown workspace option/);
   assert.throws(() => parseLauncherArguments(["--parallel"]), /Unknown piw option/);
   assert.throws(() => parseLauncherArguments(["--here"]), /Unknown piw option/);
+});
+
+test("new workspace parsers default to worktrees and accept an explicit primary checkout", () => {
+  for (const [flags, parallel] of [[[], true], [["--worktree"], true], [["--no-worktree"], false]]) {
+    for (const words of [["feature/test", ...flags], [...flags, "feature/test"]]) {
+      const create = { branch: "feature/test", parallel };
+      assert.deepEqual(parseNewWorkspace(words), create);
+      assert.deepEqual(parseLauncherArguments(["new", ...words]), { parallel, create, piArgs: [] });
+    }
+  }
+  for (const flags of [["--worktree", "--no-worktree"], ["--no-worktree", "--worktree"]]) {
+    assert.throws(() => parseNewWorkspace(["feature/test", ...flags]), /cannot be used together/);
+    assert.throws(() => parseLauncherArguments(["new", "feature/test", ...flags]), /cannot be used together/);
+  }
+  assert.throws(() => parseLauncherArguments(["--worktree", "new", "feature/test", "--no-worktree"]), /cannot be used together/);
+  assert.throws(() => parseLauncherArguments(["--no-worktree", "feature/test"]), /Unknown piw option/);
+  assert.deepEqual(parseLauncherArguments(["feature/test"]), { parallel: false, target: "feature/test", piArgs: [] });
+});
+
+test("piw list scope and current-branch launch options are distinct", () => {
+  assert.deepEqual(parseLauncherArguments([]), { parallel: false, list: true, piArgs: [] });
+  assert.deepEqual(parseLauncherArguments(["--current"]), { parallel: false, current: true, piArgs: [] });
+  for (const scope of ["global", "local"]) {
+    for (const args of [[`--${scope}`], ["--list", `--${scope}`], [`--${scope}`, "--list"]]) {
+      assert.deepEqual(parseLauncherArguments(args), { parallel: false, list: true, listScope: scope, piArgs: [] });
+    }
+    for (const args of [[`--${scope}`, "feature"], ["--current", `--${scope}`], [`--${scope}`, "--", "prompt"]]) {
+      assert.throws(() => parseLauncherArguments(args), /piw --list accepts only/);
+    }
+    assert.throws(() => parseLauncherArguments(["prune", `--${scope}`]), /piw prune accepts no arguments/);
+    assert.throws(() => parseLauncherArguments([`--${scope}`, "new", "feature"]), /piw --list accepts/);
+  }
+  assert.throws(() => parseLauncherArguments(["--local", "--global"]), /cannot be used together/);
+  assert.throws(() => parseLauncherArguments(["--global", "--local"]), /cannot be used together/);
+  assert.throws(() => parseLauncherArguments(["--current", "feature"]), /another workspace target/);
+  assert.throws(() => parseLauncherArguments(["--current", "new", "feature"]), /another workspace target/);
+  assert.throws(() => parseLauncherArguments(["--", "--model", "test"]), /use a branch, PR, or --current/);
 });
 
 test("workspace list formatting handles an empty list", () => {
@@ -190,7 +228,7 @@ test("workspace aliases share local completion discovery and side-effect-free he
     return completions ? completions.map((item) => item.value) : null;
   };
   assert.deepEqual(await values(workspaceCommand, ""), [
-    "--help", "-h", "new", "merge", "prune", "--worktree", "feature/auth", "main", "#42",
+    "--help", "-h", "new", "describe", "merge", "prune", "--worktree", "feature/auth", "main", "#42",
   ]);
   const discoveryGitCalls = gitCalls;
   assert.ok(discoveryGitCalls > 0);
@@ -208,10 +246,13 @@ test("workspace aliases share local completion discovery and side-effect-free he
   }]);
   assert.deepEqual(await values(wsCommand, "feature/auth "), ["feature/auth --worktree"]);
   assert.deepEqual(await values(wsCommand, "#42 "), ["#42 --worktree"]);
-  assert.deepEqual(await values(workspaceCommand, "new "), ["new --from", "new --worktree"]);
+  assert.deepEqual(await values(workspaceCommand, "new "), ["new --from", "new --worktree", "new --no-worktree", "new --name", "new --description"]);
   assert.deepEqual(await values(wsCommand, "new feature/new "), [
     "new feature/new --from",
     "new feature/new --worktree",
+    "new feature/new --no-worktree",
+    "new feature/new --name",
+    "new feature/new --description",
   ]);
   assert.deepEqual(await values(workspaceCommand, "new feature/new --from "), [
     "new feature/new --from current",
@@ -219,11 +260,26 @@ test("workspace aliases share local completion discovery and side-effect-free he
     "new feature/new --from main",
     "new feature/new --from v1.0",
   ]);
-  assert.deepEqual(await values(wsCommand, "new --worktree "), ["new --worktree --from"]);
+  assert.deepEqual(await values(wsCommand, "new --worktree "), [
+    "new --worktree --from", "new --worktree --name", "new --worktree --description",
+  ]);
   assert.deepEqual(await values(workspaceCommand, "new feature/new --from main "), [
     "new feature/new --from main --worktree",
+    "new feature/new --from main --no-worktree",
+    "new feature/new --from main --name",
+    "new feature/new --from main --description",
   ]);
-  assert.equal(await values(wsCommand, "new feature/new --from main --worktree "), null);
+  assert.deepEqual(await values(wsCommand, "new feature/new --from main --worktree "), [
+    "new feature/new --from main --worktree --name",
+    "new feature/new --from main --worktree --description",
+  ]);
+  assert.deepEqual(await values(wsCommand, "new feature/new --no-worktree "), [
+    "new feature/new --no-worktree --from",
+    "new feature/new --no-worktree --name",
+    "new feature/new --no-worktree --description",
+  ]);
+  assert.equal(await values(wsCommand, "new feature/new --no-worktree --worktree "), null);
+  assert.equal(await values(wsCommand, "new feature/new --worktree --no-worktree "), null);
   assert.deepEqual(await values(workspaceCommand, "merge "), [
     "merge feature/auth", "merge main", "merge --squash",
   ]);
@@ -322,7 +378,7 @@ test("create_workspace uses an explicit repository cwd", async () => {
 
     assert.equal(git(context, "branch", "--show-current"), "main");
     assert.equal(git(target, "-C", result.details.cwd, "branch", "--show-current"), "feature/target");
-    assert.equal(result.details.cwd.startsWith(join(await realpath(target), ".ws")), true);
+    assert.equal(result.details.cwd.startsWith(join(await realpath(target), ".git", "pi-workspaces")), true);
   } finally {
     await removeRepository(context);
     await removeRepository(target);
@@ -537,7 +593,7 @@ test("workspace routing uses the primary checkout when called from another check
   }
 });
 
-test("/ws new bases a branch on local main, not the current branch", async () => {
+test("/ws new defaults to a managed worktree based on local main", async () => {
   const root = await repository();
   try {
     git(root, "checkout", "-b", "other");
@@ -549,10 +605,22 @@ test("/ws new bases a branch on local main, not the current branch", async () =>
     const service = new WorkspaceService(root, { sessions });
     const calls = [];
 
-    await service.create({ branch: "feature", parallel: false }, { parallel: false, switchSession: switcher(calls) });
+    await writeFile(join(root, "dirty.txt"), "keep primary changes\n");
+    await handleWorkspace("new feature", {
+      mode: "tui",
+      cwd: root,
+      ui: { notify(message, level) { assert.notEqual(level, "error", message); } },
+      switchSession: switcher(calls),
+    }, service);
 
+    const record = await (await service.state()).getWorkspace("feature");
+    assert.ok(record);
     assert.equal(git(root, "rev-parse", "feature"), mainHead);
-    assert.equal(git(root, "branch", "--show-current"), "feature");
+    assert.equal(git(root, "branch", "--show-current"), "other");
+    assert.equal(git(record.cwd, "branch", "--show-current"), "feature");
+    assert.equal(await service.git.isManagedWorktree(record.cwd), true);
+    assert.equal(await readFile(join(root, "dirty.txt"), "utf8"), "keep primary changes\n");
+    assert.equal(calls[0], record.session);
   } finally {
     await removeRepository(root);
   }
@@ -580,6 +648,57 @@ test("/ws new creates a branch in a managed worktree", async () => {
   } finally {
     await removeRepository(root);
   }
+});
+
+test("/ws new --no-worktree creates a branch in the primary checkout", async (t) => {
+  const root = await repository();
+  t.after(() => removeRepository(root));
+  const sessions = new FakeSessions(root);
+  const service = new WorkspaceService(root, { sessions });
+  const calls = [];
+
+  await handleWorkspace("new feature --no-worktree", {
+    mode: "tui",
+    cwd: root,
+    ui: { notify(message, level) { assert.notEqual(level, "error", message); } },
+    switchSession: switcher(calls),
+  }, service);
+
+  const record = await (await service.state()).getWorkspace("feature");
+  assert.ok(record);
+  assert.equal(record.cwd, await realpath(root));
+  assert.equal(git(root, "branch", "--show-current"), "feature");
+  assert.equal(calls[0], record.session);
+});
+
+test("the picker creates new workspaces in managed worktrees by default", async (t) => {
+  const root = await repository();
+  t.after(() => removeRepository(root));
+  const sessions = new FakeSessions(root);
+  const service = new WorkspaceService(root, { sessions });
+  const calls = [];
+
+  await picker(service, {
+    mode: "tui",
+    cwd: root,
+    ui: {
+      notify() {},
+      async select(_title, choices) {
+        assert.ok(choices.includes("New workspace…"));
+        return "New workspace…";
+      },
+      async input() { return " feature/picker "; },
+      async confirm() { throw new Error("New workspaces must use the default placement"); },
+    },
+    switchSession: switcher(calls),
+  });
+
+  const record = await (await service.state()).getWorkspace("feature/picker");
+  assert.ok(record);
+  assert.equal(git(root, "branch", "--show-current"), "main");
+  assert.equal(git(record.cwd, "branch", "--show-current"), "feature/picker");
+  assert.equal(await service.git.isManagedWorktree(record.cwd), true);
+  assert.equal(calls[0], record.session);
 });
 
 test("/ws new replaces the current branch session without creating a branch", async () => {
@@ -635,7 +754,7 @@ test("/ws new binds a fresh session when the current branch has no workspace", a
   }
 });
 
-test("managed worktrees use opaque workspace paths and initialize PM repositories", async () => {
+test("managed worktrees use opaque paths in the Git common directory and initialize PM repositories", async () => {
   const root = await repository();
   try {
     const sessions = new FakeSessions(root);
@@ -643,7 +762,7 @@ test("managed worktrees use opaque workspace paths and initialize PM repositorie
     const state = await service.state();
     const calls = [];
     const created = await service.create({ branch: "feature/a", parallel: true }, { parallel: true, switchSession: switcher(calls) });
-    const workspace = join(await realpath(root), ".ws", stableHash("feature/a"));
+    const workspace = join(await realpath(root), ".git", "pi-workspaces", stableHash("feature/a"));
     const expected = join(workspace, "src");
 
     assert.equal(created.record.cwd, expected);
@@ -653,7 +772,8 @@ test("managed worktrees use opaque workspace paths and initialize PM repositorie
     assert.equal(git(root, "-C", expected, "branch", "--show-current"), "feature/a");
     assert.equal(git(root, "-C", join(workspace, "pm"), "rev-parse", "--is-inside-work-tree"), "true");
     assert.equal(git(root, "status", "--porcelain"), "");
-    assert.match(await readFile(join(root, ".git", "info", "exclude"), "utf8"), /^\/\.ws\/$/m);
+    assert.doesNotMatch(await readFile(join(root, ".git", "info", "exclude"), "utf8"), /^\/\.ws\/$/m);
+    assert.equal(await service.git.isManagedWorktree(expected), true);
 
     const collision = state.workspacePath("feature/collision");
     await mkdir(collision, { recursive: true });

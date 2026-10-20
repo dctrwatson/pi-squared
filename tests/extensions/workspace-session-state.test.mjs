@@ -3,12 +3,14 @@ import {
   assert,
   execFileSync,
   spawn,
+  mkdtemp,
   mkdir,
   readFile,
   realpath,
   rm,
   writeFile,
   hostname,
+  tmpdir,
   join,
   resolve,
   WorkspaceService,
@@ -168,6 +170,87 @@ test("session start leaves plain Pi sessions unbound", async () => {
   }
 });
 
+test("session start skips workspace activation outside a Git worktree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workspace-no-git-"));
+  try {
+    const nested = join(root, "nested");
+    const bare = join(root, "bare.git");
+    await mkdir(nested);
+    git(root, "init", "--bare", bare);
+    const handlers = new Map();
+    const appended = [];
+    const notifications = [];
+    let shutdowns = 0;
+    workspaceExtension({
+      registerCommand() {},
+      on: (event, handler) => handlers.set(event, handler),
+      appendEntry: (...args) => appended.push(args),
+      setSessionName() {
+        assert.fail("A session outside a Git worktree must not be renamed");
+      },
+    }, {
+      createService(cwd) {
+        const service = new WorkspaceService(cwd);
+        service.state = async () => {
+          assert.fail("Workspace state must not be read outside a Git worktree");
+        };
+        return service;
+      },
+    });
+    for (const cwd of [root, nested, bare]) {
+      const ctx = {
+        cwd,
+        sessionManager: {
+          getSessionFile: () => join(root, "session.jsonl"),
+          getEntries: () => [],
+        },
+        ui: { notify: (...args) => notifications.push(args) },
+        shutdown() { shutdowns++; },
+      };
+      await handlers.get("session_start")({}, ctx);
+      assert.deepEqual(handlers.get("resources_discover")({}, ctx), { skillPaths: [] });
+      assert.equal(handlers.get("before_agent_start")({ systemPrompt: "Base prompt" }, ctx), undefined);
+      await handlers.get("session_shutdown")({ reason: "quit" }, ctx);
+    }
+    assert.equal(shutdowns, 0);
+    assert.deepEqual(notifications, []);
+    assert.deepEqual(appended, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session start stops Pi when workspace state fails inside a Git worktree", async () => {
+  const root = await repository();
+  try {
+    let sessionStart;
+    const notifications = [];
+    let shutdowns = 0;
+    workspaceExtension({
+      registerCommand() {},
+      on(event, handler) {
+        if (event === "session_start") sessionStart = handler;
+      },
+    }, {
+      createService(cwd) {
+        const service = new WorkspaceService(cwd);
+        service.state = async () => { throw new Error("Cannot read workspace state"); };
+        return service;
+      },
+    });
+    await sessionStart({}, {
+      cwd: root,
+      sessionManager: { getSessionFile: () => join(root, "session.jsonl") },
+      ui: { notify: (...args) => notifications.push(args) },
+      shutdown() { shutdowns++; },
+    });
+    assert.equal(shutdowns, 1);
+    assert.deepEqual(notifications, [["Workspace unavailable: Cannot read workspace state", "error"]]);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
 test("session start warns when a known workspace session does not own its lease", async () => {
   const root = await repository();
   try {
@@ -202,7 +285,7 @@ test("session start warns when a known workspace session does not own its lease"
 
     assert.equal(beforeAgentStart({ systemPrompt: "Base prompt" }), undefined);
     assert.deepEqual(notifications, [[
-      "Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.",
+      "Workspace activation skipped: this Pi process does not own the workspace lease. Run piw --current to activate workspace features.",
       "warning",
     ]]);
   } finally {
@@ -255,9 +338,9 @@ test("an active managed workspace appends stable guidance and exposes PM", async
     await sessionStart({}, ctx);
 
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [WORKSPACE_PM_SKILL_PATH] });
-    assert.deepEqual(beforeAgentStart({ systemPrompt: "Pi base\n\nUser addendum" }, ctx), {
-      systemPrompt: "Pi base\n\nUser addendum\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.",
-    });
+    const promptEvent = { systemPrompt: "Pi base\n\nUser addendum", systemPromptOptions: { sections: {} } };
+    assert.equal(beforeAgentStart(promptEvent, ctx), undefined);
+    assert.equal(promptEvent.systemPromptOptions.sections.workspace, "## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records.");
     assert.equal(appended.at(-1)?.type, "pi-workspace");
     assert.deepEqual(notifications, []);
 
@@ -337,9 +420,9 @@ test("managed workspace reload preserves its lease", async () => {
     assert.equal(appended[2].data.branch, "main");
     assert.equal((await state.getWorkspace("main"))?.session, session);
     assert.deepEqual(resourcesDiscover({}, ctx), { skillPaths: [] });
-    assert.deepEqual(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx), {
-      systemPrompt: "Base prompt\n\n## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.",
-    });
+    const promptEvent = { systemPrompt: "Base prompt", systemPromptOptions: { sections: {} } };
+    assert.equal(beforeAgentStart(promptEvent, ctx), undefined);
+    assert.equal(promptEvent.systemPromptOptions.sections.workspace, "## Workspace coding guidance\n\n- Work only in the agreed repositories, checkouts, and scope. A prepared workspace or tool access does not expand authority.\n- Read repository guidance and inspect Git status before you edit.\n- Preserve unrelated and concurrent changes. Do not overwrite, revert, or reformat them.\n- Use targeted reads and searches. Read more context only when needed.\n- Run validation that meets repository requirements and fits the change. Report verified results, checks not run, and limits.");
     assert.deepEqual(notifications, []);
     assert.deepEqual(statuses, []);
 
@@ -501,11 +584,11 @@ test("piw rejects forwarded session and extension bypass options before leasing"
       assert.throws(() => validateForwardedPiArguments([option]), /piw manages/);
     }
     assert.doesNotThrow(() => validateForwardedPiArguments([
-      "--no-extensions", "-e", "/opt/hari/extension", "--no-skills",
+      "--no-extensions", "-e", "/opt/custom/extension", "--no-skills",
       "--no-prompt-templates", "--no-themes", "--no-context-files",
-    ], "hari"));
+    ], "custom"));
     for (const option of ["--session=value", "--fork=value", "--continue", "--resume", "--no-session"]) {
-      assert.throws(() => validateForwardedPiArguments([option], "hari"), /piw manages/);
+      assert.throws(() => validateForwardedPiArguments([option], "custom"), /piw manages/);
     }
     git(root, "branch", "feature");
     const sessions = new FakeSessions(root);
@@ -882,6 +965,202 @@ test("the local picker selects a cached workspace without calling gh", async () 
 
     assert.equal(ghCalls, 0);
     assert.deepEqual(switched, [record.session]);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("workspace config snapshots preserve branch case, multiline values, and duplicate keys", async () => {
+  const root = await repository();
+  try {
+    const branch = "Feature/Mixed.Name";
+    git(root, "branch", branch);
+    const sessions = new FakeSessions(root);
+    const service = new WorkspaceService(root, { sessions });
+    const { state, record } = await mapWorkspace(service, sessions, branch, root);
+    const originalMetadata = sessions.entries.get(record.session);
+    const session = join(root, ".git", "test-sessions", "sessions", "session\nmetadata.jsonl");
+    await writeFile(session, await readFile(record.session, "utf8"));
+    await rm(record.session);
+    sessions.entries.delete(record.session);
+    sessions.entries.set(session, originalMetadata);
+
+    const sessionKey = state.sessionKey(branch);
+    await state.unsetConfig(sessionKey);
+    await state.git.run(["config", "--local", "--add", sessionKey, record.session]);
+    await state.git.run(["config", "--local", "--add", sessionKey, session]);
+    const nameKey = state.nameKey(branch);
+    await state.unsetConfig(nameKey);
+    await state.git.run(["config", "--local", "--add", nameKey, "Older label"]);
+    await state.git.run(["config", "--local", "--add", nameKey, " First\nmiddle\nlast "]);
+    await state.setConfig(state.descriptionKey(branch), "line one\nline two");
+
+    const snapshots = await state.listWorkspaceSnapshots();
+
+    assert.equal(snapshots.length, 2, "each duplicate session key retains its current list entry");
+    assert.strictEqual(snapshots[0], snapshots[1], "duplicate keys share one parsed session snapshot");
+    for (const snapshot of snapshots) {
+      assert.equal(snapshot.record.branch, branch);
+      assert.equal(snapshot.record.session, session);
+      assert.equal(snapshot.record.name, "First middle last");
+      assert.equal(snapshot.record.description, "line one line two");
+      assert.equal(snapshot.session?.metadata?.branch, branch);
+    }
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("workspace listing validates session metadata from its existing snapshot", async () => {
+  const root = await repository();
+  try {
+    class CountingSessions extends PiSessionStore {
+      validations = 0;
+      snapshotValidations = 0;
+
+      async validate(session, metadata) {
+        this.validations++;
+        return super.validate(session, metadata);
+      }
+
+      async validateSnapshot(snapshot, metadata) {
+        this.snapshotValidations++;
+        return super.validateSnapshot(snapshot, metadata);
+      }
+    }
+    const sessions = new CountingSessions(join(root, "sessions"));
+    const service = new WorkspaceService(root, { sessions });
+    await service.create({ branch: "feature/snapshot", parallel: true }, { parallel: true, switchSession: switcher([]) });
+    sessions.validations = 0;
+    sessions.snapshotValidations = 0;
+
+    const statuses = await service.list();
+
+    assert.equal(statuses.length, 1);
+    assert.equal(statuses[0].stale, false);
+    assert.equal(sessions.validations, 0, "listing does not re-read the session file for validation");
+    assert.equal(sessions.snapshotValidations, 1);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("workspace listing keeps malformed session JSON stale", async () => {
+  const root = await repository();
+  try {
+    const sessions = new PiSessionStore(join(root, "sessions"));
+    const service = new WorkspaceService(root, { sessions });
+    const created = await service.create({ branch: "feature/malformed-session", parallel: true }, {
+      parallel: true,
+      switchSession: switcher([]),
+    });
+    await writeFile(created.record.session, '{"type":"session","cwd":"/repo"}\nnot-json\n');
+
+    const status = (await service.list()).find((entry) => entry.record.branch === created.record.branch);
+
+    assert.equal(status?.stale, true);
+  } finally {
+    await removeRepository(root);
+  }
+});
+
+test("the local picker enumerates workspace records once and keeps Git reads linear", async (t) => {
+  const root = await repository();
+  try {
+    class CountingSessions extends PiSessionStore {
+      validations = 0;
+      snapshotValidations = 0;
+
+      async validate(session, metadata) {
+        this.validations++;
+        return super.validate(session, metadata);
+      }
+
+      async validateSnapshot(snapshot, metadata) {
+        this.snapshotValidations++;
+        return super.validateSnapshot(snapshot, metadata);
+      }
+    }
+    const sessions = new CountingSessions(join(root, "sessions"));
+    const nodeRunner = new NodeProcessRunner();
+    let gitCalls = 0;
+    let workspaceQueries = 0;
+    let worktreeQueries = 0;
+    let pathQueries = 0;
+    let branchQueries = 0;
+    let localBranchQueries = 0;
+    let statusQueries = 0;
+    let commonDirFallbackQueries = 0;
+    const service = new WorkspaceService(root, {
+      git: new GitRepository(root, {
+        async run(command, args, options) {
+          if (command === "git") {
+            gitCalls++;
+            if (args[0] === "config") workspaceQueries++;
+            if (args[0] === "worktree" && args[1] === "list") worktreeQueries++;
+            if (args[0] === "rev-parse" && args[1] === "--show-toplevel") pathQueries++;
+            if (args[0] === "rev-parse" && args[1] === "--git-common-dir") commonDirFallbackQueries++;
+            if (args[0] === "symbolic-ref") branchQueries++;
+            if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "--quiet") localBranchQueries++;
+            if (args[0] === "status") statusQueries++;
+          }
+          return nodeRunner.run(command, args, options);
+        },
+      }),
+      sessions,
+    });
+    const count = 12;
+    let blockerRecord;
+    for (let index = 0; index < count; index++) {
+      const branch = `feature/picker-${String(index).padStart(2, "0")}`;
+      git(root, "branch", branch);
+      const mapped = await mapWorkspace(service, sessions, branch, root);
+      if (index === 0) blockerRecord = mapped.record;
+    }
+    const state = await service.state();
+    await mkdir(state.leasesRoot, { recursive: true });
+    await writeFile(state.leasePath(blockerRecord.session), JSON.stringify({
+      version: 1,
+      repository: blockerRecord.repository,
+      branch: blockerRecord.branch,
+      session: blockerRecord.session,
+      pid: process.pid,
+      hostname: "another-host",
+      startedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }));
+    gitCalls = 0;
+    workspaceQueries = 0;
+    worktreeQueries = 0;
+    pathQueries = 0;
+    branchQueries = 0;
+    localBranchQueries = 0;
+    statusQueries = 0;
+    commonDirFallbackQueries = 0;
+    sessions.validations = 0;
+    sessions.snapshotValidations = 0;
+
+    let choices = [];
+    await picker(service, {
+      mode: "tui",
+      cwd: root,
+      ui: {
+        select: async (_title, values) => { choices = values; return undefined; },
+        notify() {},
+      },
+    });
+
+    assert.equal(choices.length, 2, "an active session blocks the other bindings to its checkout");
+    assert.equal(workspaceQueries, 1, "one NUL-delimited config query reads all workspace keys");
+    assert.equal(worktreeQueries, 3, "the picker discovers worktrees once for listing and twice for blocker targets");
+    assert.equal(pathQueries, 2, "repository paths are discovered once for listing and once for blocker targets");
+    assert.equal(branchQueries, count, "each checkout branch is read once");
+    assert.equal(localBranchQueries, count, "each local branch binding is checked once");
+    assert.equal(statusQueries, count);
+    assert.equal(sessions.validations, 0, "workspace listing does not parse each session a second time");
+    assert.equal(sessions.snapshotValidations, count, "each session uses its parsed list snapshot once");
+    assert.equal(gitCalls, 3 * count + 8 + commonDirFallbackQueries, `measured Git calls: ${gitCalls} for ${count} records`);
+    t.diagnostic(`${count} workspaces: ${gitCalls} Git processes, ${workspaceQueries} config query, ${worktreeQueries} worktree reads, ${pathQueries} path discoveries, ${branchQueries} branch reads, ${sessions.snapshotValidations} session snapshots, ${sessions.validations} session reparses.`);
   } finally {
     await removeRepository(root);
   }

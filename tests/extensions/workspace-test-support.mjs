@@ -21,16 +21,21 @@ import workspaceExtension, { CREATE_WORKSPACE_TOOL, WORKSPACE_MERGE_FINALIZE_TOO
 
 const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
        /workspace or /ws new
-       /workspace or /ws new <branch> [--from <ref|current>] [--worktree]
+       /workspace or /ws new <branch> [--from <ref|current>] [--no-worktree] [--name <text>] [--description <text>]
+       /workspace or /ws describe [branch] --name <text> [--description <text>]
+       /workspace or /ws describe [branch] --description <text> [--name <text>]
        /workspace or /ws merge <base-branch> [--squash]
        /workspace or /ws prune
 
 No argument: Open the workspace picker.
 target: Local branch, pull request number, or GitHub pull request URL.
 branch:<name>: Force a local branch target.
-new: Start a fresh session for the current branch, or create a branch workspace.
+new: Start a fresh session for the current branch; with a branch, create a managed worktree.
 --from: Select the new branch base; current uses the current commit.
+--name, --description: Set workspace labels when creating or describing a workspace.
+describe: Set or clear labels for an existing workspace on a local branch; omit branch to use the current workspace. It does not switch workspaces. Use an empty quoted value to clear a label.
 --worktree: Use a managed worktree.
+--no-worktree: With new <branch>, use the primary checkout instead.
 merge: Prepare, merge, and remove the current managed workspace.
 --squash: Create one commit on the base branch.
 prune: Remove inactive managed workspaces.
@@ -43,6 +48,15 @@ function git(cwd, ...args) {
 function gitSucceeds(cwd, ...args) {
   return spawnSync("git", args, { cwd, encoding: "utf8" }).status === 0;
 }
+
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+const agentDir = await mkdtemp(join(tmpdir(), "pi-workspace-agent-"));
+process.env.PI_CODING_AGENT_DIR = agentDir;
+test.after(async () => {
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  await rm(agentDir, { recursive: true, force: true });
+});
 
 const repositoryTemplate = await mkdtemp(join(tmpdir(), "pi-workspace-template-"));
 git(repositoryTemplate, "init", "-b", "main");

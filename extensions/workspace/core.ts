@@ -5,8 +5,9 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { GitRepository, canonicalPath } from "./git.ts";
 import { WorkspaceError } from "./process.ts";
-import { PiSessionStore, readWorkspaceSession, samePullRequest, type SessionStore, workspaceMetadata } from "./sessions.ts";
-import { WorkspaceState, stableHash } from "./state.ts";
+import { PiSessionStore, readWorkspaceSession, samePullRequest, type SessionStore, type WorkspaceSessionSnapshot, workspaceMetadata } from "./sessions.ts";
+import { WorkspaceState, stableHash, type WorkspaceRecordSnapshot } from "./state.ts";
+import { normalizeWorkspaceLabels } from "./labels.ts";
 import type {
     Activation,
     LeaseRecord,
@@ -17,6 +18,8 @@ import type {
     PullRequestDetails,
     PullRequestDivergence,
     PullRequestDivergenceChoice,
+    WorkspaceDescribeOptions,
+    WorkspaceLabels,
     WorkspaceMergeCleanup,
     WorkspaceMergeOptions,
     WorkspaceMergePlan,
@@ -134,39 +137,86 @@ export function parseWorkspaceTarget(input: string): WorkspaceTarget | undefined
 export function parseCommandWords(input: string): string[] {
     const words: string[] = [];
     let current = "";
+    let started = false;
     let quote: "'" | '"' | undefined;
     let escaped = false;
     for (const character of input.trim()) {
         if (escaped) {
             current += character;
+            started = true;
             escaped = false;
         } else if (character === "\\" && quote !== "'") {
             escaped = true;
+            started = true;
         } else if ((character === "'" || character === '"')) {
+            started = true;
             if (quote === character) quote = undefined;
             else if (!quote) quote = character;
             else current += character;
         } else if (/\s/.test(character) && !quote) {
-            if (current) words.push(current);
+            if (started) words.push(current);
             current = "";
+            started = false;
         } else {
             current += character;
+            started = true;
         }
     }
     if (escaped || quote) throw new WorkspaceError("Unclosed quote in workspace command");
-    if (current) words.push(current);
+    if (started) words.push(current);
     return words;
+}
+
+function parseWorkspaceLabelOption(words: string[], index: number, labels: WorkspaceLabels): boolean {
+    const option = words[index];
+    if (option !== "--name" && option !== "--description") return false;
+    const key = option === "--name" ? "name" : "description";
+    const value = words[index + 1];
+    if (value === undefined || value.startsWith("--")) throw new WorkspaceError(`${option} requires a value`);
+    if (labels[key] !== undefined) throw new WorkspaceError(`${option} accepts one value`);
+    labels[key] = value;
+    return true;
+}
+
+export function parseWorkspaceDescribe(words: string[], command = "/ws describe"): WorkspaceDescribeOptions {
+    let branch: string | undefined;
+    const labels: WorkspaceLabels = {};
+    for (let index = 0; index < words.length; index++) {
+        if (parseWorkspaceLabelOption(words, index, labels)) {
+            index++;
+            continue;
+        }
+        const word = words[index] ?? "";
+        if (word.startsWith("--")) throw new WorkspaceError(`Unknown workspace description option: ${word}`);
+        if (branch) throw new WorkspaceError(`${command} accepts one local branch`);
+        const target = parseWorkspaceTarget(word);
+        if (!target || target.type !== "branch") throw new WorkspaceError(`${command} requires a local branch target`);
+        branch = target.branch;
+    }
+    if (labels.name === undefined && labels.description === undefined) {
+        throw new WorkspaceError(`${command} requires --name or --description`);
+    }
+    return { ...(branch ? { branch } : {}), ...normalizeWorkspaceLabels(labels) };
 }
 
 export function parseNewWorkspace(words: string[], command = "/ws new"): NewWorkspaceOptions {
     let branch: string | undefined;
     let from: string | undefined;
-    let parallel = false;
+    const labels: WorkspaceLabels = {};
+    let parallel: boolean | undefined;
     for (let index = 0; index < words.length; index++) {
         const word = words[index];
         if (!word) continue;
-        if (word === "--worktree") {
-            parallel = true;
+        if (parseWorkspaceLabelOption(words, index, labels)) {
+            index++;
+            continue;
+        }
+        if (word === "--worktree" || word === "--no-worktree") {
+            const requested = word === "--worktree";
+            if (parallel !== undefined && parallel !== requested) {
+                throw new WorkspaceError("--worktree and --no-worktree cannot be used together");
+            }
+            parallel = requested;
             continue;
         }
         if (word === "--from") {
@@ -180,7 +230,7 @@ export function parseNewWorkspace(words: string[], command = "/ws new"): NewWork
         branch = word;
     }
     if (!branch) throw new WorkspaceError(`${command} requires a branch name`);
-    return { branch, ...(from ? { from } : {}), parallel };
+    return { branch, ...(from ? { from } : {}), ...normalizeWorkspaceLabels(labels), parallel: parallel ?? true };
 }
 
 export function parseWorkspaceMerge(words: string[], command = "/ws merge"): WorkspaceMergeOptions {
@@ -262,6 +312,73 @@ export class WorkspaceService {
         };
     }
 
+    async linkPullRequest(
+        target: Extract<WorkspaceTarget, { type: "pr" }>,
+        binding: { branch: string; session: string },
+        appendMetadata: (metadata: WorkspaceMetadata) => void,
+    ): Promise<WorkspaceRecord> {
+        const state = await this.state();
+        return state.withMutationLock(async () => {
+            const validateBinding = async (): Promise<{ record: WorkspaceRecord; cwd: string }> => {
+                const paths = await this.git.paths();
+                const cwd = await canonicalPath(paths.currentCwd);
+                const branch = await this.git.branch(cwd);
+                if (branch !== binding.branch) throw new WorkspaceError("The current workspace branch changed before its pull request was linked");
+                const record = await state.getWorkspace(binding.branch);
+                if (!record || resolve(record.session) !== resolve(binding.session) || !await samePath(record.cwd, cwd)) {
+                    throw new WorkspaceError("The active session does not match the current workspace binding");
+                }
+                if (!await this.recordIsValid(record, state)) {
+                    throw new WorkspaceError("The current workspace binding is not valid");
+                }
+                const lease = await state.readLease(record.session);
+                if (!lease || lease.version !== 1 || lease.repository !== state.commonDir || lease.branch !== binding.branch
+                    || lease.session !== record.session || lease.pid !== process.pid || lease.hostname !== hostname()
+                    || !await state.processIsLive(lease)) {
+                    throw new WorkspaceError("The current process does not own the active workspace lease");
+                }
+                return { record, cwd };
+            };
+
+            const initial = await validateBinding();
+            const detail = await this.pullRequest(target);
+            if (detail.branch !== binding.branch) {
+                throw new WorkspaceError(`Pull request head ${detail.branch} does not match workspace branch ${binding.branch}`);
+            }
+            if (!sameRepository(detail.baseRepository, detail.headRepository)) {
+                throw new WorkspaceError("Pull request heads from another repository cannot be linked to a workspace");
+            }
+            const pr = this.pullRequestIdentity(detail);
+            const current = await validateBinding();
+            if (current.cwd !== initial.cwd) throw new WorkspaceError("The current workspace changed before its pull request was linked");
+            if (current.record.pr && !samePullRequest(current.record.pr, pr)) {
+                throw new WorkspaceError(`Branch ${binding.branch} is already bound to a different pull request`);
+            }
+            const existing = current.record.pr;
+            if (existing && samePullRequest(existing, pr) && existing.url === pr.url
+                && existing.baseRepository === pr.baseRepository && existing.headRepository === pr.headRepository
+                && existing.headRef === pr.headRef && existing.headOid === pr.headOid) {
+                return current.record;
+            }
+
+            const metadata = workspaceMetadata(state.commonDir, binding.branch, current.cwd, pr);
+            const prKey = state.prKey(binding.branch);
+            const config = await state.snapshot([prKey]);
+            try {
+                await state.setConfig(prKey, pr.url);
+                appendMetadata(metadata);
+            } catch (error) {
+                try {
+                    await state.restore(config);
+                } catch (restoreError) {
+                    throw new WorkspaceError(`Could not restore pull request state after a failed update: ${String(restoreError)}`);
+                }
+                throw error;
+            }
+            return { ...current.record, pr, prUrl: pr.url, updatedAt: now() };
+        });
+    }
+
     private parseGhJson(output: string, command: string): Record<string, unknown> {
         try {
             const value = JSON.parse(output) as unknown;
@@ -288,25 +405,32 @@ export class WorkspaceService {
         return Boolean(record && record.version === 2 && await canonicalPath(record.repository) === state.commonDir);
     }
 
-    private async recordIsValid(record: WorkspaceRecord, state: WorkspaceState): Promise<boolean> {
+    private async recordIsValid(record: WorkspaceRecord, state: WorkspaceState, snapshot?: WorkspaceRecordSnapshot): Promise<boolean> {
         if (!await this.recordMatchesRepository(record, state)) return false;
         if (record.pr && !isPullRequest(record.pr)) return false;
         if (record.prUrl && (!record.pr || !sameUrl(record.pr.url, record.prUrl))) return false;
         if (!await pathExists(record.cwd) || !await this.git.localBranchOid(record.branch)) return false;
         try {
-            const paths = await this.git.paths();
-            if (!await samePath(record.cwd, paths.primaryCwd) && await this.git.branch(record.cwd) !== record.branch) return false;
-            await this.git.branch(record.cwd);
+            const primary = await samePath(record.cwd, state.primaryCwd);
+            const branch = await this.git.branch(record.cwd);
+            if (!primary && branch !== record.branch) return false;
         } catch {
             return false;
         }
         const metadata = workspaceMetadata(record.repository, record.branch, record.cwd, record.pr);
-        if (await this.sessions.validate(record.session, metadata)) return true;
-        return this.isRenamedBranchBinding(record, state);
+        const validSession = snapshot && this.sessions.validateSnapshot
+            ? await this.sessions.validateSnapshot(snapshot.session, metadata)
+            : await this.sessions.validate(record.session, metadata);
+        if (validSession) return true;
+        return this.isRenamedBranchBinding(record, state, snapshot ? snapshot.session ?? null : undefined);
     }
 
-    private async isRenamedBranchBinding(record: WorkspaceRecord, state: WorkspaceState): Promise<boolean> {
-        const stored = await readWorkspaceSession(record.session);
+    private async isRenamedBranchBinding(
+        record: WorkspaceRecord,
+        state: WorkspaceState,
+        sessionSnapshot?: WorkspaceSessionSnapshot | null,
+    ): Promise<boolean> {
+        const stored = sessionSnapshot === undefined ? await readWorkspaceSession(record.session) : sessionSnapshot ?? undefined;
         const metadata = stored?.metadata;
         if (!metadata || metadata.branch === record.branch
             || await canonicalPath(metadata.repository) !== state.commonDir
@@ -375,6 +499,32 @@ export class WorkspaceService {
         return cwd ? this.liveWorkspaceAt(state, cwd, ownerPid) : undefined;
     }
 
+    async activationBlockers(
+        statuses: readonly WorkspaceStatus[],
+        candidates: readonly WorkspaceStatus[],
+        parallel: boolean,
+        ownerPid = process.pid,
+    ): Promise<Set<string>> {
+        if (candidates.length === 0) return new Set();
+        const [paths, worktrees] = await Promise.all([this.git.paths(), this.git.worktrees()]);
+        const worktreeByBranch = new Map<string, string>();
+        for (const worktree of worktrees) {
+            if (worktree.branch && !worktreeByBranch.has(worktree.branch)) worktreeByBranch.set(worktree.branch, worktree.cwd);
+        }
+        const activePaths = new Set<string>();
+        for (const status of statuses) {
+            const lease = status.activeLease;
+            if (!lease || lease.pid === ownerPid && lease.hostname === hostname()) continue;
+            activePaths.add(await canonicalPath(status.record.cwd));
+        }
+        const blocked = new Set<string>();
+        for (const candidate of candidates) {
+            const cwd = worktreeByBranch.get(candidate.record.branch) ?? (parallel ? undefined : paths.primaryCwd);
+            if (cwd && activePaths.has(await canonicalPath(cwd))) blocked.add(candidate.record.branch);
+        }
+        return blocked;
+    }
+
     /**
      * Resolve a stable local branch binding without changing workspace state.
      * Callers use this before a pre-activation validation callback.
@@ -431,18 +581,43 @@ export class WorkspaceService {
         return existing;
     }
 
-    async placement(record: WorkspaceRecord): Promise<Placement> {
-        const paths = await this.git.paths();
-        if (await canonicalPath(record.cwd) === paths.primaryCwd) return "primary";
+    async placement(record: WorkspaceRecord, primaryCwd?: string): Promise<Placement> {
+        const primary = primaryCwd ?? (await this.git.paths()).primaryCwd;
+        if (await canonicalPath(record.cwd) === primary) return "primary";
         return "managed";
+    }
+
+    async describe(options: WorkspaceDescribeOptions): Promise<WorkspaceRecord> {
+        const labels = normalizeWorkspaceLabels(options);
+        if (labels.name === undefined && labels.description === undefined) {
+            throw new WorkspaceError("Workspace description requires a name or description");
+        }
+        const state = await this.state();
+        return state.withMutationLock(async () => {
+            const branch = options.branch ?? await this.git.branch();
+            const record = await state.getWorkspace(branch);
+            if (!record) throw new WorkspaceError(`No workspace state exists for ${branch}`);
+            const snapshot = await state.snapshot([state.nameKey(branch), state.descriptionKey(branch)]);
+            try {
+                await state.putWorkspaceLabels(branch, labels);
+                const updated = await state.getWorkspace(branch);
+                if (!updated) throw new WorkspaceError(`Workspace binding changed for ${branch}`);
+                await state.rememberRepository();
+                return updated;
+            } catch (error) {
+                await state.restore(snapshot);
+                throw error;
+            }
+        });
     }
 
     async list(): Promise<WorkspaceStatus[]> {
         const state = await this.state();
-        const records = await state.listWorkspaces();
+        const snapshots = await state.listWorkspaceSnapshots();
         const result: WorkspaceStatus[] = [];
-        for (const record of records) {
-            const stale = !await this.recordIsValid(record, state);
+        for (const snapshot of snapshots) {
+            const { record } = snapshot;
+            const stale = !await this.recordIsValid(record, state, snapshot);
             let dirty = false;
             if (!stale) {
                 const status = await this.git.tryRun(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"], record.cwd);
@@ -452,7 +627,7 @@ export class WorkspaceService {
             const active = lease !== undefined && await state.processIsLive(lease);
             result.push({
                 record,
-                placement: await this.placement(record),
+                placement: await this.placement(record, state.primaryCwd),
                 recency: await state.sessionRecency(record.session),
                 dirty,
                 stale,
@@ -460,6 +635,7 @@ export class WorkspaceService {
                 ...(active && lease ? { activeLease: lease } : {}),
             });
         }
+        if (snapshots.length > 0) await state.rememberRepository();
         return result.sort((left, right) => (right.recency ?? 0) - (left.recency ?? 0));
     }
 
@@ -866,6 +1042,7 @@ export class WorkspaceService {
             version: 2,
             repository: currentMetadata.repository,
             branch: currentMetadata.branch,
+            ...await state.getWorkspaceLabels(currentMetadata.branch),
             session: resolve(session),
             cwd: currentMetadata.cwd,
             ...(currentMetadata.pr ? { pr: currentMetadata.pr, prUrl: currentMetadata.pr.url } : {}),
@@ -882,6 +1059,7 @@ export class WorkspaceService {
                 version: 2,
                 repository: metadata.repository,
                 branch: metadata.branch,
+                ...await state.getWorkspaceLabels(metadata.branch),
                 session: resolve(session),
                 cwd: metadata.cwd,
                 ...(metadata.pr ? { pr: metadata.pr, prUrl: metadata.pr.url } : {}),
@@ -962,6 +1140,7 @@ export class WorkspaceService {
                 repository: state.commonDir,
                 branch,
                 cwd: await canonicalPath(existing.cwd),
+                ...await state.getWorkspaceLabels(branch),
                 session: await this.sessions.create(workspaceMetadata(state.commonDir, branch, existing.cwd, pr)),
                 ...(pr ? { pr, prUrl: pr.url } : {}),
                 updatedAt: now(),
@@ -1028,6 +1207,7 @@ export class WorkspaceService {
     }
 
     async create(options: NewWorkspaceOptions, activation: ActivationOptions): Promise<Activation> {
+        const labels = normalizeWorkspaceLabels(options);
         if (options.pm && !options.parallel) throw new WorkspaceError("A PM worktree requires a managed workspace");
         const state = await this.state();
         return state.withMutationLock(async () => {
@@ -1059,11 +1239,13 @@ export class WorkspaceService {
                     await this.git.createBranch(options.branch, from, primary);
                     cwd = primary;
                 }
-                const record = await this.createRecord(state, options.branch, cwd, undefined, baseBranch, from);
+                const record = { ...await this.createRecord(state, options.branch, cwd, undefined, baseBranch, from), ...labels };
                 rollback.record = record;
                 rollback.createdSession = record.session;
                 rollback.config = await state.snapshot([
                     state.sessionKey(options.branch),
+                    state.nameKey(options.branch),
+                    state.descriptionKey(options.branch),
                     state.baseKey(options.branch),
                     state.baseOidKey(options.branch),
                     state.lastKey,
@@ -1239,6 +1421,7 @@ export class WorkspaceService {
             version: 2,
             repository: state.commonDir,
             branch,
+            ...await state.getWorkspaceLabels(branch),
             session,
             cwd: await canonicalPath(cwd),
             ...(metadata.pr ? { pr: metadata.pr, prUrl: metadata.pr.url } : {}),
@@ -1284,6 +1467,7 @@ export class WorkspaceService {
             version: 2,
             repository: state.commonDir,
             branch,
+            ...await state.getWorkspaceLabels(branch),
             session,
             cwd,
             ...(metadata.pr ? { pr: metadata.pr, prUrl: metadata.pr.url } : {}),
@@ -1318,7 +1502,6 @@ export class WorkspaceService {
     ): Promise<string> {
         const workspace = state.workspacePath(branch);
         if (await pathExists(workspace)) throw new WorkspaceError("Managed workspace path already exists and is not reusable");
-        await this.git.excludeWorkspaceRoot(state.commonDir);
         const path = state.worktreePath(branch);
         if (detached) {
             if (!from) throw new WorkspaceError("Managed detached worktree requires a ref");
@@ -1341,6 +1524,7 @@ export class WorkspaceService {
         baseBranch?: string,
         baseOid?: string,
     ): Promise<WorkspaceRecord> {
+        const labels = await state.getWorkspaceLabels(branch);
         const canonicalCwd = await canonicalPath(cwd);
         const session = await this.sessions.create(workspaceMetadata(state.commonDir, branch, canonicalCwd, pr));
         return {
@@ -1349,6 +1533,7 @@ export class WorkspaceService {
             branch,
             ...(baseBranch ? { baseBranch } : {}),
             ...(baseOid ? { baseOid } : {}),
+            ...labels,
             session,
             cwd: canonicalCwd,
             ...(pr ? { pr, prUrl: pr.url } : {}),

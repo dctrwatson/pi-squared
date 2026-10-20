@@ -40,7 +40,7 @@ function shellQuote(value: string): string {
 }
 
 export function buildPiwStartupInput(prompt: string): string {
-    return ["piw", "--", "--", prompt].map(shellQuote).join(" ") + "\n";
+    return ["piw", "--current", "--", "--", prompt].map(shellQuote).join(" ") + "\n";
 }
 
 export async function resolveLaunchPiCwd(cwd: string, input: string): Promise<string> {

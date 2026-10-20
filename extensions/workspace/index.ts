@@ -7,7 +7,8 @@ import { Type } from "typebox";
 import { registerArgumentCommand } from "../support/command-support.ts";
 import { registerLaunchPi } from "./launch-pi.ts";
 import { WorkspaceError } from "./process.ts";
-import { WorkspaceService, parseCommandWords, parseNewWorkspace, parseWorkspaceMerge, parseWorkspaceTarget } from "./core.ts";
+import { normalizeWorkspaceLabels } from "./labels.ts";
+import { WorkspaceService, parseCommandWords, parseNewWorkspace, parseWorkspaceDescribe, parseWorkspaceMerge, parseWorkspaceTarget } from "./core.ts";
 import { sessionHasAutomaticWorkspaceName, WORKSPACE_SESSION_NAME_TYPE, WORKSPACE_SESSION_TYPE } from "./sessions.ts";
 import type { PruneResult, PullRequestDivergenceChoice, WorkspaceMergeCleanup, WorkspaceMergePlan, WorkspaceRecord, WorkspaceStatus } from "./types.ts";
 
@@ -76,6 +77,8 @@ function pullRequestNumber(record: Pick<WorkspaceRecord, "pr" | "prUrl">): numbe
 
 function workspaceLabel(status: WorkspaceStatus): string {
     const parts = [status.record.branch];
+    if (status.record.name) parts.push(`name: ${status.record.name}`);
+    if (status.record.description) parts.push(`description: ${status.record.description}`);
     const number = pullRequestNumber(status.record);
     if (number) parts.push(`#${number}`);
     parts.push(status.placement === "primary" ? "primary" : "worktree");
@@ -97,29 +100,41 @@ function pruneText(result: PruneResult): string {
 
 const WORKSPACE_HELP_TEXT = `Usage: /workspace or /ws [target] [--worktree]
        /workspace or /ws new
-       /workspace or /ws new <branch> [--from <ref|current>] [--worktree]
+       /workspace or /ws new <branch> [--from <ref|current>] [--no-worktree] [--name <text>] [--description <text>]
+       /workspace or /ws describe [branch] --name <text> [--description <text>]
+       /workspace or /ws describe [branch] --description <text> [--name <text>]
        /workspace or /ws merge <base-branch> [--squash]
        /workspace or /ws prune
 
 No argument: Open the workspace picker.
 target: Local branch, pull request number, or GitHub pull request URL.
 branch:<name>: Force a local branch target.
-new: Start a fresh session for the current branch, or create a branch workspace.
+new: Start a fresh session for the current branch; with a branch, create a managed worktree.
 --from: Select the new branch base; current uses the current commit.
+--name, --description: Set workspace labels when creating or describing a workspace.
+describe: Set or clear labels for an existing workspace on a local branch; omit branch to use the current workspace. It does not switch workspaces. Use an empty quoted value to clear a label.
 --worktree: Use a managed worktree.
+--no-worktree: With new <branch>, use the primary checkout instead.
 merge: Prepare, merge, and remove the current managed workspace.
 --squash: Create one commit on the base branch.
 prune: Remove inactive managed workspaces.
 --help, -h: Show this help.`;
 const WORKSPACE_TOP_LEVEL_COMPLETIONS: readonly AutocompleteItem[] = [
     { value: "new", label: "new", description: "Create a workspace" },
+    { value: "describe", label: "describe", description: "Set workspace labels" },
     { value: "merge", label: "merge", description: "Merge and remove this workspace" },
     { value: "prune", label: "prune", description: "Remove inactive managed workspaces" },
     { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
 ];
+const WORKSPACE_LABEL_OPTION_COMPLETIONS: readonly AutocompleteItem[] = [
+    { value: "--name", label: "--name", description: "Set the workspace name" },
+    { value: "--description", label: "--description", description: "Set the workspace description" },
+];
 const WORKSPACE_NEW_OPTION_COMPLETIONS: readonly AutocompleteItem[] = [
     { value: "--from", label: "--from", description: "Select the base ref" },
-    { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
+    { value: "--worktree", label: "--worktree", description: "Use a managed worktree (default)" },
+    { value: "--no-worktree", label: "--no-worktree", description: "Use the primary checkout" },
+    ...WORKSPACE_LABEL_OPTION_COMPLETIONS,
 ];
 const WORKSPACE_WORKTREE_COMPLETION: readonly AutocompleteItem[] = [
     { value: "--worktree", label: "--worktree", description: "Use a managed worktree" },
@@ -128,6 +143,7 @@ const WORKSPACE_MERGE_OPTION_COMPLETIONS: readonly AutocompleteItem[] = [
     { value: "--squash", label: "--squash", description: "Create one commit on the base" },
 ];
 export const CREATE_WORKSPACE_TOOL = "create_workspace";
+export const WORKSPACE_LINK_PR_TOOL = "workspace_link_pr";
 export const WORKSPACE_MERGE_FINALIZE_TOOL = "workspace_merge_finalize";
 
 function workspaceMergePrompt(plan: WorkspaceMergePlan): string {
@@ -141,8 +157,13 @@ Review all source changes and commits relative to ${plan.base}. Group the work i
 Do not update ${plan.base}, remove the worktree, or delete branches yourself. When the workspace is ready, call ${WORKSPACE_MERGE_FINALIZE_TOOL} as the only tool call. The finalizer asks for confirmation, merges the branch, removes the workspace and source branch, preserves this Pi session file, and shuts down Pi.`;
 }
 
+function completionWord(value: string): string {
+    if (value && !/[\s"'\\]/.test(value)) return value;
+    return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
 function completionValue(words: readonly string[], value: string): string {
-    return [...words, value].join(" ");
+    return [...words, value].map(completionWord).join(" ");
 }
 
 function prefixedCompletions(
@@ -156,7 +177,7 @@ function prefixedCompletions(
 }
 
 function requiresBranchTargetPrefix(branch: string): boolean {
-    return branch === "new" || branch === "merge" || branch === "prune" || /^#?\d+$/.test(branch) || branch.startsWith("branch:");
+    return branch === "new" || branch === "describe" || branch === "merge" || branch === "prune" || /^#?\d+$/.test(branch) || branch.startsWith("branch:");
 }
 
 function branchTargetValue(branch: string): string {
@@ -221,34 +242,50 @@ function completionTokens(argumentPrefix: string): { words: string[]; prefix: st
 }
 
 function newCompletionState(words: readonly string[]): {
-    awaitingRef: boolean;
+    awaitingValue: "from" | "name" | "description" | undefined;
     hasFrom: boolean;
-    hasWorktree: boolean;
+    hasPlacement: boolean;
+    hasName: boolean;
+    hasDescription: boolean;
 } | undefined {
-    let awaitingRef = false;
+    let awaitingValue: "from" | "name" | "description" | undefined;
     let hasFrom = false;
-    let hasWorktree = false;
+    let hasPlacement = false;
+    let hasName = false;
+    let hasDescription = false;
     let hasBranch = false;
     for (const word of words) {
-        if (awaitingRef) {
-            awaitingRef = false;
-            hasFrom = true;
+        if (awaitingValue) {
+            if (awaitingValue === "from") hasFrom = true;
+            else if (awaitingValue === "name") hasName = true;
+            else hasDescription = true;
+            awaitingValue = undefined;
             continue;
         }
         if (word === "--from") {
             if (hasFrom) return undefined;
-            awaitingRef = true;
+            awaitingValue = "from";
             continue;
         }
-        if (word === "--worktree") {
-            if (hasWorktree) return undefined;
-            hasWorktree = true;
+        if (word === "--name") {
+            if (hasName) return undefined;
+            awaitingValue = "name";
+            continue;
+        }
+        if (word === "--description") {
+            if (hasDescription) return undefined;
+            awaitingValue = "description";
+            continue;
+        }
+        if (word === "--worktree" || word === "--no-worktree") {
+            if (hasPlacement) return undefined;
+            hasPlacement = true;
             continue;
         }
         if (word.startsWith("--") || hasBranch) return undefined;
         hasBranch = true;
     }
-    return { awaitingRef, hasFrom, hasWorktree };
+    return { awaitingValue, hasFrom, hasPlacement, hasName, hasDescription };
 }
 
 function newWorkspaceCompletions(
@@ -258,7 +295,7 @@ function newWorkspaceCompletions(
 ): AutocompleteItem[] {
     const state = newCompletionState(words.slice(1));
     if (!state) return [];
-    if (state.awaitingRef) {
+    if (state.awaitingValue === "from") {
         const refs: AutocompleteItem[] = [
             { value: "current", label: "current", description: "Current checkout" },
             ...candidates.refs
@@ -267,12 +304,57 @@ function newWorkspaceCompletions(
         ];
         return prefixedCompletions(words, prefix, refs);
     }
+    if (state.awaitingValue) return [];
     if (prefix && !prefix.startsWith("--")) return [];
 
     const options = WORKSPACE_NEW_OPTION_COMPLETIONS.filter((option) =>
         (option.value !== "--from" || !state.hasFrom)
-        && (option.value !== "--worktree" || !state.hasWorktree));
+        && ((option.value !== "--worktree" && option.value !== "--no-worktree") || !state.hasPlacement)
+        && (option.value !== "--name" || !state.hasName)
+        && (option.value !== "--description" || !state.hasDescription));
     return prefixedCompletions(words, prefix, options);
+}
+
+function describeWorkspaceCompletions(
+    words: readonly string[],
+    prefix: string,
+    candidates: WorkspaceCompletionCandidates,
+): AutocompleteItem[] {
+    let awaitingLabel = false;
+    let hasBranch = false;
+    let hasName = false;
+    let hasDescription = false;
+    for (const word of words.slice(1)) {
+        if (awaitingLabel) {
+            awaitingLabel = false;
+            continue;
+        }
+        if (word === "--name") {
+            if (hasName) return [];
+            hasName = true;
+            awaitingLabel = true;
+            continue;
+        }
+        if (word === "--description") {
+            if (hasDescription) return [];
+            hasDescription = true;
+            awaitingLabel = true;
+            continue;
+        }
+        if (word.startsWith("--") || hasBranch || hasName || hasDescription) return [];
+        hasBranch = true;
+    }
+    if (awaitingLabel) return [];
+
+    const branchOptions = !hasBranch && !hasName && !hasDescription && !prefix.startsWith("--")
+        ? workspaceTargetCompletions(words, prefix, { ...candidates, pullRequests: [] })
+        : [];
+    const labelOptions = !prefix || prefix.startsWith("--")
+        ? prefixedCompletions(words, prefix, WORKSPACE_LABEL_OPTION_COMPLETIONS.filter((option) =>
+            (option.value !== "--name" || !hasName)
+            && (option.value !== "--description" || !hasDescription)))
+        : [];
+    return [...branchOptions, ...labelOptions];
 }
 
 function mergeWorkspaceCompletions(
@@ -308,6 +390,8 @@ function getWorkspaceArgumentCompletions(
         ];
     } else if (words[0] === "new") {
         completions = newWorkspaceCompletions(words, prefix, candidates);
+    } else if (words[0] === "describe") {
+        completions = describeWorkspaceCompletions(words, prefix, candidates);
     } else if (words[0] === "merge") {
         completions = mergeWorkspaceCompletions(words, prefix, candidates);
     } else if (words.length === 1 && words[0] === "--worktree") {
@@ -388,23 +472,25 @@ export function staleWorkspaceTarget(status: WorkspaceStatus): NonNullable<Retur
 export async function picker(service: WorkspaceService, ctx: ExtensionCommandContext): Promise<void> {
     const statuses = await service.list();
     const active = statuses.filter((status) => status.active);
-    const selectable: WorkspaceStatus[] = [];
-    for (const status of statuses) {
-        if (status.active) continue;
-        if (status.stale || !await service.activationBlocker(status.record.branch, false)) selectable.push(status);
-    }
+    const candidates = statuses.filter((status) => !status.active && !status.stale);
+    const blocked = candidates.length > 0
+        ? await service.activationBlockers(statuses, candidates, false)
+        : new Set<string>();
+    const selectable = statuses.filter((status) => !status.active
+        && (status.stale || !blocked.has(status.record.branch)));
     if (active.length > 0) ctx.ui.notify(`Active workspaces: ${activeWorkspaceText(active)}`, "info");
     const newAction = "New workspace…";
     const promoteAction = "Promote current workspace…";
-    const labels = [...selectable.map(workspaceLabel), newAction, promoteAction];
+    const labeledStatuses = selectable.map((status) => ({ status, label: workspaceLabel(status) }));
+    const labels = [...labeledStatuses.map(({ label }) => label), newAction, promoteAction];
     const selected = await ctx.ui.select("Workspaces", labels);
     if (!selected) return;
     if (selected === newAction) {
         const branch = await ctx.ui.input("New workspace branch", "feature/name");
         if (!branch?.trim()) return;
-        const parallel = await ctx.ui.confirm("New workspace", "Use a managed worktree?");
-        await service.create({ branch: branch.trim(), parallel }, {
-            parallel,
+        const options = parseNewWorkspace([branch.trim()]);
+        await service.create(options, {
+            parallel: options.parallel,
             switchSession: (session) => ctx.switchSession(session),
         });
         return;
@@ -414,7 +500,7 @@ export async function picker(service: WorkspaceService, ctx: ExtensionCommandCon
         await switchWorkspace(service, ctx, { type: "branch", branch }, true);
         return;
     }
-    const status = selectable.find((candidate) => workspaceLabel(candidate) === selected);
+    const status = labeledStatuses.find((candidate) => candidate.label === selected)?.status;
     if (!status) return;
     if (status.stale) {
         const number = pullRequestNumber(status.record);
@@ -445,6 +531,12 @@ export async function handleWorkspace(
         const words = parseCommandWords(args);
         if (words.length === 0) {
             await picker(service, ctx);
+            return;
+        }
+        if (words[0] === "describe") {
+            const options = parseWorkspaceDescribe(words.slice(1));
+            const record = await service.describe(options);
+            ctx.ui.notify(`Workspace labels updated for ${record.branch}.`, "info");
             return;
         }
         if (words[0] === "prune") {
@@ -527,6 +619,42 @@ export default function workspaceExtension(
     let pendingMergeCleanup: WorkspaceMergeCleanup | undefined;
     let pmPath: string | undefined;
 
+    const registerPrLinkTool = (active: boolean): void => {
+        if (typeof pi.registerTool !== "function") return;
+        pi.registerTool({
+            name: WORKSPACE_LINK_PR_TOOL,
+            label: "Link workspace PR",
+            description: "Link a GitHub PR to the active workspace without changing its branch or session",
+            exposure: active ? "direct" : "hidden",
+            parameters: Type.Object({
+                pr: Type.String({ minLength: 1, description: "GitHub pull request URL or number" }),
+            }),
+            executionMode: "sequential",
+            async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+                const binding = owned;
+                const session = ctx.sessionManager.getSessionFile();
+                if (!binding || !session || resolve(session) !== resolve(binding.session)) {
+                    throw new WorkspaceError("No active workspace belongs to this Pi session");
+                }
+                const target = parseWorkspaceTarget(params.pr);
+                if (target?.type !== "pr") throw new WorkspaceError("A GitHub pull request URL or number is required");
+                const record = await createService(ctx.cwd).linkPullRequest(target, binding, (metadata) => {
+                    if (owned !== binding || ctx.sessionManager.getSessionFile() !== session) {
+                        throw new WorkspaceError("The active workspace session changed before its pull request was linked");
+                    }
+                    pi.appendEntry(WORKSPACE_SESSION_TYPE, metadata);
+                });
+                completionCandidates = undefined;
+                const pr = record.pr!;
+                return {
+                    content: [{ type: "text", text: `Linked [#${pr.number}](${pr.url}) to workspace ${record.branch}.` }],
+                    details: { branch: record.branch, number: pr.number, url: pr.url },
+                };
+            },
+        });
+    };
+    registerPrLinkTool(false);
+
     const deactivateMergeFinalizer = (): void => {
         if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
         pi.setActiveTools(pi.getActiveTools().filter((name) => name !== WORKSPACE_MERGE_FINALIZE_TOOL));
@@ -535,11 +663,13 @@ export default function workspaceExtension(
         pi.registerTool({
             name: CREATE_WORKSPACE_TOOL,
             label: "Create workspace",
-            description: "Create an inactive managed workspace for a new local branch",
+            description: "Create an inactive managed workspace with optional purpose labels",
             parameters: Type.Object({
                 branch: Type.String({ minLength: 1, description: "New local Git branch name" }),
                 cwd: Type.Optional(Type.String({ minLength: 1, description: "Repository directory; default is the current directory" })),
                 from: Type.Optional(Type.String({ minLength: 1, description: "Base ref; default is local main" })),
+                name: Type.Optional(Type.String({ minLength: 1, description: "Optional workspace name" })),
+                description: Type.Optional(Type.String({ minLength: 1, description: "Optional workspace purpose" })),
                 pm: Type.Optional(Type.String({ minLength: 1, description: "Existing PM Git worktree to link as ../pm" })),
             }),
             executionMode: "sequential",
@@ -547,16 +677,23 @@ export default function workspaceExtension(
                 const branch = params.branch.trim();
                 const cwd = params.cwd?.trim();
                 const from = params.from?.trim();
+                const labels = normalizeWorkspaceLabels(params);
+                const name = labels.name;
+                const description = labels.description;
                 const pm = params.pm?.trim();
                 if (!branch) throw new WorkspaceError("A branch name is required");
                 if (params.cwd && !cwd) throw new WorkspaceError("A repository path is required");
                 if (params.from && !from) throw new WorkspaceError("A base ref is required");
+                if (params.name !== undefined && !name) throw new WorkspaceError("A workspace name is required");
+                if (params.description !== undefined && !description) throw new WorkspaceError("A workspace description is required");
                 if (params.pm && !pm) throw new WorkspaceError("A PM path is required");
                 const repositoryCwd = cwd ? resolve(ctx.cwd, cwd) : ctx.cwd;
                 const service = createService(repositoryCwd);
                 const activation = await service.create({
                     branch,
                     ...(from ? { from } : {}),
+                    ...(name ? { name } : {}),
+                    ...(description ? { description } : {}),
                     ...(pm ? { pm: resolve(repositoryCwd, pm) } : {}),
                     parallel: true,
                 }, {
@@ -573,6 +710,8 @@ export default function workspaceExtension(
                     details: {
                         branch,
                         cwd: activation.record.cwd,
+                        ...(activation.record.name ? { name: activation.record.name } : {}),
+                        ...(activation.record.description ? { description: activation.record.description } : {}),
                         pm: workspacePm,
                         session: activation.record.session,
                     },
@@ -673,11 +812,13 @@ export default function workspaceExtension(
     });
     pi.on("resources_discover", () => pmPath ? { skillPaths: [WORKSPACE_PM_SKILL_PATH] } : { skillPaths: [] });
     pi.on("before_agent_start", (event) => {
-        if (!owned) return undefined;
+        if (!owned) return;
         const pmGuidance = pmPath ? "\n\nActive workspace PM: `../pm`. Load `workspace-pm` for durable project records." : "";
-        return { systemPrompt: `${event.systemPrompt}\n\n${WORKSPACE_PROMPT_GUIDANCE}${pmGuidance}` };
+        event.systemPromptOptions.sections.workspace = `${WORKSPACE_PROMPT_GUIDANCE}${pmGuidance}`;
     });
     pi.on("session_start", async (_event, ctx) => {
+        owned = undefined;
+        registerPrLinkTool(false);
         workspaceCwd = ctx.cwd;
         pendingMerge = undefined;
         pendingMergeCleanup = undefined;
@@ -687,11 +828,13 @@ export default function workspaceExtension(
         try {
             const session = ctx.sessionManager.getSessionFile();
             if (!session) return;
+            const worktree = await service.git.tryRun(["rev-parse", "--is-inside-work-tree"]);
+            if (!worktree.ok || worktree.stdout.trim() !== "true") return;
             const state = await service.state();
             const lease = await state.readLease(session);
             if (!lease || lease.pid !== process.pid || lease.hostname !== hostname() || lease.session !== session) {
                 if (hasWorkspaceMetadata(ctx.sessionManager.getEntries?.())) {
-                    ctx.ui.notify("Workspace activation skipped: this Pi process does not own the workspace lease. Run piw to activate workspace features.", "warning");
+                    ctx.ui.notify("Workspace activation skipped: this Pi process does not own the workspace lease. Run piw --current to activate workspace features.", "warning");
                 }
                 return;
             }
@@ -705,6 +848,7 @@ export default function workspaceExtension(
             const record = await service.registerCurrent(session, true);
             if (!record) return;
             owned = { branch: record.branch, session: record.session };
+            registerPrLinkTool(true);
             if (await service.git.isManagedWorktree(record.cwd)) {
                 pmPath = await managedWorkspacePmPath(service, record.cwd);
                 if (!pmPath) ctx.ui.notify("Workspace PM repository is unavailable; PM guidance is disabled.", "warning");
@@ -715,6 +859,7 @@ export default function workspaceExtension(
         }
     });
     pi.on("session_shutdown", async (event, ctx) => {
+        registerPrLinkTool(false);
         if (pendingMergeCleanup) {
             const cleanup = pendingMergeCleanup;
             pendingMergeCleanup = undefined;

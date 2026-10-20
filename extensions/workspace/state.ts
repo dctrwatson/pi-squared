@@ -4,11 +4,47 @@ import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { GitRepository } from "./git.ts";
 import { WorkspaceError } from "./process.ts";
-import { readWorkspaceSession } from "./sessions.ts";
-import type { LeaseRecord, WorkspaceMergeCleanup, WorkspaceRecord } from "./types.ts";
+import { readWorkspaceSession, type WorkspaceSessionSnapshot } from "./sessions.ts";
+import { rememberWorkspaceRepository } from "./registry.ts";
+import { normalizeWorkspaceLabels, workspaceLabelText } from "./labels.ts";
+import type { LeaseRecord, WorkspaceLabels, WorkspaceMergeCleanup, WorkspaceRecord } from "./types.ts";
 
 const CONFIG_PREFIX = "pi-workspace";
 const MUTATION_LOCK_REF = "refs/pi-workspace/mutation-lock";
+
+export interface WorkspaceRecordSnapshot {
+    record: WorkspaceRecord;
+    session: WorkspaceSessionSnapshot | undefined;
+}
+
+interface WorkspaceConfigValues {
+    session?: string;
+    prUrl?: string;
+    baseBranch?: string;
+    baseOid?: string;
+    name?: string;
+    description?: string;
+}
+
+const WORKSPACE_CONFIG_SUFFIXES: readonly (readonly [string, keyof WorkspaceConfigValues])[] = [
+    [".pi-workspace-session", "session"],
+    [".pi-workspace-pr", "prUrl"],
+    [".pi-workspace-base", "baseBranch"],
+    [".pi-workspace-base-oid", "baseOid"],
+    [".pi-workspace-name", "name"],
+    [".pi-workspace-description", "description"],
+];
+
+function workspaceConfigEntry(key: string): { branch: string; field: keyof WorkspaceConfigValues } | undefined {
+    const prefix = "branch.";
+    if (!key.startsWith(prefix)) return undefined;
+    for (const [suffix, field] of WORKSPACE_CONFIG_SUFFIXES) {
+        if (!key.endsWith(suffix)) continue;
+        const branch = key.slice(prefix.length, -suffix.length);
+        return branch ? { branch, field } : undefined;
+    }
+    return undefined;
+}
 
 interface MutationLockOwner {
     version: 1;
@@ -52,11 +88,11 @@ export class WorkspaceState {
     }
 
     get root(): string {
-        return join(this.primaryCwd, ".ws");
+        return join(this.commonDir, "pi-workspaces");
     }
 
     get stateRoot(): string {
-        return join(this.commonDir, "pi-workspaces", ".state");
+        return join(this.root, ".state");
     }
 
     get leasesRoot(): string {
@@ -81,6 +117,14 @@ export class WorkspaceState {
 
     sessionKey(branch: string): string {
         return `branch.${branch}.pi-workspace-session`;
+    }
+
+    nameKey(branch: string): string {
+        return `branch.${branch}.pi-workspace-name`;
+    }
+
+    descriptionKey(branch: string): string {
+        return `branch.${branch}.pi-workspace-description`;
     }
 
     prKey(branch: string): string {
@@ -109,7 +153,7 @@ export class WorkspaceState {
     }
 
     async setConfig(key: string, value: string): Promise<void> {
-        await this.git.run(["config", "--local", key, value]);
+        await this.git.run(["config", "--local", "--", key, value]);
     }
 
     async unsetConfig(key: string): Promise<void> {
@@ -119,28 +163,70 @@ export class WorkspaceState {
         }
     }
 
+    async getWorkspaceLabels(branch: string): Promise<WorkspaceLabels> {
+        const [storedName, storedDescription] = await Promise.all([
+            this.getConfig(this.nameKey(branch)),
+            this.getConfig(this.descriptionKey(branch)),
+        ]);
+        const name = workspaceLabelText(storedName);
+        const description = workspaceLabelText(storedDescription);
+        return { ...(name ? { name } : {}), ...(description ? { description } : {}) };
+    }
+
+    async putWorkspaceLabels(branch: string, labels: WorkspaceLabels): Promise<void> {
+        const normalized = normalizeWorkspaceLabels(labels);
+        for (const [key, value] of [
+            [this.nameKey(branch), normalized.name],
+            [this.descriptionKey(branch), normalized.description],
+        ] as const) {
+            if (value === undefined) continue;
+            if (value) await this.setConfig(key, value);
+            else await this.unsetConfig(key);
+        }
+    }
+
     async getWorkspace(branch: string): Promise<WorkspaceRecord | undefined> {
-        const session = await this.getConfig(this.sessionKey(branch));
+        return (await this.getWorkspaceSnapshot(branch))?.record;
+    }
+
+    private async getWorkspaceSnapshot(branch: string, config?: WorkspaceConfigValues): Promise<WorkspaceRecordSnapshot | undefined> {
+        const session = config ? config.session : await this.getConfig(this.sessionKey(branch));
         if (!session) return undefined;
         const stored = await readWorkspaceSession(session);
-        const [prUrl, baseBranch, baseOid] = await Promise.all([
-            this.getConfig(this.prKey(branch)),
-            this.getConfig(this.baseKey(branch)),
-            this.getConfig(this.baseOidKey(branch)),
-        ]);
+        let prUrl: string | undefined;
+        let baseBranch: string | undefined;
+        let baseOid: string | undefined;
+        let labels: WorkspaceLabels;
+        if (config) {
+            ({ prUrl, baseBranch, baseOid } = config);
+            const name = workspaceLabelText(config.name);
+            const description = workspaceLabelText(config.description);
+            labels = { ...(name ? { name } : {}), ...(description ? { description } : {}) };
+        } else {
+            [prUrl, baseBranch, baseOid, labels] = await Promise.all([
+                this.getConfig(this.prKey(branch)),
+                this.getConfig(this.baseKey(branch)),
+                this.getConfig(this.baseOidKey(branch)),
+                this.getWorkspaceLabels(branch),
+            ]);
+        }
         const metadata = stored?.metadata;
         const pr = metadata?.pr && prUrl && sameUrl(metadata.pr.url, prUrl) ? metadata.pr : undefined;
         return {
-            version: 2,
-            repository: metadata?.repository ?? this.commonDir,
-            branch,
-            ...(baseBranch ? { baseBranch } : {}),
-            ...(baseOid ? { baseOid } : {}),
-            session,
-            cwd: metadata?.cwd ?? stored?.header.cwd ?? this.commonDir,
-            ...(pr ? { pr } : {}),
-            ...(prUrl ? { prUrl } : {}),
-            updatedAt: now(),
+            record: {
+                version: 2,
+                repository: metadata?.repository ?? this.commonDir,
+                branch,
+                ...(baseBranch ? { baseBranch } : {}),
+                ...(baseOid ? { baseOid } : {}),
+                ...labels,
+                session,
+                cwd: metadata?.cwd ?? stored?.header.cwd ?? this.commonDir,
+                ...(pr ? { pr } : {}),
+                ...(prUrl ? { prUrl } : {}),
+                updatedAt: now(),
+            },
+            session: stored,
         };
     }
 
@@ -172,32 +258,59 @@ export class WorkspaceState {
     }
 
     async listWorkspaces(): Promise<WorkspaceRecord[]> {
-        const result = await this.git.tryRun(["config", "--local", "--get-regexp", "^branch\\..*\\.pi-workspace-session$"]);
+        return (await this.listWorkspaceSnapshots()).map((snapshot) => snapshot.record);
+    }
+
+    async listWorkspaceSnapshots(): Promise<WorkspaceRecordSnapshot[]> {
+        const result = await this.git.tryRun([
+            "config", "--local", "--null", "--get-regexp",
+            "^branch\\..*\\.pi-workspace-(session|pr|base|base-oid|name|description)$",
+        ]);
         if (!result.ok) return [];
-        const records: WorkspaceRecord[] = [];
-        for (const line of result.stdout.split("\n")) {
-            const separator = line.indexOf("\t") === -1 ? line.indexOf(" ") : line.indexOf("\t");
+        const configByBranch = new Map<string, WorkspaceConfigValues>();
+        const sessionBranches: string[] = [];
+        for (const entry of result.stdout.split("\0")) {
+            const separator = entry.indexOf("\n");
             if (separator === -1) continue;
-            const key = line.slice(0, separator);
-            const prefix = "branch.";
-            const suffix = ".pi-workspace-session";
-            if (!key.startsWith(prefix) || !key.endsWith(suffix)) continue;
-            const branch = key.slice(prefix.length, -suffix.length);
-            if (!branch) continue;
-            const record = await this.getWorkspace(branch);
-            if (record) records.push(record);
+            const parsed = workspaceConfigEntry(entry.slice(0, separator));
+            if (!parsed) continue;
+            const config = configByBranch.get(parsed.branch) ?? {};
+            config[parsed.field] = entry.slice(separator + 1).trim();
+            configByBranch.set(parsed.branch, config);
+            if (parsed.field === "session") sessionBranches.push(parsed.branch);
         }
-        return records;
+        const snapshots: WorkspaceRecordSnapshot[] = [];
+        const snapshotsByBranch = new Map<string, Promise<WorkspaceRecordSnapshot | undefined>>();
+        for (const branch of sessionBranches) {
+            let snapshot = snapshotsByBranch.get(branch);
+            if (!snapshot) {
+                snapshot = this.getWorkspaceSnapshot(branch, configByBranch.get(branch));
+                snapshotsByBranch.set(branch, snapshot);
+            }
+            const record = await snapshot;
+            if (record) snapshots.push(record);
+        }
+        return snapshots;
+    }
+
+    async rememberRepository(): Promise<void> {
+        try {
+            await rememberWorkspaceRepository(this.commonDir, this.primaryCwd);
+        } catch {
+            // The Git binding remains valid when the global index cannot be written.
+        }
     }
 
     async putWorkspace(record: WorkspaceRecord): Promise<void> {
-        const current: WorkspaceRecord = { ...record, version: 2 };
+        const current: WorkspaceRecord = { ...record, ...normalizeWorkspaceLabels(record), version: 2 };
         await this.setConfig(this.sessionKey(current.branch), current.session);
         const prUrl = current.pr?.url ?? current.prUrl;
         if (prUrl) await this.setConfig(this.prKey(current.branch), prUrl);
         else await this.unsetConfig(this.prKey(current.branch));
         if (current.baseBranch) await this.setConfig(this.baseKey(current.branch), current.baseBranch);
         if (current.baseOid) await this.setConfig(this.baseOidKey(current.branch), current.baseOid);
+        await this.putWorkspaceLabels(current.branch, current);
+        await this.rememberRepository();
     }
 
     async putLast(record: WorkspaceRecord): Promise<void> {
@@ -207,6 +320,8 @@ export class WorkspaceState {
     async removeWorkspace(branch: string): Promise<void> {
         await this.unsetConfig(this.sessionKey(branch));
         await this.unsetConfig(this.prKey(branch));
+        await this.unsetConfig(this.nameKey(branch));
+        await this.unsetConfig(this.descriptionKey(branch));
         await this.unsetConfig(this.baseKey(branch));
         await this.unsetConfig(this.baseOidKey(branch));
         await this.unsetConfig(this.mergeCleanupKey(branch));

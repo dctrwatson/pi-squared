@@ -114,30 +114,51 @@ test("workspace mappings and the repository-wide last pointer use shared local c
   }
 });
 
-test("piw new creates a branch in a managed worktree", async () => {
-  const root = await repository();
-  let session;
-  try {
-    git(root, "checkout", "-b", "other");
-    await writeFile(join(root, "other.txt"), "other\n");
-    git(root, "add", "other.txt");
-    git(root, "commit", "-m", "other");
-    const mainHead = git(root, "rev-parse", "main");
+test("piw new creates a managed worktree by default or with --worktree", async (t) => {
+  for (const flags of [[], ["--worktree"]]) {
+    await t.test(flags[0] ?? "default", async () => {
+      const root = await repository();
+      let session;
+      try {
+        git(root, "checkout", "-b", "other");
+        await writeFile(join(root, "other.txt"), "other\n");
+        git(root, "add", "other.txt");
+        git(root, "commit", "-m", "other");
+        const mainHead = git(root, "rev-parse", "main");
 
-    const plan = await resolveLaunch(["new", "feature", "--worktree"], root);
-    assert.equal(plan.action, "launch");
-    session = plan.session;
+        const plan = await resolveLaunch(["new", "feature", ...flags], root);
+        assert.equal(plan.action, "launch");
+        session = plan.session;
 
-    assert.equal(git(root, "branch", "--show-current"), "other");
-    assert.equal(git(root, "rev-parse", "feature"), mainHead);
-    assert.equal(git(root, "-C", plan.cwd, "branch", "--show-current"), "feature");
-  } finally {
-    if (session) await rm(session, { force: true });
-    await removeRepository(root);
+        assert.equal(git(root, "branch", "--show-current"), "other");
+        assert.equal(git(root, "rev-parse", "feature"), mainHead);
+        assert.equal(git(plan.cwd, "branch", "--show-current"), "feature");
+        assert.equal(await new WorkspaceService(root).git.isManagedWorktree(plan.cwd), true);
+      } finally {
+        if (session) await rm(session, { force: true });
+        await removeRepository(root);
+      }
+    });
   }
 });
 
-test("the launcher uses the primary checkout branch by default", async () => {
+test("piw new --no-worktree creates a branch in the primary checkout", async (t) => {
+  const root = await repository();
+  t.after(() => removeRepository(root));
+  const args = ["--model", "test/model"];
+
+  const plan = await resolveLaunch(["new", "feature", "--no-worktree", "--", ...args], root);
+
+  assert.equal(plan.action, "launch");
+  assert.equal(plan.cwd, await realpath(root));
+  assert.equal(git(root, "branch", "--show-current"), "feature");
+  assert.deepEqual(plan.args, args);
+  const record = await (await new WorkspaceService(root).state()).getWorkspace("feature");
+  assert.equal(record?.cwd, plan.cwd);
+  assert.equal(record?.session, plan.session);
+});
+
+test("piw --current uses the primary checkout branch", async () => {
   const root = await repository();
   try {
     git(root, "branch", "feature");
@@ -146,7 +167,7 @@ test("the launcher uses the primary checkout branch by default", async () => {
     const { record } = await mapWorkspace(service, sessions, "main", root);
     await service.activate({ type: "branch", branch: "feature" }, { parallel: true, switchSession: switcher([]) });
     await (await service.state()).releaseLease(record);
-    const plan = await resolveLaunch([], root);
+    const plan = await resolveLaunch(["--current"], root);
 
     assert.equal(plan.cwd, await realpath(root));
     assert.equal(plan.session, record.session);
@@ -200,7 +221,7 @@ test("an explicit branch launcher reuses a trusted pull request workspace locall
   }
 });
 
-test("the launcher uses the current secondary checkout branch by default", async () => {
+test("piw --current uses the current secondary checkout branch", async () => {
   const root = await repository();
   try {
     git(root, "branch", "feature");
@@ -210,7 +231,7 @@ test("the launcher uses the current secondary checkout branch by default", async
     const service = new WorkspaceService(secondary, { sessions });
     const { record } = await mapWorkspace(service, sessions, "feature", secondary);
 
-    const plan = await resolveLaunch([], secondary);
+    const plan = await resolveLaunch(["--current"], secondary);
 
     assert.equal(plan.cwd, await realpath(secondary));
     assert.equal(plan.session, record.session);

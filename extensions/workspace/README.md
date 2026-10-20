@@ -8,22 +8,32 @@ Install this package as a global Pi package. Put `bin/piw` on your `PATH`. The l
 
 - `/workspace` and `/ws` open the local workspace picker.
 - `/ws <branch>` switches to a local branch workspace.
-- `/ws branch:<branch>` forces a local branch target. Use it for a branch named `new`, `prune`, or a pull request number.
+- `/ws branch:<branch>` forces a local branch target. Use it for a branch named `new`, `describe`, `prune`, or a pull request number.
 - `/ws <number>`, `/ws #<number>`, and `/ws <pull-request-url>` open a GitHub pull request workspace. URLs can end in `/files`, `/commits`, `/checks`, or `/conversation`.
 - `/ws <target> --worktree` and `/ws --worktree <target>` use a managed worktree when the target is not already in one.
 - `/ws --worktree` promotes the clean, non-`main` primary workspace into a managed worktree. Pi forks its session for the new working directory.
 - `/ws new` starts a fresh Pi session and binds it to the current branch workspace. It replaces the branch's saved workspace-session binding.
-- `/ws new <branch>` creates a branch workspace.
+- `/ws new <branch>` creates a branch in a managed worktree and switches the current Pi session.
 - `/ws new <branch> --from <ref>` selects the base ref. Use `--from current` to use the current commit.
-- `/ws new <branch> --worktree` creates the branch in a managed worktree and switches the current Pi session.
+- `/ws new <branch> --name <text> --description <text>` sets optional workspace labels as it creates the branch. You can use either label on its own.
+- `/ws new <branch> --no-worktree` creates the branch in the primary checkout instead. The explicit `--worktree` option remains supported.
+- `/ws describe [branch] --name <text> --description <text>` updates labels for an existing workspace on a local branch. You can use either label on its own. The branch must already have workspace state; this command does not create a workspace. If you omit `branch`, the command uses the current branch. Use an empty quoted value, such as `--name ""`, to clear a label. This command does not launch or switch Pi. It does not change sessions or leases.
 - `/ws merge <base-branch>` asks Pi to group the work into logical commits, run checks, fast-forward the base branch, and remove the managed workspace.
 - `/ws merge <base-branch> --squash` creates one commit on the base branch before it removes the managed workspace.
 - `/ws prune` removes inactive managed workspaces when their remote branch no longer exists or their work is integrated into the recorded local base branch.
-- `piw --list` shows locally known workspaces and their status without starting Pi.
+- `piw` and `piw --list` show workspace status without starting Pi. Inside a Git worktree, they list local workspaces. Outside one, they list all known workspaces.
+- `piw --global` lists all known workspaces. `piw --local` requires a Git worktree and lists only its workspaces.
+- `piw --current` starts Pi on the branch in the current checkout.
 - `create_workspace` creates an inactive managed workspace for a new local branch. It returns the source directory for `launch_pi`.
 - `launch_pi` starts interactive Pi for a workspace in a new Ghostty tab. It runs `piw` in the selected directory with the supplied initial prompt.
 
-Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `merge`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new` and `merge` options, and local `--from` refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
+The picker's `New workspace…` action creates a managed worktree.
+
+Workspace names and descriptions identify purpose. They do not change branch identity or the Pi session name. The picker shows labels with the branch name so that each choice remains identifiable. Labels must be single-line text without control characters. The extension trims surrounding spaces.
+
+Local and global `piw` lists include a `NAME` column when a listed workspace has a name and a `DESCRIPTION` column when a listed workspace has a description. Each column appears only when at least one listed workspace has that label.
+
+Run `/workspace --help` or `/ws -h` to show runtime syntax. Both aliases accept either exact help flag. Help does not open the picker. Argument completion offers `new`, `describe`, `merge`, `prune`, and `--worktree`. It also offers local branch and known pull request targets, valid `new`, `describe`, and `merge` options, and local `--from` refs. It does not complete label values as branches or refs. Type `branch:` to complete an explicit local branch target. Completion uses local Git and workspace state only.
 
 Without `--from`, `/ws new <branch>` and `piw new <branch>` use only `refs/heads/main`. They fail when that local branch is absent. They do not fetch or use `origin/main`. The workspace records the local base branch and its initial commit for merge checks.
 
@@ -38,9 +48,13 @@ The picker reads local Git, session, and lease state only. It does not call `gh`
 - `branch` is the required new local branch name.
 - `cwd` is an optional directory in the target repository. It defaults to the current directory.
 - `from` is an optional local base ref. It defaults to `main`.
+- `name` is an optional workspace name.
+- `description` is an optional workspace purpose.
 - `pm` is an optional path to the root of an existing PM Git worktree. Relative paths use `cwd`. The tool creates `../pm` as a symlink to that worktree. The symlink is removed with the workspace. Its target is not removed.
 
-The tool always creates an inactive managed workspace, equivalent to `/ws new <branch> --worktree`, and returns its source directory. On macOS, call `launch_pi` with that directory to start its bound Pi session. On Linux, run `piw` in that directory.
+The tool always creates an inactive managed workspace, equivalent to `/ws new <branch>`, and returns its source directory. On macOS, call `launch_pi` with that directory to start its bound Pi session. On Linux, run `piw --current` in that directory.
+
+`workspace_link_pr` links an existing GitHub PR to the active workspace. Its `pr` parameter accepts a PR URL or number. The tool is available only when Pi owns the workspace. The `publish-pr` skill calls it after PR creation. The PR must use the same repository and head branch. Linking preserves the checkout, session, labels, and lease. A different existing PR link is not replaced.
 
 ## Prompt guidance
 
@@ -48,21 +62,30 @@ When Pi owns a valid workspace, the extension appends stable coding guidance to 
 
 ## Launcher
 
+Run `piw --help` or `piw -h` for command forms, options, and examples. Help does not start Pi or change workspace state.
+
 ```bash
-piw                         # Use the branch in this checkout
+piw                         # List local workspaces, or all known workspaces
+piw --global                # List all known workspaces from any directory
+piw --local                 # List only this repository's workspaces
+piw --current               # Start Pi on the branch in this checkout
 piw feature/example         # Use a branch workspace
 piw '#123'                  # Use a pull request workspace
 piw --worktree feature/example
-piw new feature/example --worktree
-piw new feature/example --from current --worktree
+piw new feature/example     # Create a branch in a managed worktree
+piw new feature/serial --no-worktree # Create a branch in the primary checkout
+piw new feature/example --from current
+piw new feature/example --from current --name "Auth review" --description "Review sign-in changes"
+piw describe feature/example --name "Auth review" --description "Review sign-in changes"
+piw describe feature/example --name "" # Clear the workspace name
 piw prune                   # Remove workspaces for deleted remote branches
-piw --list                  # Show local workspace status
-piw -- --model anthropic/claude-sonnet-4-5
-piw --profile hari feature/example -- --no-extensions -e /path/to/hari
+piw --list                  # Use the same list scope as bare piw
+piw --current -- --model anthropic/claude-sonnet-4-5
+piw --profile custom feature/example -- --no-extensions -e /path/to/extension
 piw --expect-session /absolute/path/to/session.jsonl feature/example
 ```
 
-Put Pi arguments after `--`. All `piw` lanes reject forwarded session options. The ordinary lane also rejects extension-disable options. `piw new <branch>` creates a branch workspace. Add `--worktree` to create it in a managed worktree. Bare `piw` uses the branch checked out in its current directory. Run `piw` from any repository path to resume that branch workspace. A plain `pi` session remains independent and does not change workspace bindings unless you run `/ws`.
+Put Pi arguments after `--`. All `piw` lanes reject forwarded session options. The ordinary lane also rejects extension-disable options. `piw new <branch>` creates a branch in a managed worktree by default. Add `--no-worktree` after `new` to create it in the primary checkout instead. The explicit `--worktree` option remains supported. Do not combine `--worktree` and `--no-worktree`. Add `--name` or `--description` to set workspace labels at creation. Use `piw describe [branch] --name <text>` or `piw describe [branch] --description <text>` to update an existing workspace on a local branch. The branch must already have workspace state; omit it to use the current branch. An empty quoted value clears that label. Bare `piw` lists workspaces. Use an explicit branch or PR target, or run `piw --current` from a repository path, to start Pi. `--global` and `--local` apply only to listing and can be combined with `--list`. A plain `pi` session remains independent and does not change workspace bindings unless you run `/ws`. You can start `pi` outside a Git worktree; workspace activation is skipped.
 
 ### Profile forwarding
 
@@ -95,27 +118,33 @@ Noninteractive `piw <PR>` fails when this choice is needed. It does not reset th
 
 ## Storage and safety
 
-Pi keeps session files in its normal session directory. New, forked, and bound sessions without a user name use the branch name as their display name. A user-defined name is preserved.
+The global repository index is at `<agent-dir>/workspace-repositories`, where `<agent-dir>` defaults to `~/.pi/agent`. `PI_CODING_AGENT_DIR` changes this location. The extension records repositories when it saves workspace bindings. A local list also records existing workspaces, so run `piw` once in each repository to add older bindings. The index has one atomic file per Git common directory. It stores repository paths, not workspace copies. Global lists read current Git, session, and lease state without network calls. Branch renames and workspace removal appear in the next list. Missing repositories and invalid index entries are skipped. Other repository errors are shown without blocking the remaining list. An index write error does not prevent workspace activation.
 
-The extension stores only these workspace keys in shared local Git config:
+Pi keeps session files in its normal session directory. New, forked, and bound sessions without a user name use the branch name as their display name. A user-defined name is preserved. Workspace labels do not change the Pi session name.
+
+The extension stores workspace bindings and labels in shared local Git config:
 
 - `branch.<branch>.pi-workspace-session` is the central session path.
+- `branch.<branch>.pi-workspace-name` is the optional workspace name.
+- `branch.<branch>.pi-workspace-description` is the optional workspace description.
 - `branch.<branch>.pi-workspace-pr` is the canonical PR URL when the branch is bound.
 - `branch.<branch>.pi-workspace-base` is the local base branch when it is known.
 - `branch.<branch>.pi-workspace-base-oid` is the base commit at workspace creation.
 - `branch.<branch>.pi-workspace-merge-cleanup` is temporary recovery state after a workspace merge.
 - `pi-workspace.last` is the last branch name.
 
-Session headers and `pi-workspace` custom session metadata contain the detailed workspace validation data. Git branch rename moves branch-scoped config bindings. Lease names use the central session path, so a rename keeps its live lease. Managed worktrees are at `<repo>/.ws/<12-character-branch-hash>/src`. The extension initializes an empty Git repository at the sibling `pm` path for durable project records. When `create_workspace` gets `pm`, that sibling path is a symlink to the specified existing PM worktree. While its workspace is active, the `workspace-pm` skill is available for plans, tasks, decisions, and related records. It adds `/.ws/` to `.git/info/exclude`. Lease files remain below `<git-common-dir>/pi-workspaces/.state`. A private Git ref provides the operation lock.
+Session headers and `pi-workspace` custom session metadata contain the detailed workspace validation data. Labels are branch config, not branch identity. Git branch rename moves branch-scoped config, including labels. Clearing a label removes its config value. `piw describe` and `/ws describe` update labels only; they do not launch or switch Pi, change a session name, or alter leases or sessions. Lease names use the central session path, so a rename keeps its live lease. New managed worktrees are at `<git-common-dir>/pi-workspaces/<12-character-branch-hash>/src`. The extension initializes an empty Git repository at the sibling `pm` path for durable project records. When `create_workspace` gets `pm`, that sibling path is a symlink to the specified existing PM worktree. While its workspace is active, the `workspace-pm` skill is available for plans, tasks, decisions, and related records. New workspaces need no Git exclude entry. Lease files remain below `<git-common-dir>/pi-workspaces/.state`. A private Git ref provides the operation lock.
 
 `/ws prune` and `piw prune` first check the recorded local base branch. They recognize a normal merge by Git ancestry. They recognize an exact squash merge by comparing the complete source patch with commits on the base branch. If local integration is not proven, they use `git ls-remote` to check each managed branch. They use its configured remote, `origin`, or the only configured remote. They skip active or dirty workspaces when neither local integration nor remote deletion is proven. Pruning removes the `src` worktree, its sibling `pm` repository or symlink, and the workspace binding. It preserves the local branch, Pi session, and any external PM worktree.
 
-`git clean -ffdx` can remove ignored `.ws` workspaces. Do not run it when you need those workspaces.
+In a normal checkout, the Git common directory is `<repo>/.git`. Search tools that skip `.git` do not show managed workspaces when run from the primary checkout. Options such as `rg --hidden` can include these files. Search from the workspace's `src` directory to include its source files. `git clean -ffdx` from the primary checkout does not remove these workspaces.
+
+Existing `<repo>/.ws/<12-character-branch-hash>/src` workspaces remain supported at their recorded paths. The extension does not move them or change their session paths. It preserves existing `/.ws/` exclude entries. `git clean -ffdx` can still remove these older workspaces. Do not run it when you need them.
 
 The extension validates session cwd and workspace metadata before reuse. It adds workspace metadata to active Pi sessions before it maps them. A live lease prevents another process from changing the same checkout, including serial primary workspaces. It can repair a stale branch session mapping when its checkout is usable.
 
-The extension refuses branch changes when the target checkout has staged, unstaged, untracked, dirty-submodule, merge, or rebase state. It does not stash. It does not reset a trusted PR branch without the explicit reset action. It uses `gh pr view` and `gh pr checkout` only for explicit pull request targets. GitHub CLI authentication and normal GitHub CLI behavior still apply.
+The extension refuses branch changes when the target checkout has staged, unstaged, untracked, dirty-submodule, merge, or rebase state. It does not stash. It does not reset a trusted PR branch without the explicit reset action. It uses `gh pr view` for explicit pull request targets and PR links. It uses `gh pr checkout` only for explicit pull request targets. GitHub CLI authentication and normal GitHub CLI behavior still apply.
 
 ## Limits
 
-The extension supports macOS and Linux. `launch_pi` requires macOS and Ghostty. `/ws` requires Pi TUI mode. It requires Git. It requires GitHub CLI only for explicit pull request targets. It cannot recover a lease when it cannot prove that the recorded local process has ended. Remove such state only after you verify that no Pi session owns the workspace.
+The extension supports macOS and Linux. `launch_pi` requires macOS and Ghostty. `/ws` requires Pi TUI mode. It requires Git. It requires GitHub CLI only for explicit pull request targets and PR links. It cannot recover a lease when it cannot prove that the recorded local process has ended. Remove such state only after you verify that no Pi session owns the workspace.

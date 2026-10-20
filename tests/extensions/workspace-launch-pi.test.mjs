@@ -32,7 +32,7 @@ function register(options = {}, execResult = { code: 0, stdout: "", stderr: "" }
 test("launch_pi starts piw with a quoted prompt", () => {
   assert.equal(
     buildPiwStartupInput("Continue with 'quoted' text."),
-    "'piw' '--' '--' 'Continue with '\"'\"'quoted'\"'\"' text.'\n",
+    "'piw' '--current' '--' '--' 'Continue with '\"'\"'quoted'\"'\"' text.'\n",
   );
 });
 

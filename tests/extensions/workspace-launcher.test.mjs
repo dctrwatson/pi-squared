@@ -5,6 +5,8 @@ import {
   spawnSync,
   chmod,
   mkdir,
+  mkdtemp,
+  tmpdir,
   utimes,
   writeFile,
   realpath,
@@ -17,6 +19,7 @@ import {
   GitRepository,
   NodeProcessRunner,
   resolveLaunch,
+  parseLauncherArguments,
   picker,
   git,
   gitSucceeds,
@@ -31,7 +34,67 @@ test("launcher advertises prepared-launch validation support", () => {
   assert.deepEqual(WORKSPACE_LAUNCH_CAPABILITIES, { beforeActivate: true });
 });
 
-test("bare piw uses the current branch without gh", async () => {
+test("piw help has separate command forms, defaults, options, and examples", async () => {
+  const plan = await resolveLaunch(["--help"], "/nonexistent/piw-help");
+  assert.equal(plan.action, "help");
+  assert.match(plan.output, /^Usage:\n  piw \[--list\] \[--global \| --local\]\n/);
+  assert.match(plan.output, /\n  piw <target> \[launch options\]/);
+  assert.match(plan.output, /\n  piw --current \[launch options\]/);
+  assert.match(plan.output, /\n  piw new <branch>/);
+  assert.match(plan.output, /\n  piw describe \[branch\] <label options>/);
+  assert.match(plan.output, /List workspaces \(does not start Pi\):/);
+  assert.match(plan.output, /Inside a Git worktree: list this repository's workspaces/);
+  assert.match(plan.output, /Outside a Git worktree: list all known workspaces/);
+  assert.match(plan.output, /--profile <name>[\s\S]*does not load configuration/);
+  assert.match(plan.output, /explicit local branches only/);
+  assert.match(plan.output, /New options \(managed worktree by default\):/);
+  assert.match(plan.output, /--no-worktree\s+Create the branch in the primary checkout instead/);
+  assert.match(plan.output, /default: local main/);
+  assert.match(plan.output, /Set one or both labels/);
+  assert.match(plan.output, /empty quoted value \(""\) to clear a label/);
+  assert.match(plan.output, /Examples:\n/);
+  assert.match(plan.output, /piw '#123'/);
+  assert.match(plan.output, /piw --current -- --model/);
+  assert.ok(plan.output.trimEnd().split("\n").every((line) => line.length <= 80));
+});
+
+test("piw help exits successfully outside a repository without Git, gh, or Pi", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "piw-help-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fakeBin = join(root, "bin");
+  await mkdir(fakeBin);
+  for (const command of ["git", "gh", "pi"]) {
+    await writeFile(join(fakeBin, command), `#!/usr/bin/env bash\necho ${command}-called >&2\nexit 91\n`);
+    await chmod(join(fakeBin, command), 0o755);
+  }
+  let output;
+  for (const flag of ["--help", "-h"]) {
+    assert.deepEqual(parseLauncherArguments([flag]), { parallel: false, help: true, piArgs: [] });
+    const result = spawnSync(resolve(process.cwd(), "bin/piw"), [flag], {
+      cwd: root,
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
+      encoding: "utf8",
+    });
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.match(result.stdout, /^Usage:\n/);
+    assert.ok(result.stdout.endsWith("\n"));
+    if (output !== undefined) assert.equal(result.stdout, output);
+    output = result.stdout;
+  }
+});
+
+test("piw forwards help after -- to Pi", () => {
+  for (const flag of ["--help", "-h"]) {
+    assert.deepEqual(parseLauncherArguments(["--current", "--", flag]), {
+      parallel: false, current: true, piArgs: [flag],
+    });
+  }
+});
+
+test("piw --current uses the current branch without gh", async () => {
   const root = await repository();
   try {
     git(root, "checkout", "-b", "current");
@@ -50,6 +113,7 @@ test("bare piw uses the current branch without gh", async () => {
     const plan = JSON.parse(execFileSync(process.execPath, [
       "--experimental-strip-types",
       resolve(process.cwd(), "extensions/workspace/launcher.ts"),
+      "--current",
     ], {
       cwd: root,
       env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}` },
@@ -93,7 +157,7 @@ test("piw --list reports local workspace status without starting Pi", async () =
   }
 });
 
-test("default piw reports an active current workspace with its PID and cwd", async () => {
+test("bare piw lists an active workspace without starting Pi", async () => {
   const root = await repository();
   try {
     git(root, "checkout", "-b", "first");
@@ -106,8 +170,13 @@ test("default piw reports an active current workspace with its PID and cwd", asy
       "--experimental-strip-types",
       resolve(process.cwd(), "extensions/workspace/launcher.ts"),
     ], { cwd: root, encoding: "utf8" });
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, new RegExp(`Workspace first is active in another Pi session|first \\(PID ${process.pid}, `));
+    assert.equal(result.status, 0);
+    const plan = JSON.parse(result.stdout);
+    assert.equal(plan.action, "list");
+    assert.ok(plan.output.includes(`active (PID ${process.pid})`));
+    assert.ok(plan.output.includes(first.record.cwd));
+    assert.equal((await first.state.readLease(first.record.session))?.pid, process.pid);
+    assert.equal(git(root, "branch", "--show-current"), "first");
   } finally {
     await removeRepository(root);
   }
@@ -140,14 +209,14 @@ test("a profile forwards explicit Pi resources with the workspace session", asyn
     const { state, record } = await mapWorkspace(service, sessions, "feature", root);
 
     const plan = await resolveLaunch([
-      "--profile", "hari", "feature", "--", "--no-extensions", "-e", "/opt/hari/extension",
+      "--profile", "custom", "feature", "--", "--no-extensions", "-e", "/opt/custom/extension",
       "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files",
     ], root);
 
     assert.equal(plan.action, "launch");
     assert.equal(plan.session, record.session);
     assert.deepEqual(plan.args, [
-      "--no-extensions", "-e", "/opt/hari/extension", "--no-skills",
+      "--no-extensions", "-e", "/opt/custom/extension", "--no-skills",
       "--no-prompt-templates", "--no-themes", "--no-context-files",
     ]);
     assert.equal((await state.readLease(record.session))?.pid, process.pid);
@@ -168,12 +237,12 @@ test("beforeActivate receives the prepared binding and rejects before workspace 
     const { state, record } = await mapWorkspace(service, sessions, "feature", prepared);
     const preparedCwd = await realpath(prepared);
 
-    await assert.rejects(resolveLaunch(["--profile", "hari", "feature"], prepared, {
+    await assert.rejects(resolveLaunch(["--profile", "custom", "feature"], prepared, {
       beforeActivate: async (candidate) => {
         assert.deepEqual(candidate, { branch: "feature", cwd: preparedCwd, session: record.session });
-        throw new Error("Hari rejected the candidate");
+        throw new Error("Profile rejected the candidate");
       },
-    }), /Hari rejected the candidate/);
+    }), /Profile rejected the candidate/);
 
     assert.equal(git(root, "branch", "--show-current"), "main");
     assert.equal(git(prepared, "branch", "--show-current"), "feature");
@@ -195,9 +264,9 @@ test("beforeActivate rejects an unbound prepared branch without creating workspa
     await assert.rejects(resolveLaunch(["feature"], root, {
       beforeActivate: async (candidate) => {
         assert.deepEqual(candidate, { branch: "feature", cwd: preparedCwd });
-        throw new Error("Hari rejected an unbound candidate");
+        throw new Error("Profile rejected an unbound candidate");
       },
-    }), /Hari rejected an unbound candidate/);
+    }), /Profile rejected an unbound candidate/);
 
     assert.equal(await state.getWorkspace("feature"), undefined);
     assert.equal(gitSucceeds(root, "config", "--local", "--get", state.sessionKey("feature")), false);
@@ -413,7 +482,7 @@ test("a live primary lease blocks foreign explicit and bare serial activation", 
     }), /Workspace b is active in another Pi session/);
     assert.equal(git(root, "branch", "--show-current"), "b");
 
-    for (const args of [[], ["a"]]) {
+    for (const args of [["--current"], ["a"]]) {
       const result = spawnSync(process.execPath, [
         "--experimental-strip-types",
         resolve(process.cwd(), "extensions/workspace/launcher.ts"),

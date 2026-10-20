@@ -9,7 +9,16 @@ export interface PullRequest {
     headOid?: string;
 }
 
-export interface WorkspaceRecord {
+export interface WorkspaceLabels {
+    name?: string;
+    description?: string;
+}
+
+export interface WorkspaceDescribeOptions extends WorkspaceLabels {
+    branch?: string;
+}
+
+export interface WorkspaceRecord extends WorkspaceLabels {
     version: 2;
     repository: string;
     branch: string;
@@ -129,7 +138,7 @@ export interface PullRequestDivergence {
 
 export type PullRequestDivergenceChoice = "keep-local" | "fast-forward" | "reset" | "cancel";
 
-export interface NewWorkspaceOptions {
+export interface NewWorkspaceOptions extends WorkspaceLabels {
     branch: string;
     from?: string;
     pm?: string;

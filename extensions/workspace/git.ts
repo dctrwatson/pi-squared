@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -270,22 +270,10 @@ export class GitRepository {
 
     async isManagedWorktree(cwd: string): Promise<boolean> {
         const [resolved, paths] = await Promise.all([canonicalPath(cwd), this.paths()]);
-        const root = resolve(paths.primaryCwd, ".ws");
-        return basename(resolved) === "src" && dirname(dirname(resolved)) === root;
-    }
-
-    async excludeWorkspaceRoot(commonDir: string): Promise<void> {
-        const path = join(commonDir, "info", "exclude");
-        let content = "";
-        try {
-            content = await readFile(path, "utf8");
-        } catch {
-            // The file is created below.
-        }
-        if (content.split(/\r?\n/).includes("/.ws/")) return;
-        await mkdir(dirname(path), { recursive: true });
-        const separator = content && !content.endsWith("\n") ? "\n" : "";
-        await writeFile(path, `${content}${separator}/.ws/\n`);
+        const workspace = dirname(resolved);
+        const root = dirname(workspace);
+        return basename(resolved) === "src" && /^[0-9a-f]{12}$/.test(basename(workspace))
+            && (root === join(paths.commonDir, "pi-workspaces") || root === join(paths.primaryCwd, ".ws"));
     }
 
     async assertClean(cwd: string): Promise<void> {

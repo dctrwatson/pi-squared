@@ -17,6 +17,11 @@ export interface SessionHeader {
     cwd: string;
 }
 
+export interface WorkspaceSessionSnapshot {
+    header: SessionHeader;
+    metadata?: WorkspaceMetadata;
+}
+
 interface ParsedWorkspaceMetadata {
     repository?: unknown;
     branch?: unknown;
@@ -37,6 +42,7 @@ export interface SessionStore {
     bind(session: string, metadata: WorkspaceMetadata): Promise<boolean>;
     rebind?(session: string, metadata: WorkspaceMetadata): Promise<boolean>;
     validate(session: string, metadata: WorkspaceMetadata): Promise<boolean>;
+    validateSnapshot?(current: WorkspaceSessionSnapshot | undefined, metadata: WorkspaceMetadata): Promise<boolean>;
 }
 
 async function writeHeader(path: string, header: SessionHeader | null): Promise<void> {
@@ -103,7 +109,7 @@ export async function workspaceMetadataMatches(left: WorkspaceMetadata, right: W
         && samePullRequest(left.pr, right.pr);
 }
 
-export async function readWorkspaceSession(session: string): Promise<{ header: SessionHeader; metadata?: WorkspaceMetadata } | undefined> {
+export async function readWorkspaceSession(session: string): Promise<WorkspaceSessionSnapshot | undefined> {
     try {
         const content = await readFile(session, "utf8");
         const entries = content.split("\n").filter(Boolean).map((line) => JSON.parse(line) as {
@@ -209,11 +215,14 @@ export class PiSessionStore implements SessionStore {
         return this.validate(session, expected);
     }
 
-    async validate(session: string, expected: WorkspaceMetadata): Promise<boolean> {
-        const current = await readWorkspaceSession(session);
+    async validateSnapshot(current: WorkspaceSessionSnapshot | undefined, expected: WorkspaceMetadata): Promise<boolean> {
         if (!current?.metadata) return false;
         if (await canonicalPath(current.header.cwd) !== await canonicalPath(expected.cwd)) return false;
         return workspaceMetadataMatches(current.metadata, expected);
+    }
+
+    async validate(session: string, expected: WorkspaceMetadata): Promise<boolean> {
+        return this.validateSnapshot(await readWorkspaceSession(session), expected);
     }
 }
 
