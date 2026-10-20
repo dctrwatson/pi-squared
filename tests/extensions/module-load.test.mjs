@@ -18,12 +18,12 @@ test("auto-discoverable extension modules export factory functions", async () =>
   }
 });
 
-test("all Pi extension modules load with the pinned Pi API", async () => {
+test("all active Pi extension modules load with the pinned Pi API", async () => {
   const modules = await Promise.all([
     import("../../extensions/subagents/index.ts"),
     import("../../extensions/qa.ts"),
     import("../../extensions/handoff.ts"),
-    import("../../extensions/skill-loader.ts"),
+    import("../../extensions/bundle-loader.ts"),
     import("../../extensions/prevent-idle.ts"),
     import("../../extensions/interactive-shell.ts"),
     import("../../extensions/workspace/index.ts"),

@@ -9,8 +9,9 @@ Requires Pi 1.2.0 or newer and Node.js 22.19.0 or newer.
 Run `npm run check` to check TypeScript. Run `npm run test:quick` for the
 extension quick suite. Run `npm test` for all extension and skill tests.
 
-See the [production audit gate](docs/production-audit.md) and
-[model context map](docs/model-context.md).
+See the [production audit gate](docs/production-audit.md),
+[model context map](docs/model-context.md), and
+[bundle-loader reference](docs/bundle-loader.md).
 
 ## Skills
 
@@ -38,7 +39,7 @@ Repository-defined Pi harness tools use `snake_case` inputs. Their result detail
 - [**subagents**](extensions/subagents/README.md) — Runs subagent Pi sessions with separate conversation context, shared host authority, normal Pi tool access, bundled agent tools and sleep prevention, selectable lifetimes, explicit blocker handoffs, and human controls.
 - [**qa**](extensions/qa.ts) — Extracts questions from assistant responses and presents an interactive wizard for answering them.
 - [**handoff**](extensions/handoff.ts) — Starts a fresh linked session with the latest complete assistant response, or `/handoff generate` creates a compact handoff draft from active context.
-- [**skill-loader**](extensions/skill-loader.ts) — `/skill-loader` chooses temporary skills from roots in `~/.pi/agent/skill-loader.json` and limits selected model-visible metadata to 16,000 characters.
+- [**bundle-loader**](extensions/bundle-loader.ts) — `/bundle` lists read-only state; the user-only `/bundle name` command loads skills and tools. No model-callable loader tool is exposed. See the [bundle-loader reference](docs/bundle-loader.md).
 - [**prevent-idle**](extensions/prevent-idle.ts) — On macOS, holds a `kIOPMAssertionTypePreventUserIdleSystemSleep` assertion through `osascript` while Pi is working, then releases it when the agent settles.
 - [**interactive-shell**](extensions/interactive-shell.ts) — Runs every `!!command` with direct terminal access while Pi's TUI is suspended. Short commands wait for a key after exit. Commands that stay open, such as a pager, return to Pi at exit. Plain `!command` retains normal captured-output behavior.
 - [**workspace**](extensions/workspace/README.md) — Binds Pi sessions to Git branch workspaces, with optional pull requests and managed worktrees. Includes the `piw` launcher.

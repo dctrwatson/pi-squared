@@ -1,0 +1,1 @@
+{"name":"@earendil-works/pi-ai","type":"module","exports":{".":"./index.js","./compat":"./compat.js","./models":"./models.js","./oauth":"./oauth.js","./providers/all":"./providers/all.js","./providers/*":"./providers/*.js"}}

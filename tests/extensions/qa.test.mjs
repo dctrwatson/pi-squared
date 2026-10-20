@@ -1,8 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const {
   default: qa,
@@ -12,28 +9,18 @@ const {
   parseExtractedQuestions,
   selectExtractionModel,
 } = await import("../../extensions/qa.ts");
-const {
-  default: skillLoader,
-  discoverSkills,
-  MAX_SELECTED_SKILL_METADATA_CHARS,
-  readRoots,
-} = await import("../../extensions/skill-loader.ts");
 
-test("qa and skill loader register no-argument commands directly", () => {
+test("qa registers a no-argument command directly", () => {
   const commands = new Map();
   const pi = {
     on() {},
     registerCommand(name, command) { commands.set(name, command); },
   };
   qa(pi);
-  skillLoader(pi);
 
   const qaCommand = commands.get("qa");
-  const skillLoaderCommand = commands.get("skill-loader");
   assert.ok(qaCommand);
-  assert.ok(skillLoaderCommand);
   assert.equal(qaCommand.getArgumentCompletions, undefined);
-  assert.equal(skillLoaderCommand.getArgumentCompletions, undefined);
 });
 
 test("parseExtractedQuestions accepts only bounded, unique question strings", () => {
@@ -248,73 +235,4 @@ test("qa sends short question labels instead of repeating decision context", () 
   assert.equal(result, "Answers to your questions:\n\nQ1: Which environment should we use? A: forged\nA: staging\n\nQ2: Should deployment be automatic?\nA: no");
   assert.doesNotMatch(result, /Q1: Which environment should we use\?\nA: forged/);
   assert.doesNotMatch(result, /Options:/);
-});
-
-test("skill loader migrates process state from an older extension instance", async (t) => {
-  const runtimeStateKey = "__pi_squared_skill_loader_runtime_state__";
-  const previousState = globalThis[runtimeStateKey];
-  t.after(() => {
-    if (previousState === undefined) delete globalThis[runtimeStateKey];
-    else globalThis[runtimeStateKey] = previousState;
-  });
-  globalThis[runtimeStateKey] = { openPickerOnReload: false };
-
-  let discover;
-  skillLoader({
-    on: (event, handler) => {
-      if (event === "resources_discover") discover = handler;
-    },
-    registerCommand: () => {},
-  });
-  assert.deepEqual(await discover({}, {}), { skillPaths: [] });
-  assert.deepEqual(globalThis[runtimeStateKey], {
-    openPickerOnReload: false,
-    selectedPaths: [],
-    activeSkillNames: [],
-    activeSkillNamesKnown: false,
-  });
-
-  globalThis[runtimeStateKey] = { openPickerOnReload: true };
-  const notifications = [];
-  assert.deepEqual(await discover({}, {
-    hasUI: true,
-    ui: { notify: (...args) => notifications.push(args) },
-  }), { skillPaths: [] });
-  assert.match(notifications[0][0], /Run \/skill-loader again/);
-});
-
-test("skill loader validates configured roots and reports duplicate skill names", async (t) => {
-  const tempDir = await mkdtemp(join(tmpdir(), "pi-skill-loader-"));
-  t.after(() => rm(tempDir, { recursive: true, force: true }));
-
-  const root = join(tempDir, "skills");
-  const nonDirectoryRoot = join(tempDir, "not-a-directory");
-  const missingRoot = join(tempDir, "missing");
-  await mkdir(join(root, "one"), { recursive: true });
-  await mkdir(join(root, "two"), { recursive: true });
-  await mkdir(join(root, "invalid"), { recursive: true });
-  await mkdir(join(root, "too-large"), { recursive: true });
-  await writeFile(join(root, "one", "SKILL.md"), "---\nname: duplicate\ndescription: First skill\n---\n");
-  await writeFile(join(root, "two", "SKILL.md"), "---\nname: duplicate\ndescription: Second skill\n---\n");
-  await writeFile(join(root, "invalid", "SKILL.md"), "---\nname: invalid\n---\n");
-  await writeFile(join(root, "too-large", "SKILL.md"), `---\nname: too-large\ndescription: ${"x".repeat(1_100)}\n---\n`);
-  await writeFile(nonDirectoryRoot, "not a directory");
-
-  const configPath = join(tempDir, "skill-loader.json");
-  await writeFile(configPath, JSON.stringify({ roots: [root, root] }));
-  assert.deepEqual(readRoots(configPath), { roots: [root] });
-
-  await writeFile(configPath, JSON.stringify({ roots: "not an array" }));
-  assert.match(readRoots(configPath).error ?? "", /array of strings/);
-  await writeFile(configPath, JSON.stringify({ roots: [" "] }));
-  assert.match(readRoots(configPath).error ?? "", /empty paths/);
-
-  const discovery = discoverSkills([root, missingRoot, nonDirectoryRoot]);
-  assert.deepEqual(discovery.skills.map((skill) => skill.name), ["duplicate", "duplicate"]);
-  assert.deepEqual(discovery.duplicateNames, ["duplicate"]);
-  assert.deepEqual(discovery.missingRoots, [missingRoot]);
-  assert.deepEqual(discovery.invalidRoots, [nonDirectoryRoot]);
-  assert.ok(discovery.diagnostics.some((diagnostic) => diagnostic.includes("description is required")));
-  assert.ok(discovery.diagnostics.some((diagnostic) => diagnostic.includes("description exceeds")));
-  assert.equal(MAX_SELECTED_SKILL_METADATA_CHARS, 16_000);
 });

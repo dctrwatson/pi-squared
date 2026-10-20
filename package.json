@@ -55,6 +55,7 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.28"
+    "@cursor/sdk": "1.0.28",
+    "jiti": "2.7.0"
   }
 }

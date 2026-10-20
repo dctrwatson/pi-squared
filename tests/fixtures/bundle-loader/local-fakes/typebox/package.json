@@ -1,0 +1,1 @@
+{"name":"typebox","type":"module","exports":{".":"./index.js","./compile":"./compile/index.js","./guard":"./guard/index.js","./value":"./value/index.js"}}

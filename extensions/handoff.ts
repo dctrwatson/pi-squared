@@ -44,6 +44,7 @@ Rules:
 
 export const HANDOFF_MAX_TOKENS = 4_096;
 const HANDOFF_GENERATION_REQUEST = "Create the handoff now.";
+const HANDOFF_BUNDLE_ACTIVATION_NOTE = "Bundle activation does not carry into the new session; do not auto-activate any bundle there.";
 const HANDOFF_HELP_TEXT = `Usage: /handoff [generate]
 
 Default (verbatim): Transfer the last complete assistant response.
@@ -125,11 +126,11 @@ export function buildHandoffGenerationMessages(
 function buildGenerationMessages(ctx: ExtensionCommandContext): Message[] {
     const temporarySkills = (ctx.getSystemPromptOptions().skills ?? [])
         .filter((skill) =>
-            skill.sourceInfo.source === "extension:skill-loader" && !skill.disableModelInvocation)
+            skill.sourceInfo.source === "extension:bundle-loader" && !skill.disableModelInvocation)
         .map((skill) => ({ name: skill.name, path: skill.filePath }));
     const request = temporarySkills.length === 0
-        ? HANDOFF_GENERATION_REQUEST
-        : `${HANDOFF_GENERATION_REQUEST}\n\nTemporary skill metadata, encoded as JSON: ${JSON.stringify(temporarySkills)}\nThese skills do not carry into the new session. Include only relevant skills in the handoff, with an instruction to read the given path on demand.`;
+        ? `${HANDOFF_GENERATION_REQUEST}\n\n${HANDOFF_BUNDLE_ACTIVATION_NOTE}`
+        : `${HANDOFF_GENERATION_REQUEST}\n\nTemporary bundle skill metadata, encoded as JSON: ${JSON.stringify(temporarySkills)}\n${HANDOFF_BUNDLE_ACTIVATION_NOTE} Include only relevant skills in the handoff, with an instruction to read the given path on demand.`;
     return buildHandoffGenerationMessages(ctx.sessionManager.buildSessionProjection().messages, request);
 }
 

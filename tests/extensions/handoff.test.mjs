@@ -164,14 +164,20 @@ test("generated handoffs dispatch through the model runtime without retaining ca
         {
           name: "temporary-review",
           filePath: "/skills/temporary-review/SKILL.md",
-          sourceInfo: { source: "extension:skill-loader" },
+          sourceInfo: { source: "extension:bundle-loader" },
           disableModelInvocation: false,
         },
         {
           name: "command-only",
           filePath: "/skills/command-only/SKILL.md",
-          sourceInfo: { source: "extension:skill-loader" },
+          sourceInfo: { source: "extension:bundle-loader" },
           disableModelInvocation: true,
+        },
+        {
+          name: "legacy-skill-loader",
+          filePath: "/skills/legacy-skill-loader/SKILL.md",
+          sourceInfo: { source: "extension:skill-loader" },
+          disableModelInvocation: false,
         },
       ],
     }),
@@ -199,11 +205,43 @@ test("generated handoffs dispatch through the model runtime without retaining ca
   assert.equal(request[1].messages[0].content, "Edited request");
   assert.match(request[1].messages.at(-1).content[0].text, /temporary-review/);
   assert.doesNotMatch(request[1].messages.at(-1).content[0].text, /command-only/);
-  assert.match(request[1].messages.at(-1).content[0].text, /do not carry into the new session/i);
+  assert.doesNotMatch(request[1].messages.at(-1).content[0].text, /legacy-skill-loader/);
+  assert.match(request[1].messages.at(-1).content[0].text, /activation does not carry into the new session/i);
+  assert.match(request[1].messages.at(-1).content[0].text, /do not auto-activate any bundle/i);
   assert.equal(request[2].signal, signal);
   assert.equal(request[2].cacheRetention, "none");
   assert.equal(request[2].maxTokens, Math.min(HANDOFF_MAX_TOKENS, model.maxTokens));
   assert.match(request[2].sessionId, /^[0-9a-f-]+$/);
+});
+
+test("generated handoffs forbid automatic activation for tools-only bundles", async () => {
+  const model = { provider: "synthetic-provider", id: "handoff-test", maxTokens: 1_024 };
+  let request;
+  const text = await generateHandoffText({
+    getSystemPromptOptions: () => ({ skills: [] }),
+    sessionManager: {
+      buildSessionProjection: () => ({ messages: [
+        { role: "user", content: "Continue this task.", timestamp: 0 },
+      ] }),
+    },
+    modelRegistry: {
+      complete: async (...args) => {
+        request = args;
+        return {
+          role: "assistant",
+          content: [{ type: "text", text: "Generated handoff" }],
+          stopReason: "stop",
+          timestamp: Date.now(),
+        };
+      },
+    },
+  }, model, new AbortController().signal);
+
+  assert.equal(text, "Generated handoff");
+  const requestText = request[1].messages.at(-1).content[0].text;
+  assert.equal(requestText, `Create the handoff now.
+
+Bundle activation does not carry into the new session; do not auto-activate any bundle there.`);
 });
 
 test("generated handoffs honor Pi context edits without changing the original transcript", async () => {
